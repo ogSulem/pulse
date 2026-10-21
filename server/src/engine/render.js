@@ -15,7 +15,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { buildScene, buildCover, PALETTES, hash, fontsReady, sanitize } from './scene.js';
+import { buildBackground, buildTextOverlay, buildCover, PALETTES, hash, fontsReady, sanitize } from './scene.js';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -26,9 +26,23 @@ try { sharp = require('sharp'); } catch { sharp = null; }
 let ffmpegPath = null;
 try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; } catch { ffmpegPath = null; }
 
-const W = Number(process.env.PULSE_RENDER_W || 720);
+// Рилсы и TikTok — это вертикаль 1080×1920. Именно в этом разрешении площадки
+// принимают видео без апскейла, поэтому «по умолчанию» рендерим нативно.
+// На слабом VPS можно включить PULSE_RENDER_QUALITY=fast (720p) или задать ширину.
+const QUALITY = process.env.PULSE_RENDER_QUALITY || 'high';
+const QUALITY_PRESETS = {
+  high: { width: 1080, fps: 30, crf: 19, preset: 'veryfast', audio: '192k' },
+  balanced: { width: 1080, fps: 30, crf: 22, preset: 'veryfast', audio: '160k' },
+  fast: { width: 720, fps: 30, crf: 23, preset: 'veryfast', audio: '128k' },
+};
+const QP = QUALITY_PRESETS[QUALITY] || QUALITY_PRESETS.high;
+
+const W = Number(process.env.PULSE_RENDER_W || QP.width);
 const H = Math.round((W * 16) / 9);
-const FPS = Number(process.env.PULSE_RENDER_FPS || 25);
+const FPS = Number(process.env.PULSE_RENDER_FPS || QP.fps);
+const CRF = Number(process.env.PULSE_RENDER_CRF || QP.crf);
+const PRESET = process.env.PULSE_RENDER_PRESET || QP.preset;
+const AUDIO_BITRATE = process.env.PULSE_RENDER_AUDIO || QP.audio;
 const MAX_TOTAL_SEC = Number(process.env.PULSE_RENDER_MAX_SEC || 42);
 const RENDER_ENABLED = String(process.env.PULSE_RENDER || 'auto') !== 'off';
 
@@ -48,6 +62,8 @@ export function renderInfo() {
     width: W,
     height: H,
     fps: FPS,
+    quality: QUALITY,
+    crf: CRF,
   };
 }
 
@@ -154,21 +170,27 @@ async function renderOne({ episode, project, scenes, handle, audioPath }) {
   }
   total = Math.max(3, Math.round(total * 10) / 10);
 
-  const pngs = [];
+  // ── слои ──────────────────────────────────────────────────────────────────
+  // Фон рисуется один раз на весь ролик, текст — отдельными прозрачными
+  // слоями. Камера двигается по фону, текст сменяется кроссфейдом: так
+  // сцены не «складываются» друг с другом и кадр остаётся читаемым.
+  const bgPng = path.join(workDir, 'bg.png');
+  await rasterize(buildBackground({
+    palette, projectName, handle, aiLabel: true, seed: episode.id,
+  }), bgPng, 'png', W);
+
+  const layers = [];
   for (const [i, scene] of timed.entries()) {
-    const svg = buildScene({
+    const svg = buildTextOverlay({
       text: scene.text,
       index: i,
       total: timed.length,
       title: episode.title,
-      projectName,
-      handle,
       palette,
-      aiLabel: true,
     });
-    const png = path.join(workDir, `scene-${i}.png`);
+    const png = path.join(workDir, `text-${i}.png`);
     await rasterize(svg, png, 'png', W);
-    pngs.push(png);
+    layers.push(png);
   }
 
   // обложки A/B — разные палитры и композиция
@@ -190,37 +212,78 @@ async function renderOne({ episode, project, scenes, handle, audioPath }) {
   }
 
   const videoAbs = path.join(MEDIA_DIR, `${id}.mp4`);
+  const n = layers.length;
 
-  const inputs = [];
-  pngs.forEach((png, i) => inputs.push(['-loop', '1', '-t', String(timed[i]?.seconds || 5), '-i', png]));
-  const audioIndex = pngs.length;
-  if (audioPath && fs.existsSync(audioPath)) inputs.push(['-i', audioPath]);
-  else inputs.push(['-f', 'lavfi', '-t', String(total), '-i', 'anullsrc=r=44100:cl=stereo']);
+  // текстовые слои меняются «жёстким монтажом»: сцена появляется за 2 кадра
+  // и исчезает за 2 кадра. Никакого наложения двух мыслей в одном кадре.
+  const TD = 0.07;
+  const totalSec = Math.max(2, timed.reduce((a, t) => a + (t.seconds || 4), 0));
+
+  const hasAudio = Boolean(audioPath && fs.existsSync(audioPath));
+
+  // входы: [0] фон, [1..n] текстовые слои, [n+1] звук
+  const inputs = [['-loop', '1', '-t', String(totalSec + 1), '-i', bgPng]];
+  layers.forEach((png, i) => inputs.push(['-loop', '1', '-t', String(timed[i].seconds || 4), '-i', png]));
+  if (hasAudio) inputs.push(['-i', audioPath]);
+  else inputs.push(['-f', 'lavfi', '-t', String(totalSec + 1), '-i', 'anullsrc=r=48000:cl=stereo']);
+  const audioIndex = inputs.length - 1;
 
   const filter = [];
-  pngs.forEach((_, i) => {
-    const d = timed[i].seconds;
-    const frames = Math.max(2, Math.round(d * FPS));
-    filter.push(
-      `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},` +
-      `zoompan=z='min(1.08,1+0.08*on/${frames})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${W}x${H}:fps=${FPS},` +
-      `fade=t=in:st=0:d=0.28,fade=t=out:st=${Math.max(0.3, d - 0.3)}:d=0.28,setsar=1,format=yuv420p[v${i}]`
-    );
-  });
-  const concatIn = pngs.map((_, i) => `[v${i}]`).join('');
-  filter.push(`${concatIn}concat=n=${pngs.length}:v=1:a=0[vout]`);
+  // фон: медленный наезд камеры на всём протяжении ролика
+  const bgFrames = Math.max(2, Math.round(totalSec * FPS));
+  filter.push(
+    `[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,` +
+    `zoompan=z='min(1.07,1+0.07*on/${bgFrames})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${W}x${H}:fps=${FPS},` +
+    `format=yuv420p[bg]`
+  );
 
-  await runFfmpeg([
+  // текстовые слои: сдвиг на позицию в таймлайне + плавное появление
+  let cursor = 0;
+  for (let i = 0; i < n; i++) {
+    const d = timed[i].seconds || 4;
+    const start = cursor;
+    // слой существует ровно свою сцену; до начала и после конца — прозрачность,
+    // поэтому тексты физически не могут наложиться друг на друга
+    const padBefore = start;
+    const padAfter = Math.max(0.1, totalSec - start - d + 0.25);
+    // появление начинается чуть раньше стыка, а исчезновение заканчивается
+    // ровно на стыке: в кадре никогда не бывает «пустого» фона между сценами
+    const fadeInStart = Math.max(0, start - (i === 0 ? 0 : TD));
+    const fadeIn = i === 0 ? 0.3 : TD;
+    const fadeOut = i === n - 1 ? 0.35 : TD;
+    const fadeOutStart = i === n - 1 ? Math.max(0.1, start + d - fadeOut) : Math.max(fadeInStart + 0.05, start + d - fadeOut);
+    filter.push(
+      `[${i + 1}:v]format=rgba,` +
+      `tpad=start_duration=${padBefore.toFixed(3)}:start_mode=add:stop_duration=${padAfter.toFixed(3)}:stop_mode=add:color=0x00000000,` +
+      `fade=t=in:st=${fadeInStart.toFixed(3)}:d=${fadeIn.toFixed(2)}:alpha=1,` +
+      `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeOut.toFixed(2)}:alpha=1` +
+      `[t${i}]`
+    );
+    cursor += d;
+  }
+
+  let prev = 'bg';
+  for (let i = 0; i < n; i++) {
+    const out = i === n - 1 ? 'vtext' : `ov${i}`;
+    filter.push(`[${prev}][t${i}]overlay=0:0:format=auto:eof_action=pass:repeatlast=0[${out}]`);
+    prev = out;
+  }
+  filter.push(`[${prev}]fade=t=out:st=${Math.max(0.3, totalSec - 0.35).toFixed(2)}:d=0.35,format=yuv420p[vout]`);
+
+  const args = [
     ...inputs.flat(),
     '-filter_complex', filter.join(';'),
     '-map', '[vout]',
     '-map', `${audioIndex}:a`,
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
-    '-pix_fmt', 'yuv420p', '-r', String(FPS),
-    '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
-    '-t', String(total), '-shortest', '-movflags', '+faststart',
-    '-y', videoAbs,
-  ]);
+    ...(hasAudio ? ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11'] : []),
+    '-c:v', 'libx264', '-preset', PRESET, '-crf', String(CRF),
+    '-profile:v', 'high', '-level', '4.1', '-g', String(FPS * 2),
+    '-pix_fmt', 'yuv420p', '-r', String(FPS), '-t', String(Math.round(totalSec * 100) / 100),
+    '-c:a', 'aac', '-b:a', AUDIO_BITRATE, '-ar', '48000', '-ac', '2',
+    '-shortest', '-movflags', '+faststart', '-y', videoAbs,
+  ];
+
+  await runFfmpeg(args, 300000);
 
   fs.rmSync(workDir, { recursive: true, force: true });
   const stat = fs.statSync(videoAbs);
@@ -231,11 +294,14 @@ async function renderOne({ episode, project, scenes, handle, audioPath }) {
     videoAbs,
     coverPaths,
     bytes: stat.size,
-    durationSec: Math.round(total * 10) / 10,
+    durationSec: Math.round(totalSec * 10) / 10,
     renderMs: Date.now() - started,
     width: W,
     height: H,
     fps: FPS,
+    quality: QUALITY,
+    crf: CRF,
+    layers: n,
   };
 }
 

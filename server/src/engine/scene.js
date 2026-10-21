@@ -297,6 +297,139 @@ export function buildScene({
 </svg>`;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Слои: фон отдельно, текст отдельно.
+//
+// Так монтируют настоящие ролики: фон идёт одним непрерывным планом (медленный
+// наезд камеры), а текстовые слои сменяются с коротким кроссфейдом. При этом
+// текст двух сцен не «складывается» в нечитаемую кашу, как при кроссфейде
+// целых кадров.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Фон на весь ролик: градиент, свечения, сетка, бренд, хэндл, метка AI. */
+export function buildBackground({
+  palette,
+  projectName = 'PULSE',
+  handle = 'pulse',
+  aiLabel = true,
+  seed = '',
+  grain = false,
+}) {
+  const p = palette || PALETTES[hash(seed) % PALETTES.length];
+  const pad = 88;
+  const safeRight = 168;
+  const angle = (hash(seed) % 70) - 35;
+  const h = hash(seed || 'pulse');
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  ${defs(p, angle)}
+  <rect width="1080" height="1920" fill="url(#bg)"/>
+  <ellipse cx="${160 + (h % 240)}" cy="300" rx="520" ry="460" fill="url(#glowA)" filter="url(#blur)" opacity="0.7"/>
+  <ellipse cx="${820 - (h % 180)}" cy="1620" rx="440" ry="400" fill="url(#glowB)" filter="url(#blur)"/>
+  <g opacity="0.06" stroke="#FFFFFF" stroke-width="1.2">
+    ${Array.from({ length: 9 }, (_, i) => `<line x1="0" y1="${160 + i * 200}" x2="1080" y2="${160 + i * 200}"/>`).join('')}
+  </g>
+  ${grain ? '<rect width="1080" height="1920" filter="url(#grain)" opacity="0.5"/>' : ''}
+  <g fill="rgba(255,255,255,.55)">
+    ${glyphRun(String(projectName || 'PULSE').toUpperCase().slice(0, 24), { size: 28, x: pad, baseline: 132, weight: 'regular', letterSpacing: 5 }).d}
+  </g>
+  <line x1="${pad}" y1="168" x2="${1080 - safeRight}" y2="168" stroke="rgba(255,255,255,.14)" stroke-width="1"/>
+  <g fill="rgba(255,255,255,.7)">
+    ${glyphRun(`@${String(handle || 'pulse').replace(/^@/, '')}`, { size: 28, x: pad, baseline: 1790, weight: 'regular', letterSpacing: 1 }).d}
+  </g>
+  ${aiLabel ? `
+  <g>
+    <rect x="${1080 - safeRight - 150}" y="1758" width="150" height="42" rx="21" fill="rgba(255,255,255,.1)" stroke="rgba(255,255,255,.2)"/>
+    <g fill="rgba(255,255,255,.7)">${glyphRun('AI · PULSE', { size: 20, x: 1080 - safeRight - 130, baseline: 1786, weight: 'regular', letterSpacing: 2 }).d}</g>
+  </g>` : ''}
+</svg>`;
+}
+
+/** Текстовый слой с прозрачным фоном: только контент сцены. */
+export function buildTextOverlay({
+  text,
+  index = 0,
+  total = 1,
+  title = '',
+  palette,
+  layout = null,
+  progress = true,
+  counter = true,
+}) {
+  const p = palette || PALETTES[hash(text) % PALETTES.length];
+  const layoutId = layout ?? ['display', 'stack', 'quote', 'metric'][hash(`${text}${index}`) % 4];
+  const pad = 88;
+  const safeRight = 168;
+  const maxWidth = 1080 - pad - safeRight;
+
+  const sizeStart = layoutId === 'display' ? 124 : 108;
+  const { size, lines } = fitTitle(sanitize(text), { maxWidth, maxLines: 4, start: sizeStart });
+  const lineHeight = size * 1.06;
+  const blockHeight = lines.length * lineHeight;
+
+  const activeDot = Math.min(index, 7);
+  const dots = progress
+    ? Array.from({ length: Math.min(total, 8) }, (_, i) => {
+        const w = i === activeDot ? 54 : 16;
+        const offset = Array.from({ length: i }).reduce((acc, j) => acc + (j === activeDot ? 54 : 16) + 10, 0);
+        return `<rect x="${(pad + offset).toFixed(1)}" y="1728" width="${w}" height="6" rx="3" fill="${i <= activeDot ? p.accent : 'rgba(255,255,255,.2)'}"/>`;
+      }).join('')
+    : '';
+
+  let blockTop;
+  if (layoutId === 'display') blockTop = 1010 - blockHeight / 2;
+  else if (layoutId === 'stack') blockTop = 830 - blockHeight / 2;
+  else if (layoutId === 'quote') blockTop = 900 - blockHeight / 2;
+  else blockTop = 1120 - blockHeight / 2;
+
+  const textPaths = lines.map((line, i) => {
+    const baseline = blockTop + size * 0.82 + i * lineHeight;
+    const run = glyphRun(line, { size, x: pad, baseline, letterSpacing: size * -0.018 });
+    const fill = i === 0 ? 'url(#ink)' : 'rgba(255,255,255,.82)';
+    return `<g fill="${fill}">${run.d}</g>`;
+  }).join('\n    ');
+
+  const accentBar = `<rect x="${pad}" y="${(blockTop + blockHeight + 42).toFixed(1)}" width="${Math.min(340, 120 + (hash(text) % 180))}" height="9" rx="4.5" fill="url(#accent)"/>`;
+
+  let bigNumber = '';
+  if (layoutId === 'metric') {
+    const label = String(index + 1).padStart(2, '0');
+    const nSize = 380;
+    const width = measure(label, { size: nSize, letterSpacing: -14 });
+    bigNumber = `<g opacity="0.1" fill="${p.accent}">${glyphRun(label, { size: nSize, x: 1080 - safeRight - width, baseline: 500, letterSpacing: -14 }).d}</g>`;
+  }
+
+  const quoteMark = layoutId === 'quote'
+    ? `<g opacity="0.16" fill="${p.accent}">${glyphRun('“', { size: 300, x: pad - 14, baseline: blockTop - 40 }).d}</g>`
+    : '';
+
+  // подпись-тема: первые 3 слова заголовка, обрезаем по границе слова,
+  // чтобы в кадре не появлялось «3 ОШИБКИ: КАК ПЕРЕСТАТЬ ОТ»
+  const titleWords = sanitize(title).split(' ').filter(Boolean);
+  const labelText = (titleWords.length > 3 ? `${titleWords.slice(0, 3).join(' ')}…` : titleWords.join(' ')).toUpperCase();
+  const labelUseful = labelText && sanitize(title).toLowerCase() !== sanitize(text).toLowerCase();
+  const stackLabel = layoutId === 'stack' && labelUseful
+    ? `<g opacity="0.9" fill="rgba(255,255,255,.85)">${glyphRun(labelText, { size: 26, x: pad, baseline: blockTop - 54, weight: 'regular', letterSpacing: 4 }).d}</g>`
+    : '';
+
+  const counterText = counter
+    ? `<g fill="rgba(255,255,255,.42)">${glyphRun(`${String(index + 1).padStart(2, '0')} / ${String(total).padStart(2, '0')}`, { size: 28, x: 1080 - safeRight, baseline: 132, weight: 'regular', letterSpacing: 2 }).d}</g>`
+    : '';
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  ${defs(p, 0)}
+  ${counterText}
+  ${bigNumber}
+  ${quoteMark}
+  ${stackLabel}
+  ${layoutId === 'quote' ? `<rect x="${pad - 26}" y="${(blockTop - 6).toFixed(1)}" width="6" height="${(blockHeight + 12).toFixed(1)}" rx="3" fill="url(#accent)"/>` : ''}
+  ${textPaths}
+  ${accentBar}
+  ${dots}
+</svg>`;
+}
+
 // ── обложка ────────────────────────────────────────────────────────────────
 export function buildCover({ title, subtitle = 'смотреть', projectName = 'PULSE', handle = 'pulse', palette, variant = 0, badge = '' }) {
   const p = palette || PALETTES[hash(title) % PALETTES.length];

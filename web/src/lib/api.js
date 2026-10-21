@@ -70,6 +70,9 @@ export const api = {
   accounts: () => request('/accounts'),
   createAccount: (payload) => request('/accounts', { method: 'POST', body: payload }),
   updateAccount: (id, payload) => request(`/accounts/${id}`, { method: 'PATCH', body: payload }),
+  connectAccount: (id, payload) => request(`/accounts/${id}/connect`, { method: 'POST', body: payload }),
+  disconnectAccount: (id) => request(`/accounts/${id}/connect`, { method: 'DELETE' }),
+  accountLimit: (id) => request(`/accounts/${id}/limit`),
   deleteAccount: (id) => request(`/accounts/${id}`, { method: 'DELETE' }),
 
   products: () => request('/products'),

@@ -4,6 +4,10 @@
 // demo-адаптеры работают без ключей, live-адаптеры вызывают реальные API.
 // ─────────────────────────────────────────────────────────────────────────────
 import { log } from '../core/logger.js';
+import fs from 'node:fs';
+import { decryptSecret } from '../core/secrets.js';
+import tiktok from './social/tiktok.js';
+import instagram from './social/instagram.js';
 
 const env = process.env;
 const MODE = () => process.env.PULSE_MODE || 'demo';
@@ -120,21 +124,117 @@ const tts = {
 
 // ── Публикация ──────────────────────────────────────────────────────────────
 // Meta Graph API (Reels) / TikTok Content Posting API.
+const tokenOf = (account) => (account?.access_token ? decryptSecret(account.access_token) : null);
+
+const publicUrl = () => String(env.PULSE_PUBLIC_URL || '').replace(/\/$/, '');
+
+/**
+ * Реальная публикация через официальные API площадок.
+ * В demo-режиме возвращает предсказуемую заглушку, но контракт тот же:
+ * { externalId, url, publishedAt, privacy }.
+ */
 const publish = {
-  async send({ platform, account, description, videoRef, scheduledAt }) {
-    if (MODE() !== 'live' || !account?.token) {
-      await sleep(150);
+  async send({ platform, account, description, videoPath, coverPath, privacy, scheduledAt }) {
+    const demo = MODE() !== 'live';
+    const token = tokenOf(account);
+
+    if (platform === 'tiktok') {
+      if (demo || !token) {
+        await sleep(180);
+        return {
+          externalId: `tt_demo_${Math.random().toString(36).slice(2, 10)}`,
+          url: `https://www.tiktok.com/@${String(account?.handle || 'pulse').replace('@', '')}/video/${Math.floor(Math.random() * 9e17)}`,
+          privacy: privacy || 'SELF_ONLY',
+          demo: true,
+        };
+      }
+      if (!videoPath || !fs.existsSync(videoPath)) throw new Error('TikTok: нет файла ролика для загрузки');
+      const title = String(description).split('\n')[0].slice(0, 150) + ' ' + (String(description).match(/#[^\s#]+/g) || []).slice(0, 6).join(' ');
+      const { publishId } = await tiktok.uploadVideo({
+        token,
+        filePath: videoPath,
+        title: title.trim(),
+        privacy: privacy || 'SELF_ONLY',
+      });
+      const done = await tiktok.waitForPublish({ token, publishId });
+      const postId = Array.isArray(done.postIds) ? done.postIds[0] : done.postIds;
       return {
-        externalId: `${platform}_${Math.random().toString(36).slice(2, 10)}`,
-        url: platform === 'tiktok'
-          ? `https://www.tiktok.com/@${String(account?.handle || 'pulse').replace('@', '')}/video/${Math.floor(Math.random() * 9e17)}`
-          : `https://www.instagram.com/reel/${Math.random().toString(36).slice(2, 12)}/`,
+        externalId: postId ? String(postId) : publishId,
+        publishId,
+        url: postId ? `https://www.tiktok.com/@${String(account?.handle || '').replace('@', '')}/video/${postId}` : '',
+        privacy: privacy || 'SELF_ONLY',
+        demo: false,
+      };
+    }
+
+    // Instagram Reels
+    if (demo || !token) {
+      await sleep(180);
+      return {
+        externalId: `ig_demo_${Math.random().toString(36).slice(2, 10)}`,
+        url: `https://www.instagram.com/reel/${Math.random().toString(36).slice(2, 12)}/`,
         demo: true,
       };
     }
-    // В live-режиме: 1) upload media container, 2) poll status, 3) publish.
-    // Токены аккаунтов хранятся в Vault/секретах и передаются только сюда.
-    throw new Error('live-публикация требует настроенного Vault и OAuth-токена аккаунта');
+    const igUserId = account?.external_id;
+    if (!igUserId) throw new Error('Instagram: у аккаунта не указан IG user id');
+    const base = publicUrl();
+    if (!base) throw new Error('Instagram: задайте PULSE_PUBLIC_URL — площадка забирает видео по публичной ссылке');
+    const fileName = String(videoPath).split('/').pop();
+    const coverName = coverPath ? String(coverPath).split('/').pop() : null;
+
+    const limit = await instagram.publishingLimit({ token, igUserId });
+    if (limit.left <= 0) {
+      const err = new Error(`Instagram: исчерпан лимит публикаций (${limit.used}/${limit.total} за 24 ч)`);
+      err.kind = 'limit';
+      throw err;
+    }
+
+    const { creationId } = await instagram.createReel({
+      token,
+      igUserId,
+      videoUrl: `${base}/media/${fileName}`,
+      coverUrl: coverName ? `${base}/media/${coverName}` : null,
+      caption: description,
+    });
+    const { mediaId } = await instagram.publishReel({ token, igUserId, creationId });
+    return {
+      externalId: String(mediaId),
+      creationId,
+      url: `https://www.instagram.com/reel/${mediaId}/`,
+      demo: false,
+    };
+  },
+};
+
+/** Счётчики опубликованных роликов из API площадок (live-режим). */
+const stats = {
+  async fetch({ platform, account, externalIds = [] }) {
+    const token = tokenOf(account);
+    if (!token || !externalIds.length) return null;
+    try {
+      if (platform === 'tiktok') {
+        const rows = await tiktok.videoStats({ token, videoIds: externalIds });
+        return rows.length ? rows : null;
+      }
+      if (platform === 'reels') {
+        const row = await instagram.mediaStats({ token, mediaId: externalIds[0] });
+        return [{ id: externalIds[0], ...row }];
+      }
+    } catch (err) {
+      log({ level: 'warn', actor: 'provider.stats', action: 'stats.failed', message: `${platform}: метрики не получены — ${err.message}` });
+      return null;
+    }
+    return null;
+  },
+  async limit({ platform, account }) {
+    const token = tokenOf(account);
+    if (!token || platform !== 'reels' || !account?.external_id) return null;
+    try {
+      return await instagram.publishingLimit({ token, igUserId: account.external_id });
+    } catch {
+      return null;
+    }
   },
 };
 
@@ -143,6 +243,7 @@ export const providers = {
   video,
   tts,
   publish,
+  stats,
   status() {
     return {
       mode: MODE(),

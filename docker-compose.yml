@@ -14,8 +14,9 @@ services:
       PULSE_DB_PATH: /app/data/pulse.db
       PULSE_TZ: ${PULSE_TZ:-Europe/Moscow}
       TZ: ${PULSE_TZ:-Europe/Moscow}
-      PULSE_RENDER_W: ${PULSE_RENDER_W:-720}
+      PULSE_RENDER_QUALITY: ${PULSE_RENDER_QUALITY:-high}
       PULSE_RENDER: ${PULSE_RENDER:-on}
+      PULSE_PUBLIC_URL: ${PULSE_PUBLIC_URL:-}
     ports:
       - "${PULSE_PORT:-8080}:8080"
     volumes:

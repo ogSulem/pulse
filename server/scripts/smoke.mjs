@@ -23,6 +23,8 @@ const { renderEpisode, renderInfo } = await import('../src/engine/render.js');
 const { checkCompliance } = await import('../src/engine/compliance.js');
 const { scoreViral } = await import('../src/engine/viral.js');
 const { moneySummary, transparency } = await import('../src/engine/money.js');
+const { encryptSecret, decryptSecret } = await import('../src/core/secrets.js');
+const { providers } = await import('../src/providers/index.js');
 const { seedBase } = await import('../src/seed/seed.js');
 
 try {
@@ -54,6 +56,7 @@ else {
     });
     const size = fs.statSync(res.videoAbs).size;
     if (!res.ok || size < 50_000) throw new Error(`файл слишком мал: ${size} байт`);
+    if (res.width < 1080 || res.height < 1920) throw new Error(`кадр не вертикаль 1080×1920: ${res.width}×${res.height}`);
     if (res.coverPaths?.A && !fs.existsSync(path.join(tmp, 'media', path.basename(res.coverPaths.A)))) throw new Error('обложка A не создана');
     ok('сборка mp4 и обложек', `${res.durationSec} с, ${(size / 1024 / 1024).toFixed(1)} МБ, ${Date.now() - started} мс`);
   } catch (err) { fail('сборка mp4 и обложек', err); }
@@ -100,6 +103,49 @@ try {
   if (!t.checks.length) throw new Error('нет проверок');
   ok('прозрачность', `${t.checks.length} проверок, ${t.quotas.length} площадки`);
 } catch (err) { fail('прозрачность', err); }
+
+// ── секреты аккаунтов ───────────────────────────────────────────────────────
+try {
+  process.env.PULSE_SECRET = process.env.PULSE_SECRET || 'smoke-test-secret-value';
+  const token = 'act.1234567890abcdef';
+  const enc = encryptSecret(token);
+  if (!enc.startsWith('enc:v1:')) throw new Error('токен не зашифрован');
+  if (enc.includes(token)) throw new Error('токен виден в шифротексте');
+  if (decryptSecret(enc) !== token) throw new Error('токен не расшифровывается');
+  ok('шифрование токенов', 'AES-256-GCM, обратимо');
+} catch (err) { fail('шифрование токенов', err); }
+
+// ── публикация: контракт адаптеров (demo-режим) ─────────────────────────────
+try {
+  const res = await providers.publish.send({
+    platform: 'tiktok',
+    account: { handle: 'pulse.studio', access_token: null },
+    description: 'Тестовый ролик #pulse',
+    videoPath: null,
+    privacy: 'SELF_ONLY',
+  });
+  if (!res.externalId || !res.url) throw new Error('нет externalId/url');
+  if (res.privacy !== 'SELF_ONLY') throw new Error('приватность не учтена');
+  const ig = await providers.publish.send({ platform: 'reels', account: { handle: 'pulse' }, description: 'x', privacy: 'public' });
+  if (!ig.url.includes('instagram.com')) throw new Error('нет ссылки Instagram');
+  ok('адаптеры публикации', 'TikTok SELF_ONLY + Reels, контракт единый');
+} catch (err) { fail('адаптеры публикации', err); }
+
+// ── очередь: переживает падение процесса ────────────────────────────────────
+try {
+  const { enqueue, claimDue, recoverOrphans, jobStats } = await import('../src/core/queue.js');
+  const { db, nowIso } = await import('../src/core/db.js');
+  const jobId = enqueue('smoke.noop', { probe: 1 });
+  const claimed = claimDue(10).filter((j) => j.id === jobId);
+  if (claimed.length !== 1) throw new Error('задача не выдана воркеру');
+  db.prepare("UPDATE jobs SET lease_until = ? WHERE id = ?").run('2999-01-01T00:00:00.000Z', jobId);
+  const recovered = recoverOrphans();
+  const row = db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId);
+  if (row.status !== 'pending') throw new Error(`статус после рестарта: ${row.status}`);
+  if (recovered < 1) throw new Error('recoverOrphans ничего не вернул');
+  if (!jobStats().handlers.length) throw new Error('нет обработчиков');
+  ok('очередь переживает рестарт', `возвращено задач: ${recovered}, lease сброшен`);
+} catch (err) { fail('очередь переживает рестарт', err); }
 
 fs.rmSync(tmp, { recursive: true, force: true });
 

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { migrate } from './core/db.js';
 import { api } from './modules/api.js';
-import { drain, jobStats, recoverStale, cleanupJobs } from './core/queue.js';
+import { drain, jobStats, recoverStale, recoverOrphans, cleanupJobs } from './core/queue.js';
 import { log } from './core/logger.js';
 import { seedIfEmpty } from './seed/seed.js';
 import './engine/pipeline.js'; // регистрирует обработчики конвейера
@@ -65,6 +65,9 @@ if (fs.existsSync(webDist)) {
 
 // ── Старт ───────────────────────────────────────────────────────────────────
 migrate();
+// задачи, которые выполнялись в момент прошлого убийства/рестарта контейнера,
+// возвращаются в очередь сразу — иначе ролик ждёт истечения 5-минутного lease
+recoverOrphans();
 seedIfEmpty();
 log({ level: 'info', actor: 'system', action: 'server.start', message: `Pulse запущен в режиме ${process.env.PULSE_MODE || 'demo'}` });
 
@@ -98,7 +101,7 @@ async function tick() {
     if (Date.now() - lastAutopilot > 20000) {
       globalThis.__lastAutopilot = Date.now();
       enqueue('autopilot.tick', {}, { delayMs: 0, priority: 8 });
-      collectAnalytics();
+      await collectAnalytics();
       simulateTraffic({ budget: 250 });
       sweepDueEpisodes();
     }

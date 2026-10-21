@@ -241,6 +241,12 @@ function ensureColumns() {
       viral_meta: "TEXT DEFAULT '{}'",
       cost_cents: 'INTEGER DEFAULT 0',
     },
+    accounts: {
+      access_token: 'TEXT',
+      external_id: 'TEXT',
+      token_expires_at: 'TEXT',
+      auth_note: 'TEXT',
+    },
     publications: {
       cover_path: 'TEXT',
       click_token: 'TEXT',
@@ -248,12 +254,14 @@ function ensureColumns() {
       cost_cents: 'INTEGER DEFAULT 0',
       revenue_cents: 'INTEGER DEFAULT 0',
       external_id: 'TEXT',
+      publish_id: 'TEXT',
     },
     projects: {
       ai_generated: 'INTEGER DEFAULT 1',
     },
     conversions: {
       external_id: 'TEXT',
+      publish_id: 'TEXT',
     },
   };
   for (const [table, cols] of Object.entries(want)) {

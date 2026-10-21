@@ -22,6 +22,8 @@ export default function Accounts() {
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [connecting, setConnecting] = useState(null);
+  const [tokenForm, setTokenForm] = useState({ token: '', externalId: '' });
 
   const accounts = data.accounts || [];
   const totalCap = accounts.filter((a) => a.status !== 'blocked').reduce((a, x) => a + x.cap, 0);
@@ -68,6 +70,34 @@ export default function Accounts() {
     } finally { setBusy(false); }
   };
 
+  const openConnect = (account) => {
+    setConnecting(account);
+    setTokenForm({ token: '', externalId: account.external_id || '' });
+  };
+
+  const connect = async () => {
+    if (!tokenForm.token.trim()) { toast.push({ tone: 'error', title: 'Вставьте access token' }); return; }
+    setBusy(true);
+    try {
+      await api.connectAccount(connecting.id, tokenForm);
+      toast.push({ tone: 'success', title: `@${connecting.handle} подключён`, text: 'Токен зашифрован и хранится только на сервере' });
+      setConnecting(null);
+      refresh(); refreshLight();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Не подключено', text: err.message });
+    } finally { setBusy(false); }
+  };
+
+  const disconnect = async (account) => {
+    try {
+      await api.disconnectAccount(account.id);
+      toast.push({ tone: 'info', title: `@${account.handle} отключён` });
+      refresh();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Ошибка', text: err.message });
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-grid grid-4">
@@ -112,6 +142,10 @@ export default function Accounts() {
                     <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
                       {a.platform === 'tiktok' ? 'TikTok' : 'Instagram Reels'} · {a.display_name} · качество {a.quality}
                     </div>
+                    <div className="row" style={{ gap: 6, marginTop: 5 }}>
+                      <Badge tone={a.connected ? 'success' : 'muted'} dot>{a.connected ? 'API подключён' : 'без токена'}</Badge>
+                      {a.connected && a.external_id ? <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>id {a.external_id}</span> : null}
+                    </div>
                   </div>
                 </div>
                 <div className="row" style={{ gap: 3 }}>
@@ -130,6 +164,15 @@ export default function Accounts() {
               </div>
 
               <div className="row wrap" style={{ gap: 7, marginTop: 14 }}>
+                <button className="btn btn-soft btn-sm" onClick={() => openConnect(a)}>
+                  <Icon name="link" size={12} />{a.connected ? 'Заменить токен' : 'Подключить API'}
+                </button>
+                {a.connected && (
+                  <button className="btn btn-ghost btn-sm" onClick={() => disconnect(a)}><Icon name="logout" size={12} />Отключить</button>
+                )}
+              </div>
+
+              <div className="row wrap" style={{ gap: 7, marginTop: 12 }}>
                 {STATUS_OPTIONS.map((s) => (
                   <button key={s.id} className={`chip ${a.status === s.id ? 'active' : ''}`} onClick={() => a.status !== s.id && setStatus(a, s.id)}>
                     {s.label}
@@ -210,6 +253,36 @@ export default function Accounts() {
           </Field>
           <div className="span-2">
             <div className="notice"><Icon name="info" size={14} /><span>Новый аккаунт стартует в режиме прогрева: 1 публикация в день и увеличенный интервал.</span></div>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={Boolean(connecting)} onClose={() => setConnecting(null)} title={`Подключить @${connecting?.handle || ''}`}
+        subtitle={connecting?.platform === 'tiktok' ? 'TikTok Content Posting API' : 'Instagram Graph API (Reels)'}
+        footer={<>
+          <button className="btn" onClick={() => setConnecting(null)}>Отмена</button>
+          <button className="btn btn-primary" disabled={busy} onClick={connect}><Icon name="check" size={14} />Подключить</button>
+        </>}>
+        <div className="col" style={{ gap: 14 }}>
+          <div className="notice">
+            <Icon name="shield" size={15} />
+            <span>
+              Токен шифруется AES-256-GCM прямо на сервере и никогда не отдаётся во фронтенд.
+              Права: {connecting?.platform === 'tiktok' ? 'video.publish, video.upload' : 'instagram_content_publish, instagram_manage_insights'}.
+            </span>
+          </div>
+          <Field label="Access token" hint="Долгоживущий токен из кабинета разработчика площадки">
+            <input className="input" type="password" value={tokenForm.token} autoComplete="off"
+              onChange={(e) => setTokenForm({ ...tokenForm, token: e.target.value })} placeholder="вставьте токен" />
+          </Field>
+          <Field label={connecting?.platform === 'tiktok' ? 'Open ID (необязательно)' : 'Instagram user id'} hint="Для Instagram обязателен: по нему идут media и insights">
+            <input className="input" value={tokenForm.externalId}
+              onChange={(e) => setTokenForm({ ...tokenForm, externalId: e.target.value })} placeholder="например, 17841400000000000" />
+          </Field>
+          <div className="field-hint">
+            {connecting?.platform === 'tiktok'
+              ? 'Без аудита клиента TikTok публикует только в приватный аккаунт (SELF_ONLY) — Pulse выставит это автоматически.'
+              : 'Instagram забирает видео по публичному адресу: задайте PULSE_PUBLIC_URL в .env (например, https://pulse.example.com).'}
           </div>
         </div>
       </Modal>

@@ -122,7 +122,7 @@ registerHandler('episode.prepare', async ({ episodeId }) => {
   if (Number(settings.risk_threshold) <= risk) {
     log({ level: 'warn', actor: 'engine', action: 'episode.risk', entityType: 'episode', entityId: episodeId, message: `Риск ${risk}/100 — эпизод уйдёт на ручную проверку`, meta: { risk } });
   }
-  enqueue('episode.render', { episodeId, step: 'voice' }, { delayMs: 1400, priority: 4 });
+  enqueue('episode.render', { episodeId, step: 'voice' }, { delayMs: 1400, priority: 4, dedupeKey: `render:${episodeId}:voice` });
 });
 
 // ── Шаги 2–4: озвучка → видео → монтаж ─────────────────────────────────────
@@ -145,7 +145,7 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
       }
       touchEpisode(episodeId, { stage: 'voice', status: 'generating', progress: STAGE_PROGRESS.voice });
       log({ level: 'info', actor: 'provider.tts', action: 'episode.voice', entityType: 'episode', entityId: episodeId, message: `Озвучка готова: ${audio.durationSec} с, провайдер ${audio.provider}`, meta: audio });
-      enqueue('episode.render', { episodeId, step: 'footage' }, { delayMs: 1600, priority: 4 });
+      enqueue('episode.render', { episodeId, step: 'footage' }, { delayMs: 1600, priority: 4, dedupeKey: `render:${episodeId}:footage` });
       return;
     }
 
@@ -160,7 +160,7 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
       touchEpisode(episodeId, { stage: 'footage', progress: STAGE_PROGRESS.footage });
       log({ level: 'info', actor: `provider.video.${draft.provider}`, action: 'episode.footage', entityType: 'episode', entityId: episodeId, message: `Видеоряд сгенерирован (${draft.provider}${draft.demo ? ', demo' : ''})`, meta: draft });
       if (Math.random() < 0.05) throw new Error('Провайдер видео вернул 429 (rate limit) — задача будет повторена');
-      enqueue('episode.render', { episodeId, step: 'edit' }, { delayMs: 1800, priority: 4 });
+      enqueue('episode.render', { episodeId, step: 'edit' }, { delayMs: 1800, priority: 4, dedupeKey: `render:${episodeId}:edit` });
       return;
     }
 
@@ -371,6 +371,14 @@ registerHandler('episode.publish', async ({ episodeId }) => {
   const product = getProduct(episode.product_id) || activeProduct(episode.project_id);
   const settings = getSettings();
 
+  // Без готового файла публиковать нечего: лучше вернуть ролик человеку,
+  // чем отправить на площадку пустую ссылку.
+  if (!episode.video_path || !fs.existsSync(path.join(MEDIA_DIR, path.basename(episode.video_path)))) {
+    touchEpisode(episodeId, { status: 'review', error: 'Нет файла ролика — публикация остановлена' });
+    log({ level: 'warn', actor: 'guard', action: 'publish.no_file', entityType: 'episode', entityId: episodeId, message: 'Публикация остановлена: файл ролика не найден' });
+    return;
+  }
+
   const desired = Number(settings.autopilot_global) === 1 && Number(episode.autopilot) === 1;
   if (!desired) {
     touchEpisode(episodeId, { status: 'review' });
@@ -411,7 +419,22 @@ registerHandler('episode.publish', async ({ episodeId }) => {
       coverPath: parseJson(episode.cover_paths, {})[variant] || null,
       privacy: privacyFor(account.platform),
       scheduledAt: nowIso(),
+    }).catch((err) => {
+      // Лимиты и баны не ретраятся пачкой: публикация переносится, аккаунт остывает.
+      if (err.kind === 'limit' || err.kind === 'ban') {
+        log({ level: 'warn', actor: 'publisher', action: 'publish.limit', entityType: 'account', entityId: account.id, message: err.message, meta: { kind: err.kind } });
+        if (err.kind === 'ban') {
+          db.prepare("UPDATE accounts SET status = 'cooldown', blocked_until = ?, updated_at = ? WHERE id = ?")
+            .run(addDays(nowIso(), 1), nowIso(), account.id);
+        }
+        const postpone = addMinutes(nowIso(), 60 + Math.floor(Math.random() * 60));
+        touchEpisode(episodeId, { status: 'scheduled', scheduled_at: postpone, error: err.message });
+        enqueue('episode.publish', { episodeId }, { delayMs: 62 * 60000, priority: 2 });
+        return null;
+      }
+      throw err;
     });
+    if (!result) return;
 
     const pid = uid('pb_');
     const ts = nowIso();
@@ -427,10 +450,11 @@ registerHandler('episode.publish', async ({ episodeId }) => {
     const clickToken = uid('ct_').replace(/[^a-z0-9]/gi, '').slice(0, 18);
     const privacy = privacyFor(platform);
 
-    db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, cover_path, click_token, url, status, scheduled_at, published_at, target_views, privacy, cost_cents, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, cover_path, click_token, url, external_id, status, scheduled_at, published_at, target_views, privacy, cost_cents, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?)`)
       .run(pid, episode.id, episode.project_id, account.id, platform, variant, episode.title, caption,
-        JSON.stringify(hashtags), `${episode.cover_seed}-${variant}`, coverPath, clickToken, result.url, ts, ts, target, privacy,
+        JSON.stringify(hashtags), `${episode.cover_seed}-${variant}`, coverPath, clickToken, result.url,
+        result.externalId ? String(result.externalId) : null, ts, ts, target, result.privacy || privacy,
         Math.round(num(episode.cost_cents, 0) / variants.length), ts);
     created.push(pid);
     consumeQuota(account.id);
@@ -509,7 +533,7 @@ export function growthCurve(ageHours) {
   return clamp(0.72 * fast + 0.28 * tail, 0, 1);
 }
 
-export function collectAnalytics() {
+export async function collectAnalytics() {
   const since = addDays(nowIso(), -45);
   const pubs = db.prepare("SELECT * FROM publications WHERE status = 'published' AND published_at > ?").all(since);
   const day = nowIso().slice(0, 10);
@@ -522,7 +546,49 @@ export function collectAnalytics() {
       comments = comments + excluded.comments, shares = shares + excluded.shares,
       clicks = clicks + excluded.clicks, followers = followers + excluded.followers`);
 
+  // Live-режим: сначала реальные метрики из API площадок, иначе — модель роста.
+  const isLive = (process.env.PULSE_MODE || 'demo') === 'live';
+  let liveRows = new Map();
+  if (isLive) {
+    const byAccount = new Map();
+    for (const p of pubs) {
+      if (!p.external_id) continue;
+      const key = `${p.platform}:${p.account_id}`;
+      if (!byAccount.has(key)) byAccount.set(key, { platform: p.platform, account: db.prepare('SELECT * FROM accounts WHERE id = ?').get(p.account_id), pubs: [] });
+      byAccount.get(key).pubs.push(p);
+    }
+    for (const group of byAccount.values()) {
+      const rows = await providers.stats.fetch({
+        platform: group.platform,
+        account: group.account,
+        externalIds: group.pubs.map((p) => p.external_id),
+      });
+      if (!rows) continue;
+      for (const row of rows) {
+        const pub = group.pubs.find((p) => String(p.external_id) === row.id);
+        if (pub) liveRows.set(pub.id, row);
+      }
+    }
+  }
+
   for (const p of pubs) {
+    // реальные счётчики площадки перекрывают модель
+    if (liveRows.has(p.id)) {
+      const row = liveRows.get(p.id);
+      const dViews = Math.max(0, row.views - p.views);
+      db.prepare('UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, saves = ? WHERE id = ?')
+        .run(row.views, row.likes ?? p.likes, row.comments ?? p.comments, row.shares ?? p.shares, row.saves ?? p.saves, p.id);
+      if (dViews > 0) {
+        db.prepare(`INSERT INTO metrics_daily (id, publication_id, day, views, likes, comments, shares, clicks, followers)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
+          ON CONFLICT(id) DO UPDATE SET views = views + excluded.views, likes = likes + excluded.likes,
+            comments = comments + excluded.comments, shares = shares + excluded.shares`)
+          .run(`${p.id}:${day}`, p.id, day, dViews, Math.max(0, (row.likes || 0) - p.likes), Math.max(0, (row.comments || 0) - p.comments), Math.max(0, (row.shares || 0) - p.shares));
+      }
+      updated++;
+      continue;
+    }
+
     const ageHours = (Date.now() - new Date(p.published_at).getTime()) / 3600000;
     const curve = growthCurve(ageHours);
     const wobble = 1 + Math.sin(ageHours / 7 + p.id.charCodeAt(2)) * 0.03;
@@ -567,7 +633,10 @@ export function recoverEpisodeStates() {
   const stale = addMinutes(nowIso(), -8);
   const rows = db.prepare("SELECT * FROM episodes WHERE status = 'generating' AND updated_at < ?").all(stale);
   for (const ep of rows) {
-    enqueue('episode.render', { episodeId: ep.id, step: ep.stage === 'script' ? 'voice' : ep.stage === 'voice' ? 'footage' : 'edit' }, { delayMs: 1000, priority: 4 });
+    const step = ep.stage === 'script' ? 'voice' : ep.stage === 'voice' ? 'footage' : 'edit';
+    // dedupe: иначе восстановление состояния и уже стоящая в очереди задача
+    // отрендерят один и тот же ролик дважды
+    enqueue('episode.render', { episodeId: ep.id, step }, { delayMs: 1000, priority: 4, dedupeKey: `render:${ep.id}:${step}` });
     touchEpisode(ep.id, { updated_at: nowIso() });
   }
   return rows.length;

@@ -229,6 +229,31 @@ curl -s -X PATCH http://localhost:8080/api/accounts/ac_31bd… \
 | POST | `/accounts` | добавить |
 | PATCH | `/accounts/{id}` | лимиты, окно, статус, качество |
 | DELETE | `/accounts/{id}` | удалить |
+| POST | `/accounts/{id}/connect` | подключить реальный API: `{ token, externalId?, expiresAt? }` |
+| DELETE | `/accounts/{id}/connect` | отозвать токен (аккаунт остаётся в списке) |
+| GET | `/accounts/{id}/limit` | остаток квоты площадки из её же API |
+
+### Подключение реального аккаунта
+
+```bash
+# токен приходит один раз, в БД уходит шифротекст AES-256-GCM
+curl -s -X POST http://localhost:8080/api/accounts/ac_31bd…/connect \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"token":"EAAG…","externalId":"17841400000000000"}'
+# → { "ok": true, "account": { "id":"ac_…", "connected": true, "has_token": true, "token_hint": "…9f2c" } }
+
+# сколько ещё можно постить по мнению площадки
+curl -s http://localhost:8080/api/accounts/ac_31bd…/limit -H "Authorization: Bearer $TOKEN"
+# → { "platform":"reels", "connected":true, "limit":{"quota_total":50,"usage":7,"remaining":43,"window_sec":86400}, "source":"api" }
+```
+
+Правила ответов:
+
+* токен **никогда** не возвращается — только `has_token`, `token_hint` (4 последних знака), `connected`;
+* `POST` принимает токен длиной ≥16 символов, иначе `400`; `has_token` становится `true` сразу;
+* `GET /limit` в demo-режиме или без токена возвращает `connected:false`, `limit:null` и `note` с причиной,
+  а не выдуманные числа;
+* `DELETE` оставляет историю публикаций — отвязывается только доступ.
 
 ---
 
@@ -264,9 +289,11 @@ curl -s -X POST http://localhost:8080/api/products \
 
 ---
 
-## 9. Контракты для live-режима (production)
+## 9. Live-режим: реальная публикация и OAuth
 
-Эти маршруты появляются при подключении реальных площадок; в демо-контуре их заменяют адаптеры.
+Публикация через API площадок уже реализована в провайдерах (`providers/social/tiktok.js`,
+`providers/social/instagram.js`) и включается автоматически, когда у аккаунта есть токен и `PULSE_MODE=live`.
+Ниже — контракты, которые остаются на стороне OAuth и вебхуков.
 
 ```http
 POST /providers/video/jobs          → { externalId, provider }

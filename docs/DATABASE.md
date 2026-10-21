@@ -57,7 +57,11 @@ episodes 1─* jobs (через payload)     logs — независимый а�
 | timezone | text | IANA-зона |
 | warmup_until, blocked_until | timestamptz | даты окончания режимов |
 | quality | int 0–100 | влияет на приоритет выбора |
-| secret_ref | text | **ссылка на секрет в Vault**, не сам токен |
+| secret_ref | text | **ссылка на секрет в Vault** (production-профиль) |
+| access_token | text | в референс-сборке — шифротекст `enc:v1:iv:tag:data` (AES-256-GCM); в .NET — `secret_ref` |
+| external_id | text | id бизнес-аккаунта на площадке (`ig_user_id`, TikTok `open_id`) — нужен для API-вызовов |
+| token_expires_at | timestamptz | когда истекает токен; за 3 дня аккаунт помечается «обновить» |
+| auth_note | text | что записал провайдер при подключении: scopes, кто выдал, почему отозван |
 
 ### accounts_daily — израсходованная квота
 `(account_id, day)` PK, `used int`. Обновляется атомарно при публикации:
@@ -397,6 +401,7 @@ RETURNING j.*;
 | `cost_cents` | INTEGER | доля себестоимости эпизода |
 | `revenue_cents` | INTEGER | накопленный доход, если нужно фиксировать факт |
 | `external_id` | TEXT | id публикации на площадке |
+| `publish_id` | TEXT | id процесса публикации у провайдера (TikTok `publish_id`, IG container id) — по нему опрашивается статус |
 
 ### `clicks`
 

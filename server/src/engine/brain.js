@@ -193,6 +193,10 @@ const TITLE_VARIATIONS = [
 const cleanBase = (t) => String(t)
   .replace(/^\s*(разбор|коротко|3 ошибки|проверено на себе)\s*:\s*/i, '')
   .replace(/\s*[—–-]\s*(честный опыт|без воды|что бы я сделал иначе)\s*$/i, '')
+  // «3 ошибки: как перестать: метод 2 минут» → оставляем одну границу смысла
+  .replace(/\s*:\s*/g, ': ')
+  .replace(/(:\s*){2,}/g, ': ')
+  .replace(/\s*:\s*$/, '')
   .trim();
 
 const capitalize = (t) => t.replace(/^[а-яa-z]/, (c) => c.toUpperCase());
@@ -225,9 +229,12 @@ export function generateIdeas(project, { count = 6, product = null, exclude = []
     const bases = shuffle(basePool);
     for (const base of bases) {
       if (out.length >= count) break;
+      // если в основе уже есть двоеточие, шаблоны с префиксом дадут «3 ошибки: 3 ошибки: …»
+      const baseHasColon = base.includes(':');
+      const allowed = TITLE_VARIATIONS.filter((v, idx) => idx !== 0 && !(baseHasColon && v('x: y').includes(':')));
       const variants = waves === 1
         ? [(t) => t]
-        : shuffle(TITLE_VARIATIONS).filter((v) => v !== TITLE_VARIATIONS[0]).slice(0, 2);
+        : shuffle(allowed).slice(0, 2);
       let added = 0;
       for (const variant of variants) {
         if (out.length >= count || added >= 2) break;

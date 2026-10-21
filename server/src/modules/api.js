@@ -8,6 +8,7 @@ import { createEpisode, nextSlot, pickAccount, collectAnalytics, sweepDueEpisode
 import { providers } from '../providers/index.js';
 import { moneySummary, transparency, recordClick, recordConversion, simulateTraffic, rpmFor } from '../engine/money.js';
 import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
+import { encryptSecret, decryptSecret, maskSecret } from '../core/secrets.js';
 import { scoreViral, saveViral } from '../engine/viral.js';
 import { renderInfo, renderAvailable, MEDIA_DIR } from '../engine/render.js';
 import fs from 'node:fs';
@@ -42,6 +43,13 @@ const episodeRow = (e) => e && ({
 
 function accountRow(a) {
   if (!a) return a;
+  const { access_token: token, ...safe } = a;
+  // hint = последние 4 знака реального токена; сам токен наружу не уходит никогда
+  let hint = null;
+  if (token) {
+    try { hint = maskSecret(decryptSecret(token)); } catch { hint = '••••'; }
+  }
+  a = { ...safe, has_token: Boolean(token), token_hint: hint, connected: Boolean(token) };
   const day = nowIso().slice(0, 10);
   const used = db.prepare('SELECT used FROM accounts_daily WHERE account_id = ? AND day = ?').get(a.id, day)?.used || 0;
   const settings = getSettings();
@@ -494,6 +502,38 @@ api.post('/accounts', (req, res) => {
   res.status(201).json(accountRow(db.prepare('SELECT * FROM accounts WHERE id = ?').get(id)));
 });
 
+/**
+ * Подключение аккаунта к площадке: токен шифруется и в открытом виде
+ * не покидает сервер. Отдаём только факт подключения и ожидаемые права.
+ */
+api.post('/accounts/:id/connect', (req, res) => {
+  const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  if (!account) return res.status(404).json({ error: 'not_found', message: 'Аккаунт не найден' });
+  const token = String(req.body?.token || '').trim();
+  const externalId = String(req.body?.externalId || req.body?.external_id || '').trim();
+  if (!token) return res.status(400).json({ error: 'validation', message: 'Вставьте access token аккаунта' });
+  let encrypted;
+  try {
+    encrypted = encryptSecret(token);
+  } catch (err) {
+    return res.status(400).json({ error: 'no_secret', message: err.message });
+  }
+  db.prepare('UPDATE accounts SET access_token = ?, external_id = ?, token_expires_at = ?, status = ?, updated_at = ? WHERE id = ?')
+    .run(encrypted, externalId || account.external_id || null, req.body?.expiresAt || null, 'healthy', nowIso(), account.id);
+  log({
+    level: 'success', actor: 'user', action: 'account.connected', entityType: 'account', entityId: account.id,
+    message: `@${account.handle} подключён к ${account.platform === 'tiktok' ? 'TikTok' : 'Instagram'} (токен зашифрован)`,
+    meta: { platform: account.platform, externalId: externalId || null },
+  });
+  res.json(accountRow(db.prepare('SELECT * FROM accounts WHERE id = ?').get(account.id)));
+});
+
+api.delete('/accounts/:id/connect', (req, res) => {
+  db.prepare('UPDATE accounts SET access_token = NULL, external_id = NULL, updated_at = ? WHERE id = ?').run(nowIso(), req.params.id);
+  log({ level: 'warn', actor: 'user', action: 'account.disconnected', entityType: 'account', entityId: req.params.id, message: 'Токен аккаунта удалён' });
+  res.json({ ok: true });
+});
+
 api.patch('/accounts/:id', (req, res) => {
   const a = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not_found' });
@@ -708,6 +748,27 @@ api.get('/money', (req, res) => {
   const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
   if (req.query.simulate === '1') simulateTraffic({ budget: 500 });
   res.json(moneySummary({ days, projectId }));
+});
+
+// ─── Живой лимит площадки ──────────────────────────────────────────────────
+api.get('/accounts/:id/limit', async (req, res) => {
+  const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  if (!account) return res.status(404).json({ error: 'not_found' });
+  const limit = await providers.stats.limit({ platform: account.platform, account });
+  if (!limit) {
+    return res.json({
+      platform: account.platform,
+      connected: Boolean(account.access_token),
+      limit: account.platform === 'tiktok' ? { total: 15, used: null, left: null } : { total: 50, used: null, left: null },
+      source: 'локальные настройки',
+      note: !account.access_token
+        ? 'Подключите токен, чтобы видеть точный остаток из API площадки'
+        : account.platform === 'tiktok'
+          ? 'TikTok не отдаёт остаток лимита через API: считаем по фактическим публикациям за 24 ч'
+          : 'Площадка не ответила (нет сети или истёк токен) — показываем локальный лимит',
+    });
+  }
+  res.json({ platform: account.platform, connected: true, limit, source: 'api' });
 });
 
 // ─── Прозрачность: что сделано, что ждёт человека, какие лимиты ─────────────

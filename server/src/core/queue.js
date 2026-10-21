@@ -87,6 +87,23 @@ export function jobStats() {
   return { ...stats, nextRunAt: next?.t || null, handlers: [...HANDLERS.keys()] };
 }
 
+/**
+ * Возврат «осиротевших» задач после падения или перезапуска процесса.
+ * Один контейнер = один воркер, поэтому все running-задачи умершего процесса
+ * безопасно вернуть в pending сразу, не дожидаясь истечения lease (5 минут).
+ * В multi-instance профиле выключается: PULSE_SINGLE_WORKER=0.
+ */
+export function recoverOrphans() {
+  if (process.env.PULSE_SINGLE_WORKER === '0') return 0;
+  const res = db.prepare(
+    "UPDATE jobs SET status = 'pending', lease_until = NULL, updated_at = ? WHERE status = 'running'"
+  ).run(nowIso());
+  if (res.changes > 0) {
+    log({ level: 'warn', actor: 'queue', action: 'jobs.recovered', message: `Возвращено в очередь после перезапуска: ${res.changes}` });
+  }
+  return res.changes;
+}
+
 export function recoverStale() {
   const stale = db.prepare("SELECT COUNT(*) n FROM jobs WHERE status = 'running' AND lease_until < ?").get(nowIso());
   if (stale.n > 0) {
