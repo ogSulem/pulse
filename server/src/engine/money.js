@@ -276,8 +276,12 @@ export function transparency() {
   const settings = getSettings();
   const now = nowIso();
   const counts = Object.fromEntries(db.prepare('SELECT status, COUNT(*) n FROM episodes GROUP BY status').all().map((r) => [r.status, r.n]));
+  // только реальные блокировки: пустой отчёт `{}` и отчёты с ok=true сюда не попадают
   const blocked = db.prepare(`SELECT id, title, compliance, viral FROM episodes
-    WHERE compliance IS NOT NULL AND compliance NOT LIKE '%"ok":true%' ORDER BY updated_at DESC LIMIT 6`).all();
+    WHERE compliance IS NOT NULL
+      AND json_valid(compliance)
+      AND json_extract(compliance, '$.ok') = 0
+    ORDER BY updated_at DESC LIMIT 6`).all();
   const lowViral = db.prepare(`SELECT id, title, viral, viral_meta FROM episodes
     WHERE viral > 0 AND viral < ? ORDER BY viral ASC LIMIT 6`).all(num(settings.min_viral_score, 45));
   const failed = db.prepare("SELECT id, title, error, stage FROM episodes WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 5").all();

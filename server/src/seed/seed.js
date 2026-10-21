@@ -40,6 +40,41 @@ const PRODUCTS = [
   { name: 'FitFlow 7 дней', url: 'https://fitflow.ru/plan7', pitch: '7 тренировок по 20 минут без зала', proof: '4 200 человек прошли план до конца', template: 'case', utm_source: 'tiktok', utm_medium: 'short', utm_campaign: 'plan7' },
 ];
 
+// Демо-отчёты проверок: у части роликов есть предупреждения и низкий скор,
+// чтобы экраны «Прозрачность» и карточка ролика были содержательными сразу.
+function demoChecks(seedIndex) {
+  const viral = 38 + ((seedIndex * 17) % 46);
+  const warn = seedIndex % 5 === 0;
+  const low = viral < 45;
+  const compliance = {
+    ok: !low,
+    score: low ? 64 : 92,
+    platform: seedIndex % 2 ? 'tiktok' : 'reels',
+    blocking: low ? [{ id: 'fin-getrich', severity: 'block', reason: 'Формулировка «лёгких денег»: площадки понижают охват и могут ограничить аккаунт', match: 'заработа' }] : [],
+    warnings: warn ? [{ id: 'headline-claim', severity: 'warn', reason: 'Есть признаки рекламы, но нет пометки — Pulse добавит её сам', match: 'скидк' }] : [],
+    findings: [],
+    limits: { captionMax: 2200, hashtagsRecommended: 6, publishPer24h: seedIndex % 2 ? 15 : 50 },
+    labels: { ad: true, ai: true },
+  };
+  const viralMeta = {
+    score: viral,
+    grade: viral >= 75 ? 'high' : viral >= 55 ? 'medium' : 'low',
+    factors: [
+      { id: 'hook', label: 'Хук первой фразы', value: Math.min(95, viral + 9), weight: 0.3, detail: 'вопрос в первой фразе' },
+      { id: 'length', label: 'Длительность', value: 100, weight: 0.16, detail: '26 с — оптимум 18–34 с' },
+      { id: 'pace', label: 'Темп речи', value: Math.min(96, viral + 4), weight: 0.14, detail: '2,2 слов/с — оптимум 1,8–2,8' },
+      { id: 'retention', label: 'Удержание', value: Math.max(30, viral - 6), weight: 0.18, detail: '5 сцен, есть обещание в конце' },
+      { id: 'caption', label: 'Описание и теги', value: Math.min(94, viral + 12), weight: 0.12, detail: '148 символов, 6 тегов' },
+      { id: 'novelty', label: 'Новизна темы', value: 74, weight: 0.1, detail: 'тема выходила один раз — нужен новый угол' },
+    ],
+    advice: low ? ['Перепишите первую фразу: вопрос, число или конфликт в первых 12 словах.', 'Сократите ролик до 18–34 секунд — там лучшая досматриваемость.'] : [],
+    confidence: 'эвристика по 6 признакам, не прогноз алгоритма',
+    meta: { durationSec: 26, words: 57, wps: 2.2, scenes: 5 },
+    computed_at: new Date().toISOString(),
+  };
+  return { compliance, viralMeta, viral };
+}
+
 const EPISODE_COST_CENTS = 6600; // 66 ₽: видео 45 + TTS 12 + LLM 8 + рендер 1
 const LOG_SEED = [
   ['success', 'publisher', 'episode.published', 'Опубликовано: «Почему автопостинг убивает охваты» (Reels)'],
@@ -156,6 +191,9 @@ export function seedBase() {
             JSON.stringify(script.hashtags), JSON.stringify(script.scenes), `${episodeId}-${idea.title}`,
             idea.title, idea.format, risk, publishedAt, publishedAt, EPISODE_COST_CENTS, publishedAt, publishedAt);
 
+        const demo = demoChecks(d + k);
+        db.prepare('UPDATE episodes SET compliance = ?, viral = ?, viral_meta = ? WHERE id = ?')
+          .run(JSON.stringify(demo.compliance), demo.viral, JSON.stringify(demo.viralMeta), episodeId);
         const pubList = makePublicationsFor(null, project, accountRows, rnd, publishedAt);
         for (const pub of pubList) {
           const pid = uid('pb_');
