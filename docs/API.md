@@ -380,6 +380,7 @@ PATCH /api/episodes/{id}/caption
 | POST | `/insights/apply-policy` | применить темп автопилота по деньгам (1–6 постов в день), вернуть что изменилось |
 | GET | `/abtest/summary?projectId=` | сколько тестов закрыто, средний разрыв, предпочитаемый вариант проекта |
 | POST | `/abtest/evaluate` | принудительно закрыть созревшие тесты и вернуть решения |
+| POST | `/insights/recalibrate` | пересчитать веса вирусного скора на своих роликах |
 
 ```bash
 curl -s "http://localhost:8080/api/insights/schedule" -H "Authorization: Bearer $TOKEN"

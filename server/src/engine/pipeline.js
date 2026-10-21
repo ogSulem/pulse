@@ -14,7 +14,7 @@ import { planSlot, nextSlotIso } from './schedule.js';
 import { forecastEpisode, autopilotPolicy, recalculateAccountQuality } from './forecast.js';
 import { preferredVariant, evaluateAB } from './abtest.js';
 import { checkCompliance, disclosureText, saveCompliance, PLATFORM_RULES } from './compliance.js';
-import { scoreViral, saveViral } from './viral.js';
+import { scoreViral, saveViral, recalibrate } from './viral.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -553,11 +553,13 @@ registerHandler('autopilot.tick', async () => {
       const decided = evaluateAB();
       const policy = autopilotPolicy({ apply: true });
       recalculateAccountQuality({ apply: true });
+      // веса вирусного скора пересчитываются на новых роликах (если их достаточно)
+      const weights = recalibrate();
       const scaled = policy.filter((p) => p.changed);
       if (decided.length || scaled.length) {
         log({
           level: 'info', actor: 'autopilot', action: 'autopilot.smart', entityType: 'system',
-          message: `Умный цикл: закрыто A/B — ${decided.length}, изменено темпов — ${scaled.length}`,
+          message: `Умный цикл: закрыто A/B — ${decided.length}, изменено темпов — ${scaled.length}, веса скора — ${weights.ready ? 'обновлены' : 'приоры'}`,
           meta: { decided: decided.map((d) => `${d.title}: ${d.winner}`), scaled: scaled.map((p) => `${p.name}: ${p.postsPerDay}/день`) },
         });
       }

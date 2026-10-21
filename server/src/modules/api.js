@@ -12,7 +12,7 @@ import { providers } from '../providers/index.js';
 import { moneySummary, transparency, recordClick, recordConversion, simulateTraffic, rpmFor } from '../engine/money.js';
 import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
 import { encryptSecret, decryptSecret, maskSecret } from '../core/secrets.js';
-import { scoreViral, saveViral } from '../engine/viral.js';
+import { scoreViral, saveViral, recalibrate } from '../engine/viral.js';
 import { renderInfo, renderAvailable, MEDIA_DIR } from '../engine/render.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -630,6 +630,11 @@ api.post('/insights/apply-policy', (_req, res) => {
 api.get('/abtest/summary', (req, res) => {
   const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
   res.json({ ...abSummary({ projectId }), preferred: projectId ? preferredVariant(projectId) : null });
+});
+
+api.post('/insights/recalibrate', (_req, res) => {
+  const result = recalibrate();
+  res.json({ ok: true, ...result });
 });
 
 api.post('/abtest/evaluate', (_req, res) => {
