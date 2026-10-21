@@ -1,0 +1,22 @@
+{
+  "name": "pulse-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pulse — конвейер коротких видео: идеи, сценарии, рендер, постинг, аналитика",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm --workspace web run build",
+    "start": "node server/src/index.js",
+    "dev:api": "node --watch server/src/index.js",
+    "dev:web": "npm --workspace web run dev",
+    "seed": "node server/src/seed/reset.js",
+    "smoke": "node server/scripts/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20.11"
+  }
+}
