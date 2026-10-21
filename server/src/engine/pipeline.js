@@ -629,15 +629,59 @@ export function sweepDueEpisodes() {
 }
 
 export function recoverEpisodeStates() {
-  // эпизоды, зависшие в генерации после падения процесса
+  // ── 1. «зависшие» эпизоды без живой задачи ────────────────────────────────
+  // Не важно, в каком статусе эпизод застрял (queued, generating, ready) —
+  // если для него нет ни pending-, ни running-задачи дольше 8 минут,
+  // значит процесс падал или задача потерялась. Возвращаем её в очередь.
   const stale = addMinutes(nowIso(), -8);
-  const rows = db.prepare("SELECT * FROM episodes WHERE status = 'generating' AND updated_at < ?").all(stale);
-  for (const ep of rows) {
-    const step = ep.stage === 'script' ? 'voice' : ep.stage === 'voice' ? 'footage' : 'edit';
-    // dedupe: иначе восстановление состояния и уже стоящая в очереди задача
-    // отрендерят один и тот же ролик дважды
-    enqueue('episode.render', { episodeId: ep.id, step }, { delayMs: 1000, priority: 4, dedupeKey: `render:${ep.id}:${step}` });
+  const orphans = db.prepare(`
+    SELECT e.* FROM episodes e
+    WHERE e.status IN ('queued', 'generating')
+      AND e.updated_at < ?
+      AND NOT EXISTS (
+        SELECT 1 FROM jobs j
+        WHERE j.status IN ('pending', 'running')
+          AND j.payload LIKE '%' || e.id || '%'
+      )
+    ORDER BY e.updated_at ASC
+    LIMIT 25
+  `).all(stale);
+
+  let n = 0;
+  for (const ep of orphans) {
+    if (ep.stage === 'idea' || ep.stage === 'script') {
+      enqueue('episode.prepare', { episodeId: ep.id }, { delayMs: 500, priority: 3, dedupeKey: `prepare:${ep.id}` });
+    } else {
+      const step = ep.stage === 'voice' ? 'footage' : 'edit';
+      // dedupe: иначе восстановление состояния и уже стоящая в очереди задача
+      // отрендерят один и тот же ролик дважды
+      enqueue('episode.render', { episodeId: ep.id, step }, { delayMs: 1000, priority: 4, dedupeKey: `render:${ep.id}:${step}` });
+    }
     touchEpisode(ep.id, { updated_at: nowIso() });
+    n++;
   }
-  return rows.length;
+
+  // ── 2. эпизоды, готовые к публикации, но потерявшие задачу ────────────────
+  const publishLosts = db.prepare(`
+    SELECT e.* FROM episodes e
+    WHERE e.status = 'scheduled'
+      AND e.scheduled_at <= ?
+      AND NOT EXISTS (
+        SELECT 1 FROM jobs j
+        WHERE j.status IN ('pending', 'running')
+          AND j.payload LIKE '%' || e.id || '%'
+      )
+    ORDER BY e.scheduled_at ASC
+    LIMIT 25
+  `).all(nowIso());
+
+  for (const ep of publishLosts) {
+    enqueue('episode.publish', { episodeId: ep.id }, { delayMs: 0, priority: 2 });
+    n++;
+  }
+
+  if (n > 0) {
+    log({ level: 'warn', actor: 'queue', action: 'episodes.recovered', message: `Восстановлено эпизодов: ${n}` });
+  }
+  return n;
 }

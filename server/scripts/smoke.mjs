@@ -147,6 +147,29 @@ try {
   ok('очередь переживает рестарт', `возвращено задач: ${recovered}, lease сброшен`);
 } catch (err) { fail('очередь переживает рестарт', err); }
 
+// ── эпизоды не теряются: восстановление «зависшего» ролика ──────────────────
+try {
+  const { createEpisode, recoverEpisodeStates } = await import('../src/engine/pipeline.js');
+  const { db, nowIso } = await import('../src/core/db.js');
+  const project = db.prepare('SELECT id FROM projects LIMIT 1').get();
+  const ep = createEpisode({ projectId: project.id, autopilot: 0 }).id;
+  // имитируем падение процесса: статус «в очереди», задачи нет, время ушло
+  db.prepare("UPDATE episodes SET status = 'queued', stage = 'idea', updated_at = ? WHERE id = ?")
+    .run('2000-01-01T00:00:00.000Z', ep);
+  db.prepare("DELETE FROM jobs WHERE payload LIKE ?").run(`%${ep}%`);
+  const n = recoverEpisodeStates();
+  const job = db.prepare("SELECT * FROM jobs WHERE payload LIKE ? AND status = 'pending'").get(`%${ep}%`);
+  if (!job) throw new Error('зависший эпизод не вернулся в очередь');
+  if (!String(job.payload).includes('episode')) throw new Error('создана задача не того типа');
+  // при повторном вызове дубля быть не должно
+  const before = db.prepare('SELECT COUNT(*) n FROM jobs WHERE payload LIKE ?').get(`%${ep}%`).n;
+  recoverEpisodeStates();
+  const after = db.prepare('SELECT COUNT(*) n FROM jobs WHERE payload LIKE ?').get(`%${ep}%`).n;
+  if (after !== before) throw new Error('дубль задачи при повторном восстановлении');
+  db.prepare('DELETE FROM episodes WHERE id = ?').run(ep);
+  ok('зависшие ролики возвращаются в очередь', `восстановлено: ${n}, дублей нет`);
+} catch (err) { fail('зависшие ролики возвращаются в очередь', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────
