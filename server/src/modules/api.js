@@ -4,7 +4,10 @@ import { enqueue, jobStats, drain, requeueDead, recoverStale } from '../core/que
 import { log, recentLogs } from '../core/logger.js';
 import { uid, parseJson, clamp, num, slugify, addDays, addMinutes, fmtNum } from '../core/utils.js';
 import { FORMAT_LABELS, FORMATS, generateIdeas, hashtagsFor, coverSvg, nicheFor, riskScore, NICHES_LIST } from '../engine/brain.js';
-import { createEpisode, nextSlot, pickAccount, collectAnalytics, sweepDueEpisodes, recoverEpisodeStates, touchEpisode } from '../engine/pipeline.js';
+import { createEpisode, nextSlot, nextSlotPlan, pickAccount, collectAnalytics, sweepDueEpisodes, recoverEpisodeStates, touchEpisode } from '../engine/pipeline.js';
+import { scheduleInsights, bestHours, planSlot, upcomingSlots, localParts } from '../engine/schedule.js';
+import { forecastEpisode, projectHealth, autopilotPolicy, rankEpisodes, recalculateAccountQuality } from '../engine/forecast.js';
+import { evaluateAB, abSummary, preferredVariant } from '../engine/abtest.js';
 import { providers } from '../providers/index.js';
 import { moneySummary, transparency, recordClick, recordConversion, simulateTraffic, rpmFor } from '../engine/money.js';
 import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
@@ -589,6 +592,51 @@ api.delete('/products/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Интеллект: когда публиковать, сколько это принесёт, что выиграл A/B ────
+api.get('/insights/schedule', (req, res) => {
+  const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
+  const project = projectId ? db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) : null;
+  const target = project || db.prepare('SELECT * FROM projects WHERE archived = 0 LIMIT 1').get();
+  res.json({
+    ...scheduleInsights({ days: clamp(num(req.query.days, 45), 7, 120) }),
+    plan: target ? planSlot(target.id) : null,
+    upcoming: upcomingSlots(6).map((u) => ({ ...u, localTime: `${String(localParts(new Date(u.scheduled_at), getSettings().timezone || 'UTC').hour).padStart(2, '0')}:${String(localParts(new Date(u.scheduled_at), getSettings().timezone || 'UTC').minute).padStart(2, '0')}` })),
+  });
+});
+
+api.get('/insights/forecast', (req, res) => {
+  const episode = req.query.episodeId ? db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.query.episodeId) : null;
+  if (!episode) return res.status(404).json({ error: 'not_found', message: 'Ролик не найден' });
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(episode.project_id);
+  const account = episode.account_id ? db.prepare('SELECT * FROM accounts WHERE id = ?').get(episode.account_id) : null;
+  res.json(forecastEpisode({ episode, project, account, scheduledAt: episode.scheduled_at }));
+});
+
+api.get('/insights/growth', (req, res) => {
+  const projects = db.prepare('SELECT * FROM projects WHERE archived = 0 ORDER BY created_at ASC').all();
+  res.json({
+    projects: projects.map((p) => ({ projectId: p.id, name: p.name, postsPerDay: p.posts_per_day, ...projectHealth(p.id, { days: clamp(num(req.query.days, 14), 3, 90) }) })),
+    ab: abSummary(),
+    accounts: recalculateAccountQuality({ apply: false }),
+    ranked: rankEpisodes({ limit: 8 }).map((r) => ({ episodeId: r.episodeId, title: r.title, status: r.status, profit: r.forecast.profit, roi: r.forecast.roi, views: r.forecast.expectedViews })),
+  });
+});
+
+api.post('/insights/apply-policy', (_req, res) => {
+  const result = autopilotPolicy({ apply: true });
+  res.json({ ok: true, projects: result.map((p) => ({ projectId: p.projectId, name: p.name, postsPerDay: p.postsPerDay, changed: p.changed, action: p.health.action, reason: p.health.reason })) });
+});
+
+api.get('/abtest/summary', (req, res) => {
+  const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
+  res.json({ ...abSummary({ projectId }), preferred: projectId ? preferredVariant(projectId) : null });
+});
+
+api.post('/abtest/evaluate', (_req, res) => {
+  const decided = evaluateAB();
+  res.json({ ok: true, decided: decided.length, results: decided.map((d) => ({ episodeId: d.episodeId, title: d.title, winner: d.winner, lift: d.lift, ctrA: d.ctrA, ctrB: d.ctrB })) });
+});
+
 // ─── Аналитика ──────────────────────────────────────────────────────────────
 api.get('/analytics/overview', (req, res) => {
   const days = clamp(num(req.query.days, 14), 3, 90);
@@ -706,6 +754,15 @@ api.get('/analytics/overview', (req, res) => {
     byFormat,
     byTheme,
     top,
+    intelligence: {
+      bestHours: bestHours(projectId ? null : 'reels', 3),
+      schedule: scheduleInsights().platforms.map((p) => ({ platform: p.platform, best: p.best, learned: p.learned, samples: p.samples })),
+      ab: abSummary({ projectId }),
+      weights: (() => {
+        const meta = (() => { try { return JSON.parse(getSettings().viral_weights || 'null'); } catch { return null; } })();
+        return meta ? { source: 'learned', samples: meta.samples, weights: meta.weights, lift: meta.lift } : { source: 'prior' };
+      })(),
+    },
     ab: ab.map((r) => {
       const a = r.a_views || 0;
       const b = r.b_views || 0;

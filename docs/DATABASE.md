@@ -390,6 +390,9 @@ RETURNING j.*;
 | `viral` | INTEGER | вирусный скор 0–100 |
 | `viral_meta` | TEXT (JSON) | разбор по факторам и рекомендации |
 | `cost_cents` | INTEGER | себестоимость ролика в копейках |
+| `ab_winner` | TEXT | `A` / `B` / `tie` — решение закрытого A/B-теста |
+| `ab_meta` | TEXT (JSON) | охват и CTR вариантов, разрыв, z-оценка, уверенность |
+| `forecast` | TEXT (JSON) | прогноз, с которым ролик ушёл в публикацию (охват, доход, ROI, множители) |
 
 ### Новые поля `publications`
 
@@ -428,6 +431,11 @@ RETURNING j.*;
 | `ts` | TEXT | время |
 
 Индексы: `ix_conv_pub(publication_id)`, `ix_conv_ext(external_id) WHERE external_id IS NOT NULL`.
+
+### `settings.viral_weights`
+
+JSON вида `{ "weights": { "hook": 0.31, … }, "lift": { "hook": 1.4, … }, "samples": 104, "at": "…" }`.
+Веса вирусного скора, пересчитанные на своих публикациях; при отсутствии ключа используются приоры.
 
 ### Миграции
 

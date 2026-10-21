@@ -240,6 +240,9 @@ function ensureColumns() {
       viral: 'INTEGER DEFAULT 0',
       viral_meta: "TEXT DEFAULT '{}'",
       cost_cents: 'INTEGER DEFAULT 0',
+      ab_winner: 'TEXT',
+      ab_meta: "TEXT DEFAULT '{}'",
+      forecast: "TEXT DEFAULT '{}'",
     },
     accounts: {
       access_token: 'TEXT',

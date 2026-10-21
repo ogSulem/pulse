@@ -15,6 +15,7 @@ export default function Calendar() {
   const [episodes, setEpisodes] = useState([]);
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [sched, setSched] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -30,6 +31,12 @@ export default function Calendar() {
   };
 
   useEffect(() => { load(); }, [data.pipeline]);
+
+  useEffect(() => {
+    let alive = true;
+    api.scheduleInsights().then((res) => { if (alive) setSched(res); }).catch(() => {});
+    return () => { alive = false; };
+  }, [data.pipeline?.published]);
 
   const days = useMemo(() => {
     const out = [];
@@ -89,6 +96,64 @@ export default function Calendar() {
             <Badge tone={String(data.settings?.autopilot_global) === '1' ? 'success' : 'muted'} dot>
               {String(data.settings?.autopilot_global) === '1' ? 'публикует сам' : 'только вручную'}
             </Badge>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Умное расписание: когда публиковать и почему ─────────────── */}
+      <div className="card pad-lg">
+        <div className="card-head">
+          <div>
+            <h2>Умное расписание</h2>
+            <p>
+              Часы публикаций: приоры площадок + факт ваших охватов по локальному времени.
+              {sched?.timezone ? ` Таймзона — ${sched.timezone}.` : ''}
+            </p>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Badge tone="accent" dot>{(sched?.platforms || []).some((p) => p.learned) ? 'учится на ваших данных' : 'приоры площадок'}</Badge>
+          </div>
+        </div>
+
+        <div className="col" style={{ gap: 14 }}>
+          {(sched?.platforms || []).map((p) => {
+            const bestHours = new Set((p.best || []).map((b) => b.hour));
+            return (
+              <div key={p.platform} style={{ display: 'grid', gridTemplateColumns: '132px 1fr', gap: 14, alignItems: 'center' }}>
+                <div>
+                  <div className="row" style={{ gap: 6 }}>
+                    <PlatformIcon platform={p.platform} size={14} />
+                    <b style={{ fontSize: 12.5 }}>{p.platform === 'tiktok' ? 'TikTok' : 'Reels'}</b>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 3 }}>
+                    {p.learned ? `${p.samples} наблюдений` : p.label}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 3, alignItems: 'flex-end', height: 44 }}>
+                  {p.hours.map((h) => {
+                    const isBest = bestHours.has(h.hour);
+                    const height = Math.max(6, Math.round((h.score / 1.2) * 40));
+                    const night = h.hour < 7 || h.hour > 22;
+                    return (
+                      <div key={h.hour} title={`${String(h.hour).padStart(2, '0')}:00 — скор ${h.score}${h.samples ? `, ${h.samples} постов` : ''}`}
+                        style={{ flex: 1, height, borderRadius: 3,
+                          background: isBest ? 'linear-gradient(180deg,#c4b5fd,#7c3aed)' : night ? 'rgba(255,255,255,.07)' : 'rgba(255,255,255,.16)',
+                          opacity: isBest ? 1 : 0.9 }} />
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="row-between wrap" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line)', gap: 10 }}>
+          <div style={{ fontSize: 11.5, color: 'var(--text-2)' }}>
+            <Icon name="clock" size={13} style={{ verticalAlign: '-2px', marginRight: 6, color: 'var(--violet-2)' }} />
+            {sched?.plan?.reason || 'Следующий слот рассчитается, когда появятся свободные окна'}
+          </div>
+          <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>
+            {sched?.plan ? `следующий слот: ${new Date(sched.plan.at).toLocaleString('ru-RU', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} · источник: ${sched.plan.source === 'data' ? 'ваши данные' : 'приор'}` : ''}
           </div>
         </div>
       </div>

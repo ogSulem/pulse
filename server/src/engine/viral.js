@@ -17,8 +17,35 @@
 // Обратная связь: после публикации фактические метрики сравниваются с прогнозом
 // и модель корректируется (см. calibration()).
 // ─────────────────────────────────────────────────────────────────────────────
-import { db } from '../core/db.js';
-import { clamp } from '../core/utils.js';
+import { db, getSettings, setSettings } from '../core/db.js';
+import { clamp, parseJson } from '../core/utils.js';
+
+// Приоры весов. Дальше они уточняются на фактических данных (recalibrate()).
+export const PRIOR_WEIGHTS = { hook: 0.30, length: 0.16, pace: 0.14, retention: 0.18, caption: 0.12, novelty: 0.10 };
+const MIN_SAMPLES = 12;
+
+let weightCache = { at: 0, weights: PRIOR_WEIGHTS, meta: null };
+const WEIGHT_TTL = 60000;
+
+/** Веса факторов: приоры или обученные на своих публикациях */
+export function currentWeights({ fresh = false } = {}) {
+  if (!fresh && Date.now() - weightCache.at < WEIGHT_TTL) return weightCache;
+  const raw = getSettings().viral_weights;
+  let meta = null;
+  let weights = { ...PRIOR_WEIGHTS };
+  try {
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed?.weights) {
+      const sum = Object.values(parsed.weights).reduce((a, b) => a + Number(b || 0), 0);
+      if (sum > 0.5 && sum < 1.5) {
+        weights = Object.fromEntries(Object.entries(PRIOR_WEIGHTS).map(([k]) => [k, Number(parsed.weights[k] ?? PRIOR_WEIGHTS[k])]));
+        meta = { samples: parsed.samples, at: parsed.at, lift: parsed.lift };
+      }
+    }
+  } catch { /* повреждённое значение — используем приоры */ }
+  weightCache = { at: Date.now(), weights, meta };
+  return weightCache;
+}
 
 const HOOK_PATTERNS = [
   { re: /^(почему|как|что|когда|сколько|зачем|кто)\b/i, points: 14, label: 'вопрос в первой фразе' },
@@ -94,6 +121,10 @@ export function scoreViral({ title = '', scenes = [], description = '', hashtags
   }
   factors.push({ id: 'novelty', label: 'Новизна темы', value: novelty, weight: 0.10, detail: novelty >= 90 ? 'тема ещё не публиковалась' : 'тема уже выходила — нужен новый угол' });
 
+  // веса: приоры или обученные на факте (см. recalibrate)
+  const { weights, meta: weightMeta } = currentWeights();
+  for (const f of factors) f.weight = weights[f.id] ?? f.weight;
+
   const score = Math.round(factors.reduce((acc, f) => acc + f.value * f.weight, 0));
   const weakest = [...factors].sort((a, b) => a.value - b.value)[0];
   const advice = [];
@@ -116,6 +147,8 @@ export function scoreViral({ title = '', scenes = [], description = '', hashtags
       scenes: sceneList.length,
     },
     confidence: 'эвристика по 6 признакам, не прогноз алгоритма',
+    weights: Object.fromEntries(factors.map((f) => [f.id, f.weight])),
+    weightsSource: weightMeta ? `обучены на ${weightMeta.samples} роликах` : 'приоры (данных ещё мало)',
     computed_at: new Date().toISOString(),
   };
 }
@@ -123,6 +156,61 @@ export function scoreViral({ title = '', scenes = [], description = '', hashtags
 export function saveViral(episodeId, report) {
   db.prepare('UPDATE episodes SET viral = ?, viral_meta = ? WHERE id = ?')
     .run(report.score, JSON.stringify(report), episodeId);
+}
+
+/**
+ * Переобучение весов: какой признак реально отличает ролики с большим охватом.
+ * Считаем медианное деление по каждому фактору и сравниваем охват «верхних» и
+ * «нижних» роликов. Вес растёт там, где разрыв больше, но не более чем втрое —
+ * чтобы один удачный ролик не перекосил модель.
+ */
+export function recalibrate({ minSamples = MIN_SAMPLES } = {}) {
+  const rows = db.prepare(`SELECT e.id, e.project_id, e.viral_meta,
+      COALESCE(SUM(pb.views), 0) views
+    FROM episodes e JOIN publications pb ON pb.episode_id = e.id
+    WHERE e.viral_meta IS NOT NULL AND e.viral_meta != '{}' AND pb.status = 'published'
+    GROUP BY e.id HAVING views > 0`).all();
+  if (rows.length < minSamples) {
+    return { ready: false, samples: rows.length, need: minSamples, weights: { ...PRIOR_WEIGHTS } };
+  }
+
+  // нормировка на медиану проекта: сравниваем ролики внутри одного проекта
+  const byProject = new Map();
+  for (const r of rows) {
+    if (!byProject.has(r.project_id)) byProject.set(r.project_id, []);
+    byProject.get(r.project_id).push(r.views);
+  }
+  const medians = new Map();
+  for (const [pid, list] of byProject) {
+    const s = [...list].sort((a, b) => a - b);
+    medians.set(pid, s[Math.floor(s.length / 2)] || 1);
+  }
+  const samples = rows.map((r) => ({
+    ratio: r.views / Math.max(1, medians.get(r.project_id)),
+    factors: Object.fromEntries((parseJson(r.viral_meta, {}).factors || []).map((f) => [f.id, Number(f.value)])),
+  })).filter((s) => Object.keys(s.factors).length);
+
+  const lift = {};
+  for (const id of Object.keys(PRIOR_WEIGHTS)) {
+    const withFactor = samples.filter((s) => Number.isFinite(s.factors[id]));
+    if (withFactor.length < minSamples) { lift[id] = 1; continue; }
+    const sorted = [...withFactor].sort((a, b) => a.factors[id] - b.factors[id]);
+    const half = Math.floor(sorted.length / 2);
+    const low = sorted.slice(0, half);
+    const high = sorted.slice(sorted.length - half);
+    const avg = (arr) => arr.reduce((a, s) => a + s.ratio, 0) / Math.max(1, arr.length);
+    const hi = avg(high);
+    const lo = avg(low);
+    lift[id] = lo > 0 ? clamp(hi / lo, 0.5, 3) : 1;
+  }
+
+  const raw = Object.fromEntries(Object.keys(PRIOR_WEIGHTS).map((k) => [k, PRIOR_WEIGHTS[k] * lift[k]]));
+  const sum = Object.values(raw).reduce((a, b) => a + b, 0);
+  const weights = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, Math.round((v / sum) * 1000) / 1000]));
+  const payload = { weights, samples: samples.length, lift, at: new Date().toISOString() };
+  setSettings({ viral_weights: JSON.stringify(payload) });
+  weightCache = { at: Date.now(), weights, meta: { samples: samples.length, at: payload.at, lift } };
+  return { ready: true, ...payload };
 }
 
 /** Калибровка: сравниваем прогноз с фактом по завершённым публикациям */
@@ -140,5 +228,7 @@ export function calibration() {
     highScoreAvgViews: avg(high),
     lowScoreAvgViews: avg(low),
     lift: low.length && avg(low) ? Number((avg(high) / avg(low)).toFixed(2)) : null,
+    weights: currentWeights().weights,
+    weightsSource: currentWeights().meta ? 'learned' : 'prior',
   };
 }

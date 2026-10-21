@@ -81,6 +81,12 @@ export const api = {
   deleteProduct: (id) => request(`/products/${id}`, { method: 'DELETE' }),
 
   analytics: (params = {}) => request(`/analytics/overview?${new URLSearchParams(params)}`),
+  scheduleInsights: (params = {}) => request(`/insights/schedule?${new URLSearchParams(params)}`),
+  forecast: (episodeId) => request(`/insights/forecast?episodeId=${encodeURIComponent(episodeId)}`),
+  growth: (params = {}) => request(`/insights/growth?${new URLSearchParams(params)}`),
+  applyPolicy: () => request('/insights/apply-policy', { method: 'POST', body: {} }),
+  abSummary: (params = {}) => request(`/abtest/summary?${new URLSearchParams(params)}`),
+  evaluateAB: () => request('/abtest/evaluate', { method: 'POST', body: {} }),
   money: (params = {}) => request(`/money?${new URLSearchParams(params)}`),
   transparency: () => request('/transparency'),
   checkEpisode: (id, payload = {}) => request(`/episodes/${id}/check`, { method: 'POST', body: payload }),

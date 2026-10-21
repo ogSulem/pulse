@@ -170,6 +170,85 @@ try {
   ok('зависшие ролики возвращаются в очередь', `восстановлено: ${n}, дублей нет`);
 } catch (err) { fail('зависшие ролики возвращаются в очередь', err); }
 
+// ── умное расписание ────────────────────────────────────────────────────────
+try {
+  const { planSlot, hourScores, bestHours, localParts, zonedToUtc } = await import('../src/engine/schedule.js');
+  const { db } = await import('../src/core/db.js');
+  const project = db.prepare('SELECT * FROM projects LIMIT 1').get();
+  const plan = planSlot(project.id);
+  const tz = plan.timezone;
+  const local = localParts(new Date(plan.at), tz);
+  if (local.hour < 9 || local.hour > 22) throw new Error(`слот вне окна публикаций: ${local.hour}:00`);
+  if (new Date(plan.at).getTime() < Date.now()) throw new Error('слот в прошлом');
+  if (!plan.reason || !plan.source) throw new Error('нет объяснения слота');
+  // таймзона: 12:00 Москвы = 09:00 UTC
+  const utc = zonedToUtc(2026, 10, 21, 12, 0, 'Europe/Moscow');
+  if (utc.toISOString() !== '2026-10-21T09:00:00.000Z') throw new Error(`конверсия таймзоны: ${utc.toISOString()}`);
+  const hours = hourScores('reels');
+  if (hours.length !== 24) throw new Error('не 24 часа в профиле');
+  const best = bestHours('reels', 2);
+  if (!best.length) throw new Error('нет лучших часов');
+  ok('умное расписание', `${plan.reason.slice(0, 34)}…, таймзона ${tz}`);
+} catch (err) { fail('умное расписание', err); }
+
+// ── прогноз прибыли ─────────────────────────────────────────────────────────
+try {
+  const { forecastEpisode, projectHealth } = await import('../src/engine/forecast.js');
+  const { db } = await import('../src/core/db.js');
+  const episode = db.prepare("SELECT * FROM episodes WHERE status = 'published' LIMIT 1").get();
+  const f = forecastEpisode({ episode });
+  if (!(f.expectedViews > 0)) throw new Error('нет прогноза охвата');
+  if (Math.abs(f.profit - (f.revenue - f.cost)) > 0.02) throw new Error('прибыль не сходится с доходом и расходом');
+  if (!f.factors.viral || !f.factors.hour || !f.factors.account) throw new Error('нет разложения факторов');
+  const health = projectHealth(episode.project_id);
+  if (!['scale', 'hold', 'fix', 'pause'].includes(health.action)) throw new Error('неизвестное решение по проекту');
+  ok('прогноз прибыли', `${f.expectedViews} просм., ${f.profit} ₽, ROI ${f.roi}%`);
+} catch (err) { fail('прогноз прибыли', err); }
+
+// ── A/B закрывается решением ────────────────────────────────────────────────
+try {
+  const { db, nowIso } = await import('../src/core/db.js');
+  const { evaluateAB, preferredVariant } = await import('../src/engine/abtest.js');
+  const project = db.prepare('SELECT * FROM projects LIMIT 1').get();
+  const ep = db.prepare("SELECT * FROM episodes WHERE status = 'published' LIMIT 1").get();
+  // чистим прежние публикации эпизода, чтобы тест был детерминированным
+  db.prepare('DELETE FROM publications WHERE episode_id = ?').run(ep.id);
+  db.prepare("UPDATE episodes SET ab_test = 1, ab_winner = NULL, ab_meta = '{}', published_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 72 * 3600000).toISOString(), ep.id);
+  const ins = db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, status, published_at, views, clicks, target_views, created_at)
+    VALUES (?, ?, ?, NULL, 'reels', ?, 'published', ?, ?, ?, ?, ?)`);
+  ins.run('pb_smoke_a', ep.id, project.id, 'A', nowIso(), 5000, 60, 5000, nowIso());
+  ins.run('pb_smoke_b', ep.id, project.id, 'B', nowIso(), 2000, 24, 2000, nowIso());
+  const decided = evaluateAB();
+  const row = db.prepare('SELECT ab_winner, ab_meta FROM episodes WHERE id = ?').get(ep.id);
+  if (row.ab_winner !== 'A') throw new Error(`победитель не определён: ${row.ab_winner}`);
+  const meta = JSON.parse(row.ab_meta || '{}');
+  if (!(meta.lift > 30)) throw new Error('разница не посчитана');
+  if (!decided.length) throw new Error('решение не попало в отчёт');
+  const pref = preferredVariant(project.id);
+  if (!['A', 'B'].includes(pref.variant)) throw new Error('нет предпочитаемого варианта');
+  ok('A/B закрывается решением', `победил ${row.ab_winner}, разрыв ${meta.lift}%, CTR ${meta.ctrA}% / ${meta.ctrB}%`);
+} catch (err) { fail('A/B закрывается решением', err); }
+
+// ── веса вирусного скора обучаются ──────────────────────────────────────────
+try {
+  const { recalibrate, scoreViral } = await import('../src/engine/viral.js');
+  const res = recalibrate({ minSamples: 8 });
+  if (!res.ready) throw new Error(`мало данных для проверки: ${res.samples}`);
+  const sum = Object.values(res.weights).reduce((a, b) => a + b, 0);
+  if (Math.abs(sum - 1) > 0.02) throw new Error(`веса не нормированы: ${sum}`);
+  const report = scoreViral({
+    title: 'Почему отдых не восстанавливает',
+    scenes: [{ text: 'Почему 8 часов сна не спасут', seconds: 5 }, { text: 'Отдых — это смена режима', seconds: 6 }],
+    description: 'Разбор привычек и отдыха: 3 шага и проверка на себе. Смотри до конца и напиши, что думаешь.',
+    hashtags: ['#сон', '#отдых', '#привычки', '#психология', '#режим'],
+  });
+  if (report.weightsSource !== 'приоры (данных ещё мало)' && !/обучены/.test(report.weightsSource)) {
+    throw new Error(`неизвестный источник весов: ${report.weightsSource}`);
+  }
+  ok('веса скора обучаются', `${res.samples} роликов, сильнейший фактор — ${Object.entries(res.weights).sort((a, b) => b[1] - a[1])[0][0]}`);
+} catch (err) { fail('веса скора обучаются', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { db, nowIso, ensureSettings } from '../core/db.js';
 import { uid, seededRandom, addDays, addMinutes } from '../core/utils.js';
+import { zonedToUtc, localParts } from '../engine/schedule.js';
 import { buildScript, hashtagsFor, generateIdeas, riskScore, COVER_PALETTES } from '../engine/brain.js';
 import { growthCurve } from '../engine/pipeline.js';
 import { log } from '../core/logger.js';
@@ -96,6 +97,22 @@ function truncateAll() {
   for (const t of tables) db.prepare(`DELETE FROM ${t}`).run();
 }
 
+// демо-реальность: лента активнее в определённые часы, поэтому охват зависит
+// от локального времени публикации. Именно этот эффект потом «находит»
+// engine/schedule.js на собственных данных — и показывает основу решения.
+function hourBoost(publishedAt) {
+  const tz = process.env.PULSE_TZ || 'Europe/Moscow';
+  let hour = 12;
+  try {
+    hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false }).format(new Date(publishedAt))) % 24;
+  } catch {}
+  const peaks = hour >= 11 && hour <= 13 || hour >= 18 && hour <= 21;
+  const shoulder = hour >= 9 && hour <= 22;
+  if (peaks) return 1.22;
+  if (shoulder) return 1;
+  return 0.62;
+}
+
 function makePublicationsFor(episode, project, accounts, rnd, publishedAt) {
   const platforms = rnd() > 0.45 ? ['reels', 'tiktok'] : ['reels'];
   const out = [];
@@ -106,7 +123,7 @@ function makePublicationsFor(episode, project, accounts, rnd, publishedAt) {
     const variants = rnd() > 0.55 ? ['A', 'B'] : ['A'];
     const viral = rnd() < 0.14 ? 5 + rnd() * 8 : 1;
     const base = 900 + rnd() * 2200;
-    const targetA = Math.round(base * viral * (1 + account.quality / 260));
+    const targetA = Math.round(base * viral * (1 + account.quality / 260) * hourBoost(publishedAt));
     for (const variant of variants) {
       // оба варианта A/B живут на одном аккаунте, разница только в обложке/описании
       const target = Math.round(targetA * (variant === 'B' ? 0.7 + rnd() * 0.6 : 1));
@@ -177,7 +194,10 @@ export function seedBase() {
       for (let k = 0; k < postsToday; k++) {
         const idea = ideaRows[Math.floor(rnd() * ideaRows.length)];
         const script = buildScript(project, idea, { product, platform: 'reels', duration: project.duration_sec });
-        const publishedAt = addMinutes(addDays(ts, -d), 9 * 60 + k * 300 + Math.floor(rnd() * 90));
+        // публикуем в локальные часы (11:00 и 19:00 — пики ленты), а не «сейчас + 9 часов»
+        const dayParts = localParts(addDays(ts, -d), process.env.PULSE_TZ || 'Europe/Moscow');
+        const hourSlot = [11, 19, 15][k % 3];
+        const publishedAt = zonedToUtc(dayParts.year, dayParts.month, dayParts.day, hourSlot, Math.floor(rnd() * 50), process.env.PULSE_TZ || 'Europe/Moscow').toISOString();
         const episodeId = uid('ep_');
         const scriptId = uid('sc_');
         db.prepare(`INSERT INTO scripts (id, idea_id, project_id, hook, scenes, cta, caption, hashtags, duration_sec, tone, status, created_at)

@@ -370,6 +370,33 @@ PATCH /api/episodes/{id}/caption
 
 Быстрая правка перед публикацией: текст и теги, без пересборки ролика.
 
+### Интеллект: расписание, прогноз, A/B
+
+| Метод | Путь | Что возвращает |
+|-------|------|----------------|
+| GET | `/insights/schedule?days=&projectId=` | профиль 24 часов по площадкам, лучшие часы, источник (`prior`/`data`), следующий слот с причиной |
+| GET | `/insights/forecast?episodeId=` | прогноз охвата, дохода, прибыли и ROI ролика + разложение по множителям |
+| GET | `/insights/growth?days=` | здоровье проектов (`scale`/`hold`/`fix`/`pause`), A/B-сводка, качество аккаунтов, рейтинг роликов по прогнозу |
+| POST | `/insights/apply-policy` | применить темп автопилота по деньгам (1–6 постов в день), вернуть что изменилось |
+| GET | `/abtest/summary?projectId=` | сколько тестов закрыто, средний разрыв, предпочитаемый вариант проекта |
+| POST | `/abtest/evaluate` | принудительно закрыть созревшие тесты и вернуть решения |
+
+```bash
+curl -s "http://localhost:8080/api/insights/schedule" -H "Authorization: Bearer $TOKEN"
+# → { "timezone": "Europe/Moscow",
+#     "platforms": [{ "platform": "reels", "learned": true, "samples": 153,
+#                     "best": [{ "hour": 19, "score": 1.02, "samples": 54, "source": "data" }, …] }],
+#     "plan": { "at": "2026-10-22T16:07:00.000Z", "hour": 19, "source": "data",
+#               "reason": "19:07 — ваш лучший час по 54 публикациям (скор 1.02)" } }
+
+curl -s "http://localhost:8080/api/insights/forecast?episodeId=ep_…" -H "Authorization: Bearer $TOKEN"
+# → { "expectedViews": 4628, "revenue": 63.4, "cost": 66, "profit": -2.6, "roi": -4,
+#     "factors": { "baseline": 3200, "baselineSource": "project", "viral": {…}, "hour": {…}, "account": {…} } }
+```
+
+`POST /abtest/evaluate` отвечает списком решений: `{ episodeId, winner: "A"|"B"|"tie", lift, ctrA, ctrB }`.
+Разница считается симметрично (A/B = 5000/2000 → `+60%`), а при разнице меньше 8% тест закрывается как `tie`.
+
 ### Деньги
 
 ```http

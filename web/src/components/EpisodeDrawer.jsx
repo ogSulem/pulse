@@ -146,9 +146,17 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
   const toast = useToast();
   const [data, setData] = useState(null);
   const [tab, setTab] = useState('content');
+  const [forecast, setForecast] = useState(null);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState({ title: '', description: '', hashtags: '', scenes: [] });
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  useEffect(() => {
+    if (!episodeId) { setForecast(null); return; }
+    let alive = true;
+    api.forecast(episodeId).then((res) => { if (alive) setForecast(res); }).catch(() => {});
+    return () => { alive = false; };
+  }, [episodeId]);
 
   const load = async () => {
     if (!episodeId) return;
@@ -283,6 +291,22 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                     <a href={data.video_path} target="_blank" rel="noreferrer" className="link-btn">скачать</a>
                   </div>
                 ) : null}
+                {forecast && !pubs.length && (
+                  <div className="col" style={{ gap: 4, marginTop: 10, padding: '9px 11px', border: '1px solid var(--line)', borderRadius: 10, background: 'rgba(139,92,246,.07)' }}>
+                    <div className="row-between" style={{ gap: 8 }}>
+                      <span style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.08em', color: 'var(--violet-3)', fontWeight: 700 }}>прогноз</span>
+                      <span style={{ fontSize: 10, color: 'var(--muted)' }}>медиана {fmt(forecast.factors.baseline)} · {forecast.factors.baselineSource === 'project' ? 'свой проект' : forecast.factors.baselineSource === 'platform' ? 'площадка' : 'фолбэк'}</span>
+                    </div>
+                    <div className="row wrap" style={{ gap: 14, fontSize: 11 }}>
+                      <span><b>{fmt(forecast.expectedViews)}</b> <span style={{ color: 'var(--muted)' }}>просмотров</span></span>
+                      <span><b>{money(forecast.revenue, forecast.currency)}</b> <span style={{ color: 'var(--muted)' }}>доход</span></span>
+                      <span><b className={forecast.profit >= 0 ? 'tone-green' : 'tone-rose'}>{money(forecast.profit, forecast.currency)}</b> <span style={{ color: 'var(--muted)' }}>прибыль · ROI {forecast.roi}%</span></span>
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>
+                      скор {forecast.factors.viral.score} × {forecast.factors.viral.factor} · час {String(forecast.factors.hour.local).padStart(2, '0')}:00 × {forecast.factors.hour.score} · аккаунт × {forecast.factors.account.factor}
+                    </div>
+                  </div>
+                )}
                 {pubs.length > 0 && (
                   <div className="hr-stats" style={{ marginTop: 12 }}>
                     <div className="hr-stat"><span className="v">{fmt(views)}</span><span className="l">просмотры</span></div>

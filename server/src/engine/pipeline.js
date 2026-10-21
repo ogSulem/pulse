@@ -10,6 +10,9 @@ import { uid, parseJson, clamp, addMinutes, addDays, num, pick } from '../core/u
 import { buildScript, hashtagsFor, platformCaption, riskScore, generateIdeas, buildUtmUrl, nicheFor } from './brain.js';
 import { providers } from '../providers/index.js';
 import { renderEpisode, renderCover, renderAvailable, renderInfo, MEDIA_DIR } from './render.js';
+import { planSlot, nextSlotIso } from './schedule.js';
+import { forecastEpisode, autopilotPolicy, recalculateAccountQuality } from './forecast.js';
+import { preferredVariant, evaluateAB } from './abtest.js';
 import { checkCompliance, disclosureText, saveCompliance, PLATFORM_RULES } from './compliance.js';
 import { scoreViral, saveViral } from './viral.js';
 import fs from 'node:fs';
@@ -279,16 +282,15 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
 });
 
 // ── Расписание и выбор аккаунта ─────────────────────────────────────────────
+// Умное расписание живёт в engine/schedule.js (окна аккаунтов, таймзона,
+// пики площадок и собственные данные по часам). Здесь — совместимый фасад.
 export function nextSlot(projectId, after = nowIso()) {
-  const project = getProject(projectId);
-  const perDay = clamp(num(project?.posts_per_day, 2), 1, 12);
-  const gap = Math.round((24 * 60) / perDay);
-  const last = db.prepare("SELECT MAX(scheduled_at) t FROM episodes WHERE project_id = ? AND status IN ('scheduled','published')").get(projectId);
-  const lastAt = last?.t && new Date(last.t) > new Date(after) ? new Date(last.t) : new Date(after);
-  // джиттер, чтобы посты не уходили ровно по секундам (антибот-гигиена)
-  const jitter = Math.round(gap * 0.12 * (Math.random() * 2 - 1));
-  const slot = new Date(lastAt.getTime() + Math.max(35, gap + jitter) * 60000);
-  return slot.toISOString();
+  return nextSlotIso(projectId, after);
+}
+
+/** Слот + объяснение, почему именно это время */
+export function nextSlotPlan(projectId, after = nowIso()) {
+  return planSlot(projectId, { after });
 }
 
 function accountQuota(account) {
@@ -362,7 +364,8 @@ export function consumeQuota(accountId) {
 registerHandler('episode.publish', async ({ episodeId }) => {
   let episode = getEpisode(episodeId);
   if (!episode) return;
-  if (episode.status === 'published') return;
+  // статус «published» не блокирует: если добавили вторую площадку, ролик
+  // должен доехать и туда. Дубли отсекает карта уже опубликованных площадок.
   if (episode.status === 'review' || episode.status === 'failed' || episode.status === 'paused') {
     log({ level: 'warn', actor: 'engine', action: 'publish.skipped', entityType: 'episode', entityId: episodeId, message: `Публикация отменена: статус «${episode.status}»` });
     return;
@@ -386,96 +389,148 @@ registerHandler('episode.publish', async ({ episodeId }) => {
     return;
   }
 
-  const platforms = pickPlatforms(project);
-  let account = platforms.map((p) => pickAccount(p, project?.id)).find(Boolean);
-  if (!account) {
+  // ── Кому публикуем: по одному свободному аккаунту на каждую площадку ──────
+  // Раньше ролик уходил только на одну площадку — половина охвата терялась.
+  const already = new Map(db.prepare(
+    "SELECT platform, COUNT(*) n FROM publications WHERE episode_id = ? AND status = 'published' GROUP BY platform"
+  ).all(episodeId).map((r) => [r.platform, r.n]));
+
+  const wanted = pickPlatforms(project);
+  const targets = [];
+  const missing = [];
+  for (const platform of wanted) {
+    if (already.has(platform)) continue;
+    const acc = pickAccount(platform, project?.id);
+    if (acc) targets.push({ platform, account: acc });
+    else missing.push(platform);
+  }
+
+  // всё уже опубликовано — второй раз не публикуем
+  if (!targets.length && !missing.length) return;
+
+  if (!targets.length) {
     const postpone = addMinutes(nowIso(), 20 + Math.floor(Math.random() * 25));
-    touchEpisode(episodeId, { scheduled_at: postpone, status: 'scheduled' });
-    enqueue('episode.publish', { episodeId }, { delayMs: 21 * 60000, priority: 2, dedupeKey: null });
-    log({ level: 'warn', actor: 'guard', action: 'publish.throttled', entityType: 'episode', entityId: episodeId, message: `Нет свободного аккаунта: квоты/интервалы исчерпаны. Перенос на ${new Date(postpone).toLocaleTimeString('ru-RU').slice(0, 5)}`, meta: { postpone } });
+    touchEpisode(episodeId, { scheduled_at: postpone, status: 'scheduled', error: `Нет свободной квоты: ${missing.join(', ')}` });
+    enqueue('episode.publish', { episodeId }, { delayMs: 21 * 60000, priority: 2 });
+    log({ level: 'warn', actor: 'guard', action: 'publish.throttled', entityType: 'episode', entityId: episodeId, message: `Нет свободного аккаунта: ${missing.join(', ')}. Перенос на ${new Date(postpone).toLocaleTimeString('ru-RU').slice(0, 5)}`, meta: { postpone, missing } });
     return;
   }
 
-  const scenes = parseJson(episode.scenes, []);
   const hashtags = parseJson(episode.hashtags, []);
-  const variants = Number(episode.ab_test) === 1 ? ['A', 'B'] : ['A'];
+  const preferred = preferredVariant(project?.id);
   const created = [];
+  const blocked = [];
 
-  for (const variant of variants) {
-    const platform = account.platform;
-    const caption = variant === 'A'
-      ? platformCaption({ caption: episode.description, hashtags }, platform, product)
-      : platformCaption({
-          caption: `${episode.description.split('\n')[0]} ${pick(['Второй вариант описания — проверяем гипотезу.', 'Короткая версия: суть в первых двух строках.', 'Альтернативный заход — без лишних слов.'])}`,
-          hashtags: hashtagsFor(project || {}, platform, { tags: hashtags }, 6),
-        }, platform, product);
+  for (const [index, target] of targets.entries()) {
+    const { platform, account } = target;
+    // A/B гоняем только когда публикуем на одну площадку: иначе это удвоение
+    // квоты, а не эксперимент. На второй площадке сразу выходит лучший стиль.
+    const variants = Number(episode.ab_test) === 1 && targets.length === 1 ? ['A', 'B'] : [preferred.variant];
 
-    const result = await providers.publish.send({
-      platform,
-      account,
-      description: caption,
-      videoRef: episode.video_path || episodesVideoRef(episode),
-      videoPath: episode.video_path ? path.join(MEDIA_DIR, path.basename(episode.video_path)) : null,
-      coverPath: parseJson(episode.cover_paths, {})[variant] || null,
-      privacy: privacyFor(account.platform),
-      scheduledAt: nowIso(),
-    }).catch((err) => {
-      // Лимиты и баны не ретраятся пачкой: публикация переносится, аккаунт остывает.
-      if (err.kind === 'limit' || err.kind === 'ban') {
-        log({ level: 'warn', actor: 'publisher', action: 'publish.limit', entityType: 'account', entityId: account.id, message: err.message, meta: { kind: err.kind } });
-        if (err.kind === 'ban') {
-          db.prepare("UPDATE accounts SET status = 'cooldown', blocked_until = ?, updated_at = ? WHERE id = ?")
-            .run(addDays(nowIso(), 1), nowIso(), account.id);
+    for (const variant of variants) {
+      const caption = buildCaption({ episode, project, product, platform, variant, hashtags });
+      const result = await providers.publish.send({
+        platform,
+        account,
+        description: caption,
+        videoRef: episode.video_path || episodesVideoRef(episode),
+        videoPath: episode.video_path ? path.join(MEDIA_DIR, path.basename(episode.video_path)) : null,
+        coverPath: parseJson(episode.cover_paths, {})[variant] || null,
+        privacy: privacyFor(platform),
+        scheduledAt: nowIso(),
+      }).catch((err) => {
+        // Лимиты и баны не ретраятся пачкой: публикация переносится, аккаунт остывает.
+        if (err.kind === 'limit' || err.kind === 'ban') {
+          log({ level: 'warn', actor: 'publisher', action: 'publish.limit', entityType: 'account', entityId: account.id, message: err.message, meta: { kind: err.kind } });
+          if (err.kind === 'ban') {
+            db.prepare("UPDATE accounts SET status = 'cooldown', blocked_until = ?, updated_at = ? WHERE id = ?")
+              .run(addDays(nowIso(), 1), nowIso(), account.id);
+          }
+          blocked.push(platform);
+          return null;
         }
-        const postpone = addMinutes(nowIso(), 60 + Math.floor(Math.random() * 60));
-        touchEpisode(episodeId, { status: 'scheduled', scheduled_at: postpone, error: err.message });
-        enqueue('episode.publish', { episodeId }, { delayMs: 62 * 60000, priority: 2 });
-        return null;
-      }
-      throw err;
-    });
-    if (!result) return;
+        throw err;
+      });
+      if (!result) break; // на этой площадке стоп, остальные площадки не страдают
 
-    const pid = uid('pb_');
-    const ts = nowIso();
-    const accountAgeDays = 20 + Math.floor(Math.random() * 120);
-    const base = 900 + Math.random() * 2600 + (project?.posts_per_day || 2) * 120;
-    const viral = Math.random() < 0.16 ? 4 + Math.random() * 9 : 1;
-    // вирусный скор влияет на ожидаемый охват: так модель учится на своих же прогнозах
-    const scoreBoost = 0.75 + (num(episode.viral, 50) / 100) * 0.6;
-    const target = Math.round(base * viral * scoreBoost * (variant === 'B' ? 0.92 : 1) * (1 + accountAgeDays / 300));
+      const pid = uid('pb_');
+      const ts = nowIso();
+      const covers = parseJson(episode.cover_paths, {});
+      const coverPath = covers[variant] || covers.A || null;
+      const clickToken = uid('ct_').replace(/[^a-z0-9]/gi, '').slice(0, 18);
+      const privacy = privacyFor(platform);
 
-    const covers = parseJson(episode.cover_paths, {});
-    const coverPath = covers[variant] || covers.A || null;
-    const clickToken = uid('ct_').replace(/[^a-z0-9]/gi, '').slice(0, 18);
-    const privacy = privacyFor(platform);
+      // ожидаемый охват считает модель (медиана проекта × скор × час × аккаунт),
+      // а не случайное число: потом эту же цифру видно в прогнозе ролика
+      const forecast = forecastEpisode({ episode, project, account, platform, scheduledAt: nowIso() });
 
-    db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, cover_path, click_token, url, external_id, status, scheduled_at, published_at, target_views, privacy, cost_cents, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?)`)
-      .run(pid, episode.id, episode.project_id, account.id, platform, variant, episode.title, caption,
-        JSON.stringify(hashtags), `${episode.cover_seed}-${variant}`, coverPath, clickToken, result.url,
-        result.externalId ? String(result.externalId) : null, ts, ts, target, result.privacy || privacy,
-        Math.round(num(episode.cost_cents, 0) / variants.length), ts);
-    created.push(pid);
-    consumeQuota(account.id);
-    log({
-      level: 'info', actor: 'publisher', action: 'publication.created', entityType: 'publication', entityId: pid,
-      message: `Публикация ${platform === 'tiktok' ? 'TikTok' : 'Reels'}${privacy !== 'public' ? ' (приватно — клиент не аудирован)' : ''}: ${episode.title}`,
-      meta: { privacy, click: `/t/${clickToken}`, cover: coverPath, video: episode.video_path },
+      db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, cover_path, click_token, url, external_id, status, scheduled_at, published_at, target_views, privacy, cost_cents, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?)`)
+        .run(pid, episode.id, episode.project_id, account.id, platform, variant, episode.title, caption,
+          JSON.stringify(hashtags), `${episode.cover_seed}-${variant}`, coverPath, clickToken, result.url,
+          result.externalId ? String(result.externalId) : null, ts, ts, forecast.expectedViews, result.privacy || privacy,
+          Math.round(num(episode.cost_cents, 0) / Math.max(1, variants.length * targets.length)), ts);
+      created.push(pid);
+      consumeQuota(account.id);
+      log({
+        level: 'info', actor: 'publisher', action: 'publication.created', entityType: 'publication', entityId: pid,
+        message: `Публикация ${platform === 'tiktok' ? 'TikTok' : 'Reels'}${privacy !== 'public' ? ' (приватно — клиент не аудирован)' : ''}: ${episode.title}`,
+        meta: { privacy, click: `/t/${clickToken}`, cover: coverPath, video: episode.video_path, forecast: forecast.expectedViews },
+      });
+    }
+  }
+
+  // ── Итог: сколько площадок закрыто, что осталось ──────────────────────────
+  const remaining = [...missing, ...blocked].filter(Boolean);
+  if (created.length) {
+    const lastForecast = forecastEpisode({ episode, project, platform: targets[0].platform, scheduledAt: nowIso() });
+    touchEpisode(episodeId, {
+      forecast: JSON.stringify(lastForecast),
+      cost_cents: num(episode.cost_cents, 0),
     });
   }
 
-  episode = touchEpisode(episodeId, { status: 'published', stage: 'published', published_at: nowIso(), progress: 100, error: null });
-  // отметим «использованную» идею и обновим статистику проекта
+  if (created.length && !remaining.length) {
+    episode = touchEpisode(episodeId, { status: 'published', stage: 'published', published_at: nowIso(), progress: 100, error: null });
+    log({
+      level: 'success', actor: 'publisher', action: 'episode.published', entityType: 'episode', entityId: episodeId,
+      message: `Опубликовано: «${episode.title}» — ${new Set(targets.map((t) => t.platform)).size} площадк${targets.length > 1 ? 'и' : 'а'}, ${created.length} публикаци${created.length > 1 ? 'и' : 'я'}`,
+      meta: { publications: created, platforms: targets.map((t) => `${t.platform}@${t.account.handle}`) },
+    });
+    return;
+  }
+
+  const postpone = addMinutes(nowIso(), 30 + Math.floor(Math.random() * 20));
+  touchEpisode(episodeId, {
+    status: 'scheduled',
+    scheduled_at: postpone,
+    error: remaining.length ? `Ждём квоту: ${remaining.join(', ')}` : null,
+  });
+  enqueue('episode.publish', { episodeId }, { delayMs: 32 * 60000, priority: 2 });
   log({
-    level: 'success', actor: 'publisher', action: 'episode.published', entityType: 'episode', entityId: episodeId,
-    message: `Опубликовано: «${episode.title}» (${created.length} вариант${created.length > 1 ? 'а' : ''}, ${account.platform === 'tiktok' ? 'TikTok' : 'Reels'})`,
-    meta: { account: account.handle, publications: created },
+    level: created.length ? 'info' : 'warn', actor: 'publisher', action: 'publish.partial', entityType: 'episode', entityId: episodeId,
+    message: created.length
+      ? `Опубликовано частично (${created.length}), остались площадки: ${remaining.join(', ')} — повтор через ~30 мин`
+      : `Публикация перенесена: ${remaining.join(', ') || 'нет аккаунта'}`,
+    meta: { created, remaining },
   });
 });
 
+/** Описание под площадку и вариант A/B (B — короткий, «второй заход») */
+function buildCaption({ episode, project, product, platform, variant, hashtags }) {
+  if (variant !== 'B') {
+    return platformCaption({ caption: episode.description, hashtags }, platform, product);
+  }
+  const firstLine = String(episode.description || '').split('\n')[0];
+  return platformCaption({
+    caption: `${firstLine} ${pick(['Проверяем короткую версию — суть в двух строках.', 'Короткий заход: только главное.', 'Альтернативный вариант без лишних слов.'])}`,
+    hashtags: hashtagsFor(project || {}, platform, { tags: hashtags }, 6),
+  }, platform, product);
+}
+
 function pickPlatforms(project) {
-  const accounts = db.prepare("SELECT DISTINCT platform FROM accounts WHERE status != 'blocked'").all().map((r) => r.platform);
+  // площадка участвует, только если есть аккаунт, который реально может публиковать
+  const accounts = db.prepare("SELECT DISTINCT platform FROM accounts WHERE status IN ('healthy','warmup')").all().map((r) => r.platform);
   if (!accounts.length) return PLATFORMS;
   return accounts;
 }
@@ -489,6 +544,28 @@ function episodesVideoRef(episode) {
 // ── Автопилот: наполнение очереди ───────────────────────────────────────────
 registerHandler('autopilot.tick', async () => {
   const settings = getSettings();
+
+  // Раз в час: закрываем A/B-тесты и корректируем интенсивность по деньгам.
+  // Это не «магия»: каждое решение попадает в журнал с причиной и ROI.
+  if (Date.now() - Number(globalThis.__lastSmartLoop || 0) > 3600000) {
+    globalThis.__lastSmartLoop = Date.now();
+    try {
+      const decided = evaluateAB();
+      const policy = autopilotPolicy({ apply: true });
+      recalculateAccountQuality({ apply: true });
+      const scaled = policy.filter((p) => p.changed);
+      if (decided.length || scaled.length) {
+        log({
+          level: 'info', actor: 'autopilot', action: 'autopilot.smart', entityType: 'system',
+          message: `Умный цикл: закрыто A/B — ${decided.length}, изменено темпов — ${scaled.length}`,
+          meta: { decided: decided.map((d) => `${d.title}: ${d.winner}`), scaled: scaled.map((p) => `${p.name}: ${p.postsPerDay}/день`) },
+        });
+      }
+    } catch (err) {
+      log({ level: 'warn', actor: 'autopilot', action: 'autopilot.smart_failed', message: String(err.message || err) });
+    }
+  }
+
   if (Number(settings.autopilot_global) !== 1) return;
   const projects = db.prepare('SELECT * FROM projects WHERE autopilot = 1 AND archived = 0').all();
   for (const project of projects) {
@@ -517,10 +594,14 @@ registerHandler('autopilot.tick', async () => {
       for (const i of fresh) ins.run(uid('id_'), project.id, i.title, i.hook, i.angle, i.format, JSON.stringify(i.tags), i.score, nowIso());
     }
 
-    const slot = nextSlot(project.id);
+    const plan = nextSlotPlan(project.id);
     const idea = db.prepare("SELECT * FROM ideas WHERE project_id = ? AND status = 'new' ORDER BY score DESC, created_at ASC LIMIT 1").get(project.id);
-    const ep = createEpisode({ projectId: project.id, ideaId: idea?.id || null, scheduledAt: slot });
-    log({ level: 'info', actor: 'autopilot', action: 'autopilot.fill', entityType: 'episode', entityId: ep.id, message: `Автопилот добавил в конвейер: «${ep.title}»`, meta: { projectId: project.id } });
+    const ep = createEpisode({ projectId: project.id, ideaId: idea?.id || null, scheduledAt: plan.at });
+    log({
+      level: 'info', actor: 'autopilot', action: 'autopilot.fill', entityType: 'episode', entityId: ep.id,
+      message: `Автопилот добавил в конвейер: «${ep.title}» — ${plan.reason}`,
+      meta: { projectId: project.id, slot: plan.at, hour: plan.hour, source: plan.source },
+    });
   }
 });
 
