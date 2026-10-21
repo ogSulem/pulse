@@ -7,6 +7,27 @@ export const fmt = (n) => {
 
 export const full = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0));
 
+export const money = (n, currency = '₽', digits = 0) => {
+  const v = Number(n) || 0;
+  const abs = Math.abs(v);
+  const text = abs >= 1000
+    ? new Intl.NumberFormat('ru-RU', { maximumFractionDigits: digits }).format(v)
+    : new Intl.NumberFormat('ru-RU', { minimumFractionDigits: digits ? 2 : 0, maximumFractionDigits: digits ? 2 : 0 }).format(v);
+  return `${text} ${currency}`;
+};
+export const moneyShort = (n, currency = '₽') => {
+  const v = Number(n) || 0;
+  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace('.', ',')} млн ${currency}`;
+  if (Math.abs(v) >= 10_000) return `${Math.round(v / 1000)} тыс ${currency}`;
+  return money(v, currency);
+};
+export const bytes = (n) => {
+  const v = Number(n) || 0;
+  if (v >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(1)} ГБ`;
+  if (v >= 1024 ** 2) return `${(v / 1024 ** 2).toFixed(1)} МБ`;
+  if (v >= 1024) return `${Math.round(v / 1024)} КБ`;
+  return `${v} Б`;
+};
 export const pct = (n, digits = 1) => `${Number(n || 0).toFixed(digits).replace('.', ',')}%`;
 
 export const signed = (n, suffix = '%') => {

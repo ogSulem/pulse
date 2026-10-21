@@ -96,7 +96,10 @@ export default function Queue({ onLaunch }) {
               <div key={e.id} className="episode-row" role="button" tabIndex={0}
                 onClick={() => setSelected(e.id)}
                 onKeyDown={(ev) => ev.key === 'Enter' && setSelected(e.id)}>
-                <span className="ep-cover"><img src={api.coverUrl(e.cover_seed, e.title, e.format)} alt="" loading="lazy" /></span>
+                <span className="ep-cover">
+                  <img src={e.cover_paths?.A || api.coverUrl(e.cover_seed, e.title, e.format)} alt="" loading="lazy" />
+                  {e.video_path && <span className="ep-play"><Icon name="play" size={9} /></span>}
+                </span>
                 <span style={{ minWidth: 0 }}>
                   <span className="episode-title clamp-2" style={{ display: 'block' }}>{e.title}</span>
                   <span className="episode-sub">
@@ -104,6 +107,8 @@ export default function Queue({ onLaunch }) {
                     <span className="hide-md">{e.project_name}</span>
                     <span className="hide-md" style={{ opacity: 0.5 }}>·</span>
                     <span className="hide-md">{FORMAT_LABELS[e.format] || e.format}</span>
+                    {e.viral > 0 && <Badge tone={e.viral >= 65 ? 'success' : e.viral >= 45 ? 'warn' : 'danger'}>скор {e.viral}</Badge>}
+                    {e.compliance && !e.compliance.ok && <Badge tone="danger"><Icon name="shield" size={10} /> правила</Badge>}
                     {e.risk >= 55 && <Badge tone={e.risk >= 70 ? 'danger' : 'warn'}>риск {e.risk}</Badge>}
                   </span>
                   {!pub && <Progress value={e.progress} striped={e.status === 'generating'} style={{ marginTop: 7, maxWidth: 340 }} />}
@@ -117,7 +122,7 @@ export default function Queue({ onLaunch }) {
                   </span>
                 </span>
                 <span className="hide-md" style={{ fontSize: 11, color: 'var(--muted)' }}>
-                  {pub ? `${e.pubs} ${plural(e.pubs, 'площадка', 'площадки', 'площадок')}` : `${e.progress}%`}
+                  {e.video_bytes ? `${(e.video_bytes / 1048576).toFixed(1)} МБ` : pub ? `${e.pubs} ${plural(e.pubs, 'площадка', 'площадки', 'площадок')}` : `${e.progress}%`}
                 </span>
                 <span className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
                   {e.status === 'review' && (

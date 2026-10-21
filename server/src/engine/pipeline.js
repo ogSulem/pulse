@@ -9,6 +9,11 @@ import { log } from '../core/logger.js';
 import { uid, parseJson, clamp, addMinutes, addDays, num, pick } from '../core/utils.js';
 import { buildScript, hashtagsFor, platformCaption, riskScore, generateIdeas, buildUtmUrl, nicheFor } from './brain.js';
 import { providers } from '../providers/index.js';
+import { renderEpisode, renderCover, renderAvailable, renderInfo, MEDIA_DIR } from './render.js';
+import { checkCompliance, disclosureText, saveCompliance, PLATFORM_RULES } from './compliance.js';
+import { scoreViral, saveViral } from './viral.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const STAGE_PROGRESS = { idea: 6, script: 26, voice: 46, footage: 66, edit: 84, ready: 100, published: 100 };
 const PLATFORMS = ['reels', 'tiktok'];
@@ -125,6 +130,7 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
   const episode = getEpisode(episodeId);
   if (!episode) return;
   const project = getProject(episode.project_id);
+  const product = getProduct(episode.product_id) || activeProduct(episode.project_id);
   const scenes = parseJson(episode.scenes, []);
   const settings = getSettings();
 
@@ -132,6 +138,11 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
     if (step === 'voice') {
       const text = [scenes[0]?.text, ...scenes.slice(1).map((s) => s.text)].filter(Boolean).join(' ');
       const audio = await providers.tts.synthesize({ text, voiceId: process.env.ELEVENLABS_VOICE_ID });
+      // Реальная озвучка (live-режим) сохраняется рядом с видео и подмешивается в рендер.
+      if (audio?.audioBuffer) {
+        fs.mkdirSync(MEDIA_DIR, { recursive: true });
+        fs.writeFileSync(path.join(MEDIA_DIR, `${String(episodeId).replace(/[^a-z0-9_]/gi, '')}.${audio.audioFormat || 'mp3'}`), audio.audioBuffer);
+      }
       touchEpisode(episodeId, { stage: 'voice', status: 'generating', progress: STAGE_PROGRESS.voice });
       log({ level: 'info', actor: 'provider.tts', action: 'episode.voice', entityType: 'episode', entityId: episodeId, message: `Озвучка готова: ${audio.durationSec} с, провайдер ${audio.provider}`, meta: audio });
       enqueue('episode.render', { episodeId, step: 'footage' }, { delayMs: 1600, priority: 4 });
@@ -153,23 +164,112 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
       return;
     }
 
-    // edit: сборка, субтитры, логотип, финальная проверка
-    const ready = touchEpisode(episodeId, { stage: 'ready', progress: 100, status: 'review', error: null });
-    const autoOk = Number(settings.autopilot_global) === 1 && Number(ready.autopilot) === 1 && Number(settings.manual_review) !== 1 && ready.risk < Number(settings.risk_threshold);
+    // ── edit: реальная сборка файла, маркировка, комплаенс, «залетабельность»
+    touchEpisode(episodeId, { stage: 'edit', progress: STAGE_PROGRESS.edit });
+
+    const account = episode.account_id
+      ? db.prepare('SELECT * FROM accounts WHERE id = ?').get(episode.account_id)
+      : db.prepare("SELECT * FROM accounts WHERE status IN ('healthy','warmup') ORDER BY quality DESC LIMIT 1").get();
+    const handle = account?.handle || `pulse.${String(project?.niche || 'studio').replace(/[^a-z0-9]/gi, '')}`.slice(0, 24);
+
+    // маркировка: реклама + ИИ-контент добавляется в описание один раз
+    const adOn = Number(settings.ad_label ?? 1) === 1;
+    const aiOn = Number(settings.ai_label ?? 1) === 1;
+    let finalDescription = episode.description || '';
+    const disclosure = disclosureText({ ad: adOn && Boolean(episode.product_id), ai: aiOn, productName: product?.name });
+    if (disclosure && !finalDescription.includes(disclosure.split('.').pop().trim().slice(0, 12))) {
+      finalDescription = `${finalDescription}\n\n${disclosure}`.trim();
+    }
+
+    let video = null;
+    if (renderAvailable()) {
+      try {
+        const audioCandidates = ['mp3', 'wav', 'm4a'].map((ext) => path.join(MEDIA_DIR, `${String(episodeId).replace(/[^a-z0-9_]/gi, '')}.${ext}`));
+        const audioPath = audioCandidates.find((p) => fs.existsSync(p)) || null;
+        video = await renderEpisode({
+          episode: { ...episode, title: episode.title },
+          project,
+          scenes,
+          handle,
+          audioPath,
+        });
+        log({
+          level: 'info', actor: 'render', action: 'episode.render', entityType: 'episode', entityId: episodeId,
+          message: `Видео собрано: ${video.width}×${video.height}, ${(video.bytes / 1024 / 1024).toFixed(1)} МБ, ${video.renderMs} мс`,
+          meta: { bytes: video.bytes, renderMs: video.renderMs, path: video.videoPath },
+        });
+      } catch (err) {
+        log({ level: 'warn', actor: 'render', action: 'episode.render_failed', entityType: 'episode', entityId: episodeId, message: `Рендер не удался: ${err.message}`, meta: { stack: String(err.stack || '').slice(0, 400) } });
+      }
+    } else {
+      log({ level: 'warn', actor: 'render', action: 'episode.render_off', entityType: 'episode', entityId: episodeId, message: 'Рендер выключен — ролик уйдёт на проверку без файла', meta: renderInfo() });
+    }
+
+    const compliance = checkCompliance({
+      title: episode.title,
+      description: finalDescription,
+      scenes,
+      platform: account?.platform || 'reels',
+      hashtags: parseJson(episode.hashtags, []),
+      adLabel: adOn,
+      aiLabel: aiOn,
+    });
+    const viral = scoreViral({
+      title: episode.title,
+      scenes,
+      description: finalDescription,
+      hashtags: parseJson(episode.hashtags, []),
+      targetSec: project?.duration_sec || 30,
+      topic: episode.topic,
+      projectId: episode.project_id,
+    });
+
+    const costRub = num(settings.cost_video, 45) + num(settings.cost_tts, 12) + num(settings.cost_llm, 8) + num(settings.cost_render, 1);
+    const costCents = Math.round(costRub * 100);
+
+    saveCompliance(episodeId, compliance);
+    saveViral(episodeId, viral);
+
+    const ready = touchEpisode(episodeId, {
+      stage: 'ready',
+      progress: 100,
+      status: 'review',
+      error: null,
+      description: finalDescription,
+      video_path: video?.videoPath || null,
+      video_bytes: video?.bytes || null,
+      render_ms: video?.renderMs || null,
+      cover_paths: video ? JSON.stringify(video.coverPaths) : null,
+      cost_cents: costCents,
+    });
+
+    const viralThreshold = num(settings.min_viral_score, 45);
+    const reasons = [];
+    if (!video) reasons.push('нет файла ролика');
+    if (!compliance.ok) reasons.push(`блокирующих нарушений: ${compliance.blocking.length}`);
+    if (viral.score < viralThreshold) reasons.push(`вирусный скор ${viral.score} < ${viralThreshold}`);
+
+    const autoOk = Number(settings.autopilot_global) === 1
+      && Number(ready.autopilot) === 1
+      && Number(settings.manual_review) !== 1
+      && ready.risk < Number(settings.risk_threshold)
+      && compliance.ok
+      && viral.score >= viralThreshold
+      && Boolean(video);
+
     if (!autoOk) {
       log({
-        level: ready.risk >= Number(settings.risk_threshold) ? 'warn' : 'info',
+        level: compliance.ok ? 'info' : 'warn',
         actor: 'engine', action: 'episode.review', entityType: 'episode', entityId: episodeId,
-        message: ready.risk >= Number(settings.risk_threshold)
-          ? `Монтаж готов. Риск ${ready.risk}/100 — ждёт ручной проверки`
-          : 'Монтаж готов. Ждёт подтверждения (автопилот выключен)',
+        message: `Ролик готов, но ждёт проверки: ${reasons.join('; ') || 'автопилот выключен'}`,
+        meta: { compliance: compliance.score, viral: viral.score, reasons },
       });
       return;
     }
 
     const scheduledAt = ready.scheduled_at || nextSlot(ready.project_id);
     touchEpisode(episodeId, { status: 'scheduled', scheduled_at: scheduledAt });
-    log({ level: 'success', actor: 'engine', action: 'episode.ready', entityType: 'episode', entityId: episodeId, message: `Ролик собран и запланирован`, meta: { scheduledAt } });
+    log({ level: 'success', actor: 'engine', action: 'episode.ready', entityType: 'episode', entityId: episodeId, message: `Ролик собран и запланирован (скор ${viral.score}, файл ${((video.bytes || 0) / 1048576).toFixed(1)} МБ)`, meta: { scheduledAt } });
     enqueue('episode.publish', { episodeId }, { delayMs: Math.max(1500, new Date(scheduledAt).getTime() - Date.now()), priority: 2 });
   } catch (err) {
     if ((job?.attempts || 1) < 3) throw err; // очередь сделает retry с backoff
@@ -200,11 +300,38 @@ function accountQuota(account) {
   return { used, cap: effective, left: Math.max(0, effective - used) };
 }
 
+/**
+ * Квота площадки за скользящие 24 часа.
+ * TikTok: ~15 постов/сутки на креатора; неаудированный клиент — только приват.
+ * Instagram: лимит берём из настроек (по умолчанию 50), окно тоже скользящее.
+ */
+export function platformQuota(platform, accountId = null) {
+  const settings = getSettings();
+  const since = addDays(nowIso(), -1);
+  const row = accountId
+    ? db.prepare("SELECT COUNT(*) n FROM publications WHERE platform = ? AND account_id = ? AND published_at > ? AND status = 'published'").get(platform, accountId, since)
+    : db.prepare("SELECT COUNT(*) n FROM publications WHERE platform = ? AND published_at > ? AND status = 'published'").get(platform, since);
+  const cap = platform === 'tiktok'
+    ? Math.min(num(settings.max_daily_per_account, 3) * 5, 15)
+    : Math.min(num(settings.max_daily_per_account, 3) * 17, 50);
+  return { platform, used: row.n, cap, left: Math.max(0, cap - row.n) };
+}
+
+/** Приватность публикации: неаудированный TikTok-клиент = SELF_ONLY */
+export function privacyFor(platform) {
+  const settings = getSettings();
+  if (platform !== 'tiktok') return 'public';
+  const audited = Number(settings.tiktok_audited) === 1;
+  return audited ? 'public' : String(settings.tiktok_privacy || 'SELF_ONLY');
+}
+
 function lastPublishAt(accountId) {
   return db.prepare('SELECT MAX(published_at) t FROM publications WHERE account_id = ?').get(accountId)?.t || null;
 }
 
 export function pickAccount(platform, projectId) {
+  const pq = platformQuota(platform);
+  if (pq.left <= 0) return null;
   const accounts = db.prepare("SELECT * FROM accounts WHERE platform = ? AND status IN ('healthy','warmup') ORDER BY quality DESC, created_at ASC").all(platform);
   const candidates = [];
   for (const a of accounts) {
@@ -279,7 +406,10 @@ registerHandler('episode.publish', async ({ episodeId }) => {
       platform,
       account,
       description: caption,
-      videoRef: episodesVideoRef(episode),
+      videoRef: episode.video_path || episodesVideoRef(episode),
+      videoPath: episode.video_path ? path.join(MEDIA_DIR, path.basename(episode.video_path)) : null,
+      coverPath: parseJson(episode.cover_paths, {})[variant] || null,
+      privacy: privacyFor(account.platform),
       scheduledAt: nowIso(),
     });
 
@@ -288,13 +418,27 @@ registerHandler('episode.publish', async ({ episodeId }) => {
     const accountAgeDays = 20 + Math.floor(Math.random() * 120);
     const base = 900 + Math.random() * 2600 + (project?.posts_per_day || 2) * 120;
     const viral = Math.random() < 0.16 ? 4 + Math.random() * 9 : 1;
-    const target = Math.round(base * viral * (variant === 'B' ? 0.92 : 1) * (1 + accountAgeDays / 300));
-    db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, url, status, scheduled_at, published_at, target_views, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?)`)
+    // вирусный скор влияет на ожидаемый охват: так модель учится на своих же прогнозах
+    const scoreBoost = 0.75 + (num(episode.viral, 50) / 100) * 0.6;
+    const target = Math.round(base * viral * scoreBoost * (variant === 'B' ? 0.92 : 1) * (1 + accountAgeDays / 300));
+
+    const covers = parseJson(episode.cover_paths, {});
+    const coverPath = covers[variant] || covers.A || null;
+    const clickToken = uid('ct_').replace(/[^a-z0-9]/gi, '').slice(0, 18);
+    const privacy = privacyFor(platform);
+
+    db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, cover_path, click_token, url, status, scheduled_at, published_at, target_views, privacy, cost_cents, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?)`)
       .run(pid, episode.id, episode.project_id, account.id, platform, variant, episode.title, caption,
-        JSON.stringify(hashtags), `${episode.cover_seed}-${variant}`, result.url, ts, ts, target, ts);
+        JSON.stringify(hashtags), `${episode.cover_seed}-${variant}`, coverPath, clickToken, result.url, ts, ts, target, privacy,
+        Math.round(num(episode.cost_cents, 0) / variants.length), ts);
     created.push(pid);
     consumeQuota(account.id);
+    log({
+      level: 'info', actor: 'publisher', action: 'publication.created', entityType: 'publication', entityId: pid,
+      message: `Публикация ${platform === 'tiktok' ? 'TikTok' : 'Reels'}${privacy !== 'public' ? ' (приватно — клиент не аудирован)' : ''}: ${episode.title}`,
+      meta: { privacy, click: `/t/${clickToken}`, cover: coverPath, video: episode.video_path },
+    });
   }
 
   episode = touchEpisode(episodeId, { status: 'published', stage: 'published', published_at: nowIso(), progress: 100, error: null });
@@ -315,6 +459,8 @@ function pickPlatforms(project) {
 function episodesVideoRef(episode) {
   return `episodes/${episode.id}/final.mp4`;
 }
+
+
 
 // ── Автопилот: наполнение очереди ───────────────────────────────────────────
 registerHandler('autopilot.tick', async () => {

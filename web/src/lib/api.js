@@ -78,6 +78,10 @@ export const api = {
   deleteProduct: (id) => request(`/products/${id}`, { method: 'DELETE' }),
 
   analytics: (params = {}) => request(`/analytics/overview?${new URLSearchParams(params)}`),
+  money: (params = {}) => request(`/money?${new URLSearchParams(params)}`),
+  transparency: () => request('/transparency'),
+  checkEpisode: (id, payload = {}) => request(`/episodes/${id}/check`, { method: 'POST', body: payload }),
+  patchCaption: (id, payload) => request(`/episodes/${id}/caption`, { method: 'PATCH', body: payload }),
   publications: (params = {}) => request(`/analytics/publications?${new URLSearchParams(params)}`),
 
   logs: (params = {}) => request(`/logs?${new URLSearchParams(params)}`),

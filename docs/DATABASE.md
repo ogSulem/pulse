@@ -371,3 +371,61 @@ RETURNING j.*;
 4. Заменить репозиторий в `providers`/`core` на EF Core; обработчики конвейера не меняются —
    они работают через интерфейсы `IJobQueue`, `IEpisodeRepository`, `IProviderRegistry`.
 5. Включить партиционирование `metrics_daily` и ретеншн-политику.
+
+## v2: медиа, комплаенс, деньги
+
+### Новые поля `episodes`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `video_path` | TEXT | путь к готовому mp4 (`/media/ep_….mp4`) |
+| `video_bytes` | INTEGER | размер файла — виден в очереди и «Прозрачности» |
+| `render_ms` | INTEGER | сколько длился рендер, для контроля нагрузки |
+| `cover_paths` | TEXT (JSON) | `{"A": "...","B": "..."}` — обложки A/B |
+| `compliance` | TEXT (JSON) | отчёт проверки правил: блокировки, предупреждения, лимиты |
+| `viral` | INTEGER | вирусный скор 0–100 |
+| `viral_meta` | TEXT (JSON) | разбор по факторам и рекомендации |
+| `cost_cents` | INTEGER | себестоимость ролика в копейках |
+
+### Новые поля `publications`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `cover_path` | TEXT | какая обложка ушла в публикацию |
+| `click_token` | TEXT | токен короткой ссылки `/t/<token>` |
+| `privacy` | TEXT | `public` или `SELF_ONLY` (неаудированный TikTok) |
+| `cost_cents` | INTEGER | доля себестоимости эпизода |
+| `revenue_cents` | INTEGER | накопленный доход, если нужно фиксировать факт |
+| `external_id` | TEXT | id публикации на площадке |
+
+### `clicks`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `id` | TEXT PK | идентификатор клика |
+| `publication_id` | TEXT FK | из какого ролика пришли |
+| `project_id` | TEXT | быстрый разрез без JOIN |
+| `ts` | TEXT | время клика |
+| `ua`, `ref`, `ip_hash` | TEXT | источник и антифрод (IP хранится только хешем) |
+
+Индекс: `ix_clicks_pub(publication_id)`.
+
+### `conversions`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `id` | TEXT PK | идентификатор конверсии |
+| `click_id` | TEXT | клик, который привёл к покупке |
+| `publication_id` | TEXT FK | ролик |
+| `value_cents` | INTEGER | сумма маржи в копейках |
+| `status` | TEXT | `paid` / `pending` / `refunded` |
+| `external_id` | TEXT | id заказа, уникальный индекс для идемпотентности postback |
+| `ts` | TEXT | время |
+
+Индексы: `ix_conv_pub(publication_id)`, `ix_conv_ext(external_id) WHERE external_id IS NOT NULL`.
+
+### Миграции
+
+`migrate()` выполняет `CREATE TABLE IF NOT EXISTS`, затем `ensureColumns()` (безопасные `ALTER TABLE`
+для новых полей) и разовую миграцию значений настроек v1 → v2 (`schema_v2`), чтобы ставки RPM и
+себестоимость из прошлой версии не остались в долларах.

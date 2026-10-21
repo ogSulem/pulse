@@ -4,6 +4,20 @@ import { useApp } from '../App.jsx';
 import Icon from '../components/Icons.jsx';
 import { Badge, Toggle, Field, Confirm, useToast } from '../components/ui.jsx';
 
+const NumberField = ({ label, hint, value, suffix, onSave, busy }) => {
+  const [v, setV] = useState(String(value ?? ''));
+  React.useEffect(() => setV(String(value ?? '')), [value]);
+  return (
+    <Field label={label} hint={hint}>
+      <div className="row" style={{ gap: 8 }}>
+        <input className="input" value={v} inputMode="decimal" onChange={(e) => setV(e.target.value)} />
+        {suffix && <span className="suffix">{suffix}</span>}
+        <button className="btn btn-soft btn-sm" disabled={busy || String(value ?? '') === v} onClick={() => onSave(v)}>OK</button>
+      </div>
+    </Field>
+  );
+};
+
 export default function Settings({ refresh }) {
   const { data } = useApp();
   const toast = useToast();
@@ -144,6 +158,85 @@ export default function Settings({ refresh }) {
               <Icon name="refresh" size={13} />Пересоздать демо-данные
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* ── Площадки и маркировка ─────────────────────────────────────────── */}
+      <div className="grid-2">
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Площадки</div>
+              <div className="card-sub">правила, которые Pulse соблюдает при публикации</div>
+            </div>
+            <Badge tone={String(settings.tiktok_audited) === '1' ? 'success' : 'warn'}>
+              {String(settings.tiktok_audited) === '1' ? 'TikTok аудирован' : 'TikTok: приватно'}
+            </Badge>
+          </div>
+          <Toggle
+            checked={String(settings.tiktok_audited) === '1'}
+            onChange={(v) => patch({ tiktok_audited: v ? 1 : 0 })}
+            label="TikTok-клиент прошёл аудит"
+            hint="Без аудита Direct Post разрешён только в приватные аккаунты (SELF_ONLY) и максимум на 5 креаторов в сутки — это ограничение площадки, а не Pulse."
+          />
+          <Toggle
+            checked={String(settings.ai_label) === '1'}
+            onChange={(v) => patch({ ai_label: v ? 1 : 0 })}
+            label="Маркировать ИИ-контент"
+            hint="В описании появится «Видео создано с помощью ИИ». На кадре уже стоит метка AI · PULSE."
+          />
+          <Toggle
+            checked={String(settings.ad_label) === '1'}
+            onChange={(v) => patch({ ad_label: v ? 1 : 0 })}
+            label="Маркировать рекламу"
+            hint="Пометка «Реклама: <продукт>» в описании, если у ролика есть продукт."
+          />
+          <div className="hr" />
+          <NumberField label="Минимальный вирусный скор" suffix="/100" value={settings.min_viral_score} busy={busy}
+            hint="Ниже порога ролик не публикуется автоматически, а уходит на проверку с рекомендациями"
+            onSave={(v) => patch({ min_viral_score: v })} />
+          <div className="mini-kv tight" style={{ marginTop: 6 }}>
+            <div><span>TikTok</span><b>15 постов / 24 ч · 6 init/мин</b></div>
+            <div><span>Reels</span><b>50 API-постов / 24 ч</b></div>
+            <div><span>Окно лимита</span><b>скользящее, 24 часа</b></div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Деньги</div>
+              <div className="card-sub">ставки для расчёта дохода, расхода и ROI</div>
+            </div>
+            <Badge tone="accent">{settings.currency || '₽'}</Badge>
+          </div>
+          <div className="grid-2" style={{ gap: 12 }}>
+            <NumberField label="RPM Reels" suffix={settings.currency} value={settings.rpm_reels} busy={busy}
+              hint="доход за 1000 просмотров" onSave={(v) => patch({ rpm_reels: v })} />
+            <NumberField label="RPM TikTok" suffix={settings.currency} value={settings.rpm_tiktok} busy={busy}
+              hint="доход за 1000 просмотров" onSave={(v) => patch({ rpm_tiktok: v })} />
+            <NumberField label="Цена продукта" suffix={settings.currency} value={settings.product_price} busy={busy}
+              onSave={(v) => patch({ product_price: v })} />
+            <NumberField label="Маржа" suffix="доля" value={settings.product_margin} busy={busy}
+              hint="0.55 = 55% от цены остаётся вам" onSave={(v) => patch({ product_margin: v })} />
+            <NumberField label="Конверсия клика" suffix="%" value={settings.conv_rate} busy={busy}
+              onSave={(v) => patch({ conv_rate: v })} />
+            <NumberField label="CTR (оценка)" suffix="%" value={settings.ctr_estimate} busy={busy}
+              hint="для демо-симуляции кликов" onSave={(v) => patch({ ctr_estimate: v })} />
+            <NumberField label="Генерация видео" suffix={settings.currency} value={settings.cost_video} busy={busy}
+              onSave={(v) => patch({ cost_video: v })} />
+            <NumberField label="Озвучка (TTS)" suffix={settings.currency} value={settings.cost_tts} busy={busy}
+              onSave={(v) => patch({ cost_tts: v })} />
+            <NumberField label="LLM" suffix={settings.currency} value={settings.cost_llm} busy={busy}
+              onSave={(v) => patch({ cost_llm: v })} />
+            <NumberField label="Рендер" suffix={settings.currency} value={settings.cost_render} busy={busy}
+              onSave={(v) => patch({ cost_render: v })} />
+          </div>
+          <div className="hr" />
+          <Field label="Ключ postback" hint="Необязательно. Если задан, POST /api/postback требует заголовок x-pulse-key или ?key=.">
+            <input className="input" defaultValue={settings.postback_key || ''} placeholder="например, 32 случайных символа"
+              onBlur={(e) => e.target.value !== (settings.postback_key || '') && patch({ postback_key: e.target.value })} />
+          </Field>
         </div>
       </div>
 

@@ -196,6 +196,30 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 CREATE INDEX IF NOT EXISTS ix_logs_ts ON logs(ts DESC);
 
+CREATE TABLE IF NOT EXISTS clicks (
+  id            TEXT PRIMARY KEY,
+  publication_id TEXT NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+  project_id    TEXT DEFAULT '',
+  ts            TEXT NOT NULL,
+  ua            TEXT DEFAULT '',
+  ref           TEXT DEFAULT '',
+  ip_hash       TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_clicks_pub ON clicks(publication_id);
+
+CREATE TABLE IF NOT EXISTS conversions (
+  id            TEXT PRIMARY KEY,
+  click_id      TEXT,
+  publication_id TEXT NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+  project_id    TEXT DEFAULT '',
+  value_cents   INTEGER DEFAULT 0,
+  status        TEXT DEFAULT 'confirmed',
+  external_id   TEXT,
+  ts            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_conv_pub ON conversions(publication_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_conv_ext ON conversions(external_id) WHERE external_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS accounts_daily (
   account_id TEXT NOT NULL,
   day        TEXT NOT NULL,
@@ -204,8 +228,65 @@ CREATE TABLE IF NOT EXISTS accounts_daily (
 );
 `;
 
+// SQLite не умеет ADD COLUMN IF NOT EXISTS — добавляем колонки точечно.
+function ensureColumns() {
+  const want = {
+    episodes: {
+      video_path: 'TEXT',
+      video_bytes: 'INTEGER DEFAULT 0',
+      render_ms: 'INTEGER DEFAULT 0',
+      cover_paths: "TEXT DEFAULT '{}'",
+      compliance: "TEXT DEFAULT '{}'",
+      viral: 'INTEGER DEFAULT 0',
+      viral_meta: "TEXT DEFAULT '{}'",
+      cost_cents: 'INTEGER DEFAULT 0',
+    },
+    publications: {
+      cover_path: 'TEXT',
+      click_token: 'TEXT',
+      privacy: "TEXT DEFAULT 'public'",
+      cost_cents: 'INTEGER DEFAULT 0',
+      revenue_cents: 'INTEGER DEFAULT 0',
+      external_id: 'TEXT',
+    },
+    projects: {
+      ai_generated: 'INTEGER DEFAULT 1',
+    },
+    conversions: {
+      external_id: 'TEXT',
+    },
+  };
+  for (const [table, cols] of Object.entries(want)) {
+    const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+    for (const [col, def] of Object.entries(cols)) {
+      if (!existing.has(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+    }
+  }
+}
+
+function migrateV2Settings() {
+  // В v1 ставки RPM и себестоимости были в долларах и слишком оптимистичны.
+  // Обновляем только те значения, которые остались нетронутыми дефолтами.
+  const upgrades = {
+    rpm_reels: ['120', '25'],
+    rpm_tiktok: ['60', '10'],
+    cost_video: ['0.9', '45'],
+    cost_tts: ['0.25', '12'],
+    cost_llm: ['0.1', '8'],
+    cost_render: ['0.05', '1'],
+  };
+  const get = db.prepare('SELECT value FROM settings WHERE key = ?');
+  const set = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  for (const [key, [from, to]] of Object.entries(upgrades)) {
+    if (get.get(key)?.value === from) set.run(key, to);
+  }
+  if (!get.get('schema_v2')?.value) set.run('schema_v2', '1');
+}
+
 export function migrate() {
   db.exec(SCHEMA);
+  ensureColumns();
+  migrateV2Settings();
 }
 
 export const nowIso = () => new Date().toISOString();
@@ -218,6 +299,27 @@ export const settingsDefaults = {
   risk_threshold: '55',
   max_daily_per_account: '3',
   niches: '[]',
+
+  // ── площадки: реальные лимиты и статус приложений ────────────────────────
+  tiktok_audited: '0',            // 0 = неаудированный клиент → только приватные посты
+  tiktok_privacy: 'SELF_ONLY',
+  ai_label: '1',                  // помечать AI-контент (требование площадок)
+  ad_label: '1',                  // помечать рекламу в описании
+  min_viral_score: '45',          // ниже порога — ролик уходит на проверку
+
+  // ── деньги: юнит-экономика (₽) ───────────────────────────────────────────
+  currency: '₽',
+  rpm_reels: '25',                // доход с 1000 просмотров Reels, ₽
+  rpm_tiktok: '10',
+  conv_rate: '1.6',               // % кликов, которые становятся покупкой
+  ctr_estimate: '1.2',            // % просмотров, которые переходят по ссылке
+  postback_key: '',               // секрет для POST /api/postback (пусто = demo без проверки)
+  product_price: '2490',
+  product_margin: '0.55',         // доля маржи в цене
+  cost_video: '45',               // генерация видеоряда, ₽/ролик
+  cost_tts: '12',
+  cost_llm: '8',
+  cost_render: '1',
 };
 
 export function ensureSettings() {

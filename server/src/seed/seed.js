@@ -40,6 +40,7 @@ const PRODUCTS = [
   { name: 'FitFlow 7 дней', url: 'https://fitflow.ru/plan7', pitch: '7 тренировок по 20 минут без зала', proof: '4 200 человек прошли план до конца', template: 'case', utm_source: 'tiktok', utm_medium: 'short', utm_campaign: 'plan7' },
 ];
 
+const EPISODE_COST_CENTS = 6600; // 66 ₽: видео 45 + TTS 12 + LLM 8 + рендер 1
 const LOG_SEED = [
   ['success', 'publisher', 'episode.published', 'Опубликовано: «Почему автопостинг убивает охваты» (Reels)'],
   ['info', 'engine', 'episode.script', 'Сценарий готов: 4 сцены, риск 22/100'],
@@ -116,8 +117,8 @@ export function seedBase() {
 
   // ── история: 21 день публикаций ───────────────────────────────────────────
   let publishedCount = 0;
-  const insertPub = db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, url, status, scheduled_at, published_at, views, likes, comments, shares, clicks, followers, watch_avg, target_views, created_at)
-    VALUES (@id, @episode_id, @project_id, @account_id, @platform, @variant, @title, @description, @hashtags, @cover_seed, @url, 'published', @published_at, @published_at, 0, 0, 0, 0, 0, 0, 0, @target_views, @published_at)`);
+  const insertPub = db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, click_token, url, status, scheduled_at, published_at, views, likes, comments, shares, clicks, followers, watch_avg, target_views, privacy, cost_cents, created_at)
+    VALUES (@id, @episode_id, @project_id, @account_id, @platform, @variant, @title, @description, @hashtags, @cover_seed, @click_token, @url, 'published', @published_at, @published_at, 0, 0, 0, 0, 0, 0, 0, @target_views, @privacy, @cost_cents, @published_at)`);
   const insertMetric = db.prepare(`INSERT OR REPLACE INTO metrics_daily (id, publication_id, day, views, likes, comments, shares, clicks, followers)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
@@ -149,19 +150,23 @@ export function seedBase() {
           .run(scriptId, idea.id, project.id, script.hook, JSON.stringify(script.scenes), script.cta, script.caption,
             JSON.stringify(script.hashtags), script.duration_sec, publishedAt);
         const risk = riskScore(`${idea.title} ${script.caption}`);
-        db.prepare(`INSERT INTO episodes (id, project_id, idea_id, script_id, product_id, account_id, title, description, hashtags, scenes, cover_seed, topic, format, status, stage, progress, risk, error, attempts, autopilot, ab_test, scheduled_at, published_at, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'published', 'published', 100, ?, NULL, 1, 1, 1, ?, ?, ?, ?)`)
+        db.prepare(`INSERT INTO episodes (id, project_id, idea_id, script_id, product_id, account_id, title, description, hashtags, scenes, cover_seed, topic, format, status, stage, progress, risk, error, attempts, autopilot, ab_test, scheduled_at, published_at, cost_cents, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'published', 'published', 100, ?, NULL, 1, 1, 1, ?, ?, ?, ?, ?)`)
           .run(episodeId, project.id, idea.id, scriptId, product.id, idea.title, script.caption,
             JSON.stringify(script.hashtags), JSON.stringify(script.scenes), `${episodeId}-${idea.title}`,
-            idea.title, idea.format, risk, publishedAt, publishedAt, publishedAt, publishedAt);
+            idea.title, idea.format, risk, publishedAt, publishedAt, EPISODE_COST_CENTS, publishedAt, publishedAt);
 
-        for (const pub of makePublicationsFor(null, project, accountRows, rnd, publishedAt)) {
+        const pubList = makePublicationsFor(null, project, accountRows, rnd, publishedAt);
+        for (const pub of pubList) {
           const pid = uid('pb_');
           insertPub.run({
             id: pid, episode_id: episodeId, project_id: project.id, account_id: pub.account.id,
             platform: pub.platform, variant: pub.variant, title: idea.title,
             description: script.caption, hashtags: JSON.stringify(hashtagsFor(project, pub.platform, idea)),
             cover_seed: `${episodeId}-${pub.variant}`,
+            click_token: uid('ct_').replace(/[^a-z0-9]/gi, '').slice(0, 18),
+            privacy: pub.platform === 'tiktok' ? 'SELF_ONLY' : 'public',
+            cost_cents: Math.round(EPISODE_COST_CENTS / Math.max(1, pubList.length)),
             url: pub.platform === 'tiktok'
               ? `https://www.tiktok.com/@${pub.account.handle}/video/${Math.floor(rnd() * 9e17)}`
               : `https://www.instagram.com/reel/${Math.floor(rnd() * 9e9).toString(36)}/`,
@@ -217,12 +222,12 @@ export function seedBase() {
     const script = buildScript(project, idea, { product, platform: 'reels', duration: project.duration_sec });
     const scheduledAt = plan.offsetMin > 0 ? new Date(now + plan.offsetMin * 60000).toISOString() : null;
     const episodeId = uid('ep_');
-    db.prepare(`INSERT INTO episodes (id, project_id, idea_id, script_id, product_id, account_id, title, description, hashtags, scenes, cover_seed, topic, format, status, stage, progress, risk, error, attempts, autopilot, ab_test, scheduled_at, published_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, NULL, ?, ?)`)
+    db.prepare(`INSERT INTO episodes (id, project_id, idea_id, script_id, product_id, account_id, title, description, hashtags, scenes, cover_seed, topic, format, status, stage, progress, risk, error, attempts, autopilot, ab_test, scheduled_at, published_at, cost_cents, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, ?, NULL, ?, ?, ?)`)
       .run(episodeId, project.id, idea?.id || null, null, product.id, idea?.title || 'Новый ролик', script.caption,
         JSON.stringify(script.hashtags), JSON.stringify(script.scenes), `${episodeId}-${idea?.title}`,
         idea?.title || 'Новый ролик', idea?.format || project.format, plan.status, plan.stage, plan.progress,
-        plan.risk || riskScore(script.caption), plan.error || null, scheduledAt,
+        plan.risk || riskScore(script.caption), plan.error || null, scheduledAt, EPISODE_COST_CENTS,
         new Date(now - (plan.status === 'scheduled' ? 60000 : 300000)).toISOString(),
         new Date(now - (plan.status === 'scheduled' ? 60000 : 300000)).toISOString());
   }

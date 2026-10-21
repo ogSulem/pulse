@@ -108,7 +108,13 @@ const tts = {
     });
     if (!res.ok) throw new Error(`TTS ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
-    return { provider, audioBytes: buf.length, durationSec: Math.max(4, Math.round(text.split(/\s+/).length / 2.6)) };
+    return {
+      provider,
+      audioBytes: buf.length,
+      audioBuffer: buf,                       // сохраняется в data/media/<episode>.mp3
+      audioFormat: 'mp3',
+      durationSec: Math.max(4, Math.round(text.split(/\s+/).length / 2.6)),
+    };
   },
 };
 

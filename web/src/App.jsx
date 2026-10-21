@@ -9,6 +9,8 @@ import Projects from './pages/Projects.jsx';
 import Queue from './pages/Queue.jsx';
 import Calendar from './pages/Calendar.jsx';
 import Analytics from './pages/Analytics.jsx';
+import Money from './pages/Money.jsx';
+import Transparency from './pages/Transparency.jsx';
 import Accounts from './pages/Accounts.jsx';
 import Products from './pages/Products.jsx';
 import Logs from './pages/Logs.jsx';
@@ -16,16 +18,18 @@ import Settings from './pages/Settings.jsx';
 import LaunchModal from './components/LaunchModal.jsx';
 
 const NAV = [
-  { section: 'Конвейер' },
+  { section: 'Производство' },
   { id: 'dashboard', label: 'Обзор', icon: 'grid', hash: '#/' },
   { id: 'queue', label: 'Очередь роликов', icon: 'film', hash: '#/queue', badge: 'active' },
   { id: 'calendar', label: 'Расписание', icon: 'calendar', hash: '#/calendar' },
   { id: 'projects', label: 'Проекты и темы', icon: 'sparkles', hash: '#/projects' },
   { section: 'Результат' },
   { id: 'analytics', label: 'Аналитика', icon: 'chart', hash: '#/analytics' },
+  { id: 'money', label: 'Деньги', icon: 'target', hash: '#/money' },
   { id: 'products', label: 'Продвижение', icon: 'package', hash: '#/products' },
   { id: 'accounts', label: 'Аккаунты', icon: 'at', hash: '#/accounts' },
-  { section: 'Система' },
+  { section: 'Доверие' },
+  { id: 'transparency', label: 'Прозрачность', icon: 'shield', hash: '#/transparency', badge: 'review' },
   { id: 'logs', label: 'Журнал', icon: 'terminal', hash: '#/logs' },
   { id: 'settings', label: 'Настройки', icon: 'settings', hash: '#/settings' },
 ];
@@ -36,6 +40,8 @@ const TITLES = {
   calendar: { title: 'Расписание публикаций', sub: 'Слоты по аккаунтам и площадкам' },
   projects: { title: 'Проекты и темы', sub: 'Ниша, продукт и генерация идей' },
   analytics: { title: 'Аналитика', sub: 'Просмотры, CTR, подписчики и эффективность тем' },
+  money: { title: 'Деньги', sub: 'Доход, расход, ROI и окупаемость каждого ролика' },
+  transparency: { title: 'Прозрачность', sub: 'Что автоматизировано, где нужен человек и какие лимиты' },
   products: { title: 'Продвижение продукта', sub: 'Шаблоны интеграции, ссылки и UTM' },
   accounts: { title: 'Аккаунты и квоты', sub: 'Распределение нагрузки и защита от блокировок' },
   logs: { title: 'Журнал действий', sub: 'Что произошло и когда — по каждому ролику' },
@@ -73,6 +79,8 @@ function Shell({ data, refresh, refreshLight, loading }) {
   };
 
   const activeCount = (data.pipeline?.queued || 0) + (data.pipeline?.generating || 0);
+  const reviewCount = data.pipeline?.review || 0;
+  const badgeValue = (kind) => (kind === 'review' ? reviewCount : kind === 'active' ? activeCount : 0);
   const meta = TITLES[route] || TITLES.dashboard;
 
   const pages = {
@@ -81,6 +89,8 @@ function Shell({ data, refresh, refreshLight, loading }) {
     calendar: <Calendar />,
     projects: <Projects />,
     analytics: <Analytics />,
+    money: <Money />,
+    transparency: <Transparency />,
     products: <Products />,
     accounts: <Accounts />,
     logs: <Logs />,
@@ -113,7 +123,7 @@ function Shell({ data, refresh, refreshLight, loading }) {
               >
                 <Icon name={item.icon} size={16} />
                 {item.label}
-                {item.badge === 'active' && activeCount > 0 && <span className="nav-badge">{activeCount}</span>}
+                {item.badge && badgeValue(item.badge) > 0 && <span className={`nav-badge ${item.badge}`}>{badgeValue(item.badge)}</span>}
               </button>
             )
           )}

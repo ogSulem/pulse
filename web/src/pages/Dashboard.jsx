@@ -4,7 +4,7 @@ import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, Kpi, Progress, AreaChart, BarList, Segmented, Sparkline, Empty } from '../components/ui.jsx';
 import EpisodeDrawer from '../components/EpisodeDrawer.jsx';
-import { fmt, dateShort, time, relative, STATUS_META, FORMAT_LABELS, plural, ACCOUNT_STATUS } from '../lib/format.js';
+import { fmt, dateShort, time, relative, STATUS_META, FORMAT_LABELS, plural, ACCOUNT_STATUS, money, pct, bytes } from '../lib/format.js';
 
 const STAGE_ORDER = [
   { key: 'idea', label: 'Идея', icon: 'sparkles' },
@@ -21,10 +21,17 @@ export default function Dashboard({ onLaunch }) {
   const [metric, setMetric] = useState('views');
   const [days, setDays] = useState(14);
   const [selected, setSelected] = useState(null);
+  const [moneyData, setMoneyData] = useState(null);
+  const [checks, setChecks] = useState(null);
 
   useEffect(() => {
     api.analytics({ days }).then(setAnalytics).catch(() => {});
   }, [days, data.pipeline]);
+
+  useEffect(() => {
+    api.money({ days: 30 }).then(setMoneyData).catch(() => {});
+    api.transparency().then(setChecks).catch(() => {});
+  }, [data.pipeline?.published]);
 
   const totals = analytics?.totals;
   const series = analytics?.series || [];
@@ -157,6 +164,57 @@ export default function Dashboard({ onLaunch }) {
           </div>
         </div>
       </div>
+
+
+      {/* ── Деньги: одна строка, по которой всё понятно ───────────────────── */}
+      {moneyData && (
+        <div className="card money-band">
+          <div className="money-band-main">
+            <div className="eyebrow">прибыль за 30 дней</div>
+            <div className="money-band-value">{money(moneyData.totals.profit, moneyData.currency)}</div>
+            <div className="money-band-sub">
+              доход {money(moneyData.totals.revenue, moneyData.currency)} · расход {money(moneyData.totals.cost, moneyData.currency)}
+              {moneyData.totals.roi != null && <> · ROI {Math.round(moneyData.totals.roi)}%</>}
+            </div>
+          </div>
+          <div className="money-band-stats">
+            <div><span>RPM факт</span><b>{money(moneyData.totals.rpmAvg, moneyData.currency)}</b></div>
+            <div><span>CTR</span><b>{pct(moneyData.totals.ctr, 2)}</b></div>
+            <div><span>Покупки</span><b>{moneyData.totals.conversions}</b></div>
+            <div><span>Прибыль/ролик</span><b>{money(moneyData.totals.profitPerVideo, moneyData.currency)}</b></div>
+          </div>
+          <a className="btn btn-soft btn-sm" href="#/money"><Icon name="target" size={14} />Открыть деньги</a>
+        </div>
+      )}
+
+      {/* ── Прозрачность: что требует человека ───────────────────────────── */}
+      {checks && (checks.blocked.length > 0 || checks.lowViral.length > 0) && (
+        <div className="card checks-band">
+          <div className="row-between" style={{ gap: 12, marginBottom: 10 }}>
+            <div>
+              <div className="card-title" style={{ marginBottom: 2 }}>Требует вашего решения</div>
+              <div className="card-sub">Pulse не публикует то, что нарушает правила или вряд ли зайдёт — проверьте и решите</div>
+            </div>
+            <a className="link-btn" href="#/transparency">все проверки <Icon name="chevronRight" size={12} /></a>
+          </div>
+          <div className="checks-band-grid">
+            {checks.blocked.slice(0, 3).map((b) => (
+              <button className="check-chip danger" key={b.id} onClick={() => setSelected(b.id)}>
+                <Icon name="alert" size={13} />
+                <span className="truncate">{b.title}</span>
+                <em>{b.compliance?.blocking?.[0]?.id}</em>
+              </button>
+            ))}
+            {checks.lowViral.slice(0, 3).map((v) => (
+              <button className="check-chip warn" key={v.id} onClick={() => setSelected(v.id)}>
+                <Icon name="flame" size={13} />
+                <span className="truncate">{v.title}</span>
+                <em>скор {v.viral}</em>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Chart + formats ──────────────────────────────────────────────── */}
       <div className="page-grid grid-2-1">

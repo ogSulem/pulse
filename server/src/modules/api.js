@@ -6,6 +6,12 @@ import { uid, parseJson, clamp, num, slugify, addDays, addMinutes, fmtNum } from
 import { FORMAT_LABELS, FORMATS, generateIdeas, hashtagsFor, coverSvg, nicheFor, riskScore, NICHES_LIST } from '../engine/brain.js';
 import { createEpisode, nextSlot, pickAccount, collectAnalytics, sweepDueEpisodes, recoverEpisodeStates, touchEpisode } from '../engine/pipeline.js';
 import { providers } from '../providers/index.js';
+import { moneySummary, transparency, recordClick, recordConversion, simulateTraffic, rpmFor } from '../engine/money.js';
+import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
+import { scoreViral, saveViral } from '../engine/viral.js';
+import { renderInfo, renderAvailable, MEDIA_DIR } from '../engine/render.js';
+import fs from 'node:fs';
+import path from 'node:path';
 import { checkPassword, issueToken, verifyToken } from './auth.js';
 
 export const api = express.Router();
@@ -27,6 +33,9 @@ const episodeRow = (e) => e && ({
   hashtags: parseJson(e.hashtags, []),
   autopilot: !!e.autopilot,
   ab_test: !!e.ab_test,
+  cover_paths: parseJson(e.cover_paths, {}),
+  compliance: parseJson(e.compliance, null),
+  viral_meta: parseJson(e.viral_meta, null),
   statusLabel: STATUS_LABELS[e.status] || e.status,
   stageLabel: STAGE_LABELS[e.stage] || e.stage,
 });
@@ -63,6 +72,23 @@ api.get('/covers/:seed', (req, res) => {
   res.set('Content-Type', 'image/svg+xml; charset=utf-8');
   res.set('Cache-Control', 'public, max-age=86400');
   res.send(svg);
+});
+
+// ─── Публичные маршруты: короткие ссылки и postback ────────────────────────
+// Короткая ссылка /t/:token обслуживается в index.js (до SPA-фолбэка),
+// потому что она публичная и не должна проходить через авторизацию панели.
+
+// POST /api/postback — уведомление о покупке от CPA-сети или платёжки.
+api.post('/postback', (req, res) => {
+  const settings = getSettings();
+  const key = req.headers['x-pulse-key'] || req.query.key || req.body?.key;
+  if (settings.postback_key && key !== settings.postback_key) {
+    return res.status(401).json({ error: 'bad_key', message: 'Неверный ключ postback' });
+  }
+  const { click_id, clickId, token, value, status, external_id: externalId } = req.body || {};
+  const result = recordConversion({ clickId: clickId || click_id, token, value, status: status || 'paid', externalId });
+  if (!result) return res.status(404).json({ error: 'click_not_found', message: 'Клик не найден — проверьте click_id или token' });
+  res.json({ ok: true, conversion: result });
 });
 
 // ─── Авторизация ────────────────────────────────────────────────────────────
@@ -676,10 +702,75 @@ api.get('/logs', (req, res) => {
 });
 
 // ─── Настройки ──────────────────────────────────────────────────────────────
+// ─── Деньги: доход, расход, ROI ────────────────────────────────────────────
+api.get('/money', (req, res) => {
+  const days = clamp(num(req.query.days, 30), 1, 365);
+  const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
+  if (req.query.simulate === '1') simulateTraffic({ budget: 500 });
+  res.json(moneySummary({ days, projectId }));
+});
+
+// ─── Прозрачность: что сделано, что ждёт человека, какие лимиты ─────────────
+api.get('/transparency', (_req, res) => {
+  res.json({
+    ...transparency(),
+    render: renderInfo(),
+    platformRules: PLATFORM_RULES,
+    endpoints: {
+      click: '/t/:token',
+      postback: 'POST /api/postback',
+      media: '/media/*',
+    },
+  });
+});
+
+// ─── Проверка ролика до публикации (комплаенс + «залетит ли») ──────────────
+api.post('/episodes/:id/check', (req, res) => {
+  const episode = db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.params.id);
+  if (!episode) return res.status(404).json({ error: 'not_found', message: 'Эпизод не найден' });
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(episode.project_id);
+  const settings = getSettings();
+  const scenes = parseJson(episode.scenes, []);
+  const description = req.body?.description ?? episode.description;
+  const hashtags = req.body?.hashtags ?? parseJson(episode.hashtags, []);
+  const platform = req.body?.platform || 'reels';
+  const compliance = checkCompliance({
+    title: episode.title, description, scenes, platform, hashtags,
+    adLabel: Number(settings.ad_label) === 1, aiLabel: Number(settings.ai_label) === 1,
+  });
+  const viral = scoreViral({
+    title: episode.title, scenes, description, hashtags,
+    targetSec: project?.duration_sec || 30, topic: episode.topic, projectId: episode.project_id,
+  });
+  // сохраняем результат — проверка должна быть видна в списке и в «Прозрачности»
+  saveCompliance(episode.id, compliance);
+  saveViral(episode.id, viral);
+  touchEpisode(episode.id, { description });
+  res.json({ compliance, viral, disclosure: disclosureText({ ad: Boolean(episode.product_id), ai: Number(settings.ai_label) === 1 }) });
+});
+
+// ─── Быстрое редактирование описания и тегов перед публикацией ─────────────
+api.patch('/episodes/:id/caption', (req, res) => {
+  const episode = db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.params.id);
+  if (!episode) return res.status(404).json({ error: 'not_found', message: 'Эпизод не найден' });
+  const description = String(req.body?.description ?? episode.description).slice(0, 2400);
+  const hashtags = Array.isArray(req.body?.hashtags) ? req.body.hashtags.slice(0, 30) : parseJson(episode.hashtags, []);
+  touchEpisode(episode.id, { description, hashtags: JSON.stringify(hashtags) });
+  log({ level: 'info', actor: 'user', action: 'episode.caption', entityType: 'episode', entityId: episode.id, message: 'Описание обновлено перед публикацией' });
+  res.json({ ok: true, description, hashtags });
+});
+
 api.get('/settings', (_req, res) => res.json({ ...getSettings(), providers: providers.status() }));
 
 api.patch('/settings', (req, res) => {
-  const allowed = ['autopilot_global', 'manual_review', 'risk_threshold', 'max_daily_per_account', 'timezone'];
+  const allowed = [
+    'autopilot_global', 'manual_review', 'risk_threshold', 'max_daily_per_account', 'timezone',
+    // площадки
+    'tiktok_audited', 'tiktok_privacy', 'ai_label', 'ad_label', 'min_viral_score',
+    // деньги и себестоимость
+    'currency', 'rpm_reels', 'rpm_tiktok', 'conv_rate', 'ctr_estimate', 'product_price', 'product_margin',
+    'cost_video', 'cost_tts', 'cost_llm', 'cost_render', 'postback_key',
+  ];
   const patch = {};
   for (const k of allowed) if (k in (req.body || {})) patch[k] = String(req.body[k]);
   const next = setSettings(patch);

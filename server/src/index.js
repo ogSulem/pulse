@@ -10,6 +10,8 @@ import { seedIfEmpty } from './seed/seed.js';
 import './engine/pipeline.js'; // регистрирует обработчики конвейера
 import { collectAnalytics, sweepDueEpisodes, recoverEpisodeStates } from './engine/pipeline.js';
 import { enqueue } from './core/queue.js';
+import { recordClick, simulateTraffic } from './engine/money.js';
+import { MEDIA_DIR } from './engine/render.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -30,6 +32,23 @@ app.use((_req, res, next) => {
 
 app.use('/api', api);
 
+// ── Медиа: готовые ролики и обложки ────────────────────────────────────────
+// Раздаём из data/media с Range-поддержкой (express.static) — видео играется
+// в браузере, скачивается и проверяется до публикации.
+fs.mkdirSync(MEDIA_DIR, { recursive: true });
+app.use('/media', express.static(MEDIA_DIR, {
+  maxAge: '7d',
+  setHeaders: (res) => res.set('Cache-Control', 'public, max-age=604800, immutable'),
+}));
+
+// ── Короткая ссылка: клик → учёт → редирект на лендинг ─────────────────────
+app.get('/t/:token', (req, res) => {
+  const pub = recordClick(req.params.token, { ua: req.headers['user-agent'], ref: req.headers.referer, ip: req.ip });
+  if (!pub) return res.status(404).type('html').send('<body style="background:#0b0710;color:#eee;font-family:system-ui;padding:48px">Ссылка не найдена или устарела.</body>');
+  const target = pub.product_link || '/';
+  res.redirect(302, target);
+});
+
 // ── Статика SPA ─────────────────────────────────────────────────────────────
 const webDist = path.resolve(__dirname, '../../web/dist');
 if (fs.existsSync(webDist)) {
@@ -49,6 +68,19 @@ migrate();
 seedIfEmpty();
 log({ level: 'info', actor: 'system', action: 'server.start', message: `Pulse запущен в режиме ${process.env.PULSE_MODE || 'demo'}` });
 
+// Первичное наполнение трафика (только demo): клики и конверсии из счётчиков
+// площадок, чтобы экран «Деньги» с первой секунды показывал реальные записи.
+if ((process.env.PULSE_MODE || 'demo') !== 'live') {
+  setTimeout(() => {
+    try {
+      const t = simulateTraffic({ budget: 20000 });
+      if (t.clicks || t.conversions) log({ level: 'info', actor: 'system', action: 'traffic.backfill', message: `Трафик: +${t.clicks} кликов, +${t.conversions} конверсий` });
+    } catch (err) {
+      log({ level: 'warn', actor: 'system', action: 'traffic.backfill_failed', message: String(err.message || err) });
+    }
+  }, 1200);
+}
+
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  ▲ Pulse — панель управления контент-конвейером`);
   console.log(`  → http://localhost:${PORT}  (режим: ${process.env.PULSE_MODE || 'demo'})`);
@@ -67,6 +99,7 @@ async function tick() {
       globalThis.__lastAutopilot = Date.now();
       enqueue('autopilot.tick', {}, { delayMs: 0, priority: 8 });
       collectAnalytics();
+      simulateTraffic({ budget: 250 });
       sweepDueEpisodes();
     }
     if (Date.now() - Number(globalThis.__lastCleanup || 0) > 600000) {

@@ -293,3 +293,103 @@ GET  /r/{publicationId}             → 302 на продукт с UTM (счит
 
 **Swagger** в .NET-версии: `/swagger/v1/swagger.json`, доступ только из внутренней сети
 (наружу — через BFF).
+
+## 10. v2: медиа, проверки, деньги и postback
+
+### Медиа
+
+```http
+GET /media/<episodeId>.mp4          # готовый ролик (Range-запросы, кеш 7 дней)
+GET /media/<episodeId>-A.jpg        # обложка A
+GET /media/<episodeId>-B.jpg        # обложка B
+```
+
+Публичные маршруты, без токена: файл можно скачать и загрузить в площадку вручную.
+
+### Проверка ролика до публикации
+
+```http
+POST /api/episodes/{id}/check
+Content-Type: application/json
+{ "description": "текст описания", "hashtags": ["тег"], "platform": "tiktok" }
+```
+
+Ответ:
+
+```json
+{
+  "compliance": {
+    "ok": false, "score": 60, "platform": "tiktok",
+    "blocking": [{ "id": "health-cure", "reason": "Медицинские обещания лечения…" }],
+    "warnings": [{ "id": "ad-disclosure", "reason": "Есть признаки рекламы, но нет пометки" }],
+    "limits": { "captionMax": 2200, "hashtagsRecommended": 6, "publishPer24h": 15 }
+  },
+  "viral": {
+    "score": 60, "grade": "medium",
+    "factors": [{ "id": "hook", "label": "Хук первой фразы", "value": 68, "weight": 0.3, "detail": "…" }],
+    "advice": ["Перепишите первую фразу: вопрос, число или конфликт…"],
+    "confidence": "эвристика по 6 признакам, не прогноз алгоритма"
+  },
+  "disclosure": "Реклама: Pulse Studio. Видео создано с помощью ИИ."
+}
+```
+
+Результат сохраняется в эпизод — его видно в списке и на экране «Прозрачность».
+
+```http
+PATCH /api/episodes/{id}/caption
+{ "description": "новое описание", "hashtags": ["тег1", "тег2"] }
+```
+
+Быстрая правка перед публикацией: текст и теги, без пересборки ролика.
+
+### Деньги
+
+```http
+GET /api/money?days=30&projectId=all
+```
+
+```json
+{
+  "currency": "₽",
+  "totals": {
+    "views": 989158, "clicks": 11835, "conversions": 41,
+    "revenue": 76712.46, "revenueAds": 20562.96, "revenueConv": 56149.5,
+    "cost": 6864, "profit": 69848.46, "roi": 1017.6,
+    "rpmAvg": 20.79, "ctr": 1.2, "cr": 0.35, "epc": 4.74,
+    "profitPerVideo": 313.22, "costPerVideo": 30.78
+  },
+  "byPlatform": [{ "id": "reels", "name": "Instagram Reels", "profit": 40082.48, "roi": 787.01 }],
+  "byProject": [{ "id": "prj_…", "name": "Pulse Studio", "profit": 70805.46 }],
+  "top": [{ "title": "…", "profit": 211.3, "rpm": 25, "ctr": 1.4 }],
+  "series": [{ "day": "2026-10-20", "views": 41230, "ads": 1030.75, "conversions": 3, "convRevenue": 4108.5 }],
+  "assumptions": { "rpmReels": 25, "rpmTiktok": 10, "convRate": 1.6, "price": 2490, "margin": 0.55, "costPerVideo": 66 }
+}
+```
+
+### Короткая ссылка и postback
+
+```http
+GET /t/{click_token}
+```
+Публичный маршрут: пишет клик в `clicks`, увеличивает `publications.clicks`, редиректит 302 на лендинг продукта.
+Если токен неизвестен — 404 с человеческим текстом.
+
+```http
+POST /api/postback
+Content-Type: application/json
+{ "click_id": "cl_…", "value": 2490, "status": "paid", "external_id": "order-1234" }
+```
+или `{ "token": "<click_token>", "value": 2490 }`.
+Если в настройках задан `postback_key`, обязателен заголовок `x-pulse-key` (или `?key=`).
+Идемпотентно по `external_id`: повторный вызов не создаёт вторую конверсию.
+
+### Прозрачность
+
+```http
+GET /api/transparency
+```
+
+Возвращает проверки системы (`ok`/`warn`), фактическое потребление лимитов площадок за 24 ч,
+эпизоды, заблокированные правилами, эпизоды с низким вирусным скором, ошибки конвейера,
+статистику медиа и состояние рендера (`ffmpeg`, `sharp`, шрифты, размер кадра).

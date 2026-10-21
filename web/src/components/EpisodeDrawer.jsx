@@ -4,10 +4,142 @@ import { useApp } from '../App.jsx';
 import { Drawer, Badge, Progress, Field, Confirm, useToast } from './ui.jsx';
 import Icon, { PlatformIcon } from './Icons.jsx';
 import {
-  STATUS_META, fmt, dateTime, durationLabel, relative, fmtDateTimeLocal,
+  STATUS_META, fmt, dateTime, durationLabel, relative, fmtDateTimeLocal, bytes, money, pct,
 } from '../lib/format.js';
 
 const RISK = (risk) => (risk >= 70 ? 'danger' : risk >= 55 ? 'warn' : 'success');
+
+
+/* ── Проверка: правила площадок, скор и быстрая правка описания ─────────── */
+function CheckPanel({ episode, onRefresh }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [caption, setCaption] = useState(episode.description || '');
+  const [tags, setTags] = useState((episode.hashtags || []).join(' '));
+
+  useEffect(() => {
+    setCaption(episode.description || '');
+    setTags((episode.hashtags || []).join(' '));
+  }, [episode.id, episode.description]);
+
+  const compliance = episode.compliance;
+  const viral = episode.viral_meta;
+
+  const recheck = async () => {
+    setBusy(true);
+    try {
+      await api.checkEpisode(episode.id, {
+        description: caption,
+        hashtags: tags.split(/[\s,]+/).map((t) => t.replace(/^#/, '')).filter(Boolean),
+      });
+      toast.push({ tone: 'success', title: 'Проверка обновлена' });
+      await onRefresh();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Не удалось проверить', text: err.message });
+    } finally { setBusy(false); }
+  };
+
+  const saveCaption = async () => {
+    setBusy(true);
+    try {
+      await api.patchCaption(episode.id, {
+        description: caption,
+        hashtags: tags.split(/[\s,]+/).map((t) => t.replace(/^#/, '')).filter(Boolean),
+      });
+      toast.push({ tone: 'success', title: 'Описание сохранено', text: 'Применится к следующей публикации' });
+      await onRefresh();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Не сохранено', text: err.message });
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="col" style={{ gap: 16 }}>
+      {!compliance && !viral && (
+        <div className="notice">Проверка ещё не выполнялась — запустите её, чтобы увидеть правила и прогноз.</div>
+      )}
+
+      {viral && (
+        <div className="check-block">
+          <div className="check-block-head">
+            <span><Icon name="flame" size={14} /> «Залетит ли»</span>
+            <span className="score-pill" data-grade={viral.grade}>{viral.score}/100</span>
+          </div>
+          <div className="col" style={{ gap: 9, marginTop: 10 }}>
+            {(viral.factors || []).map((f) => (
+              <div key={f.id}>
+                <div className="factor-row">
+                  <span>{f.label}</span>
+                  <b>{f.value}</b>
+                </div>
+                <div className="bar-track" style={{ height: 5 }}>
+                  <div className="bar-fill" style={{
+                    width: `${f.value}%`,
+                    background: f.value >= 70 ? 'linear-gradient(90deg,#34d399,#6ee7b7)' : f.value >= 45 ? 'linear-gradient(90deg,#fbbf24,#fcd34d)' : 'linear-gradient(90deg,#fb7185,#fda4af)',
+                  }} />
+                </div>
+                <div className="field-hint" style={{ marginTop: 4 }}>{f.detail}</div>
+              </div>
+            ))}
+          </div>
+          {viral.advice?.length > 0 && (
+            <ul className="advice-list">
+              {viral.advice.map((a) => <li key={a}>{a}</li>)}
+            </ul>
+          )}
+          <div className="field-hint" style={{ marginTop: 8 }}>{viral.confidence}</div>
+        </div>
+      )}
+
+      {compliance && (
+        <div className="check-block">
+          <div className="check-block-head">
+            <span><Icon name="shield" size={14} /> Правила площадки</span>
+            <span className="score-pill" data-grade={compliance.ok ? 'high' : 'low'}>{compliance.ok ? 'проходит' : 'блок'}</span>
+          </div>
+          {compliance.blocking?.length > 0 && (
+            <div className="col" style={{ gap: 8, marginTop: 10 }}>
+              {compliance.blocking.map((b) => (
+                <div className="finding danger" key={b.id}>
+                  <Icon name="alert" size={13} />
+                  <div><b>{b.reason}</b>{b.match ? <span className="mono"> «{b.match}»</span> : null}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {compliance.warnings?.length > 0 && (
+            <div className="col" style={{ gap: 8, marginTop: 10 }}>
+              {compliance.warnings.map((w) => (
+                <div className="finding warn" key={w.id}>
+                  <Icon name="info" size={13} />
+                  <div><b>{w.reason}</b>{w.match ? <span className="mono"> «{w.match}»</span> : null}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {!compliance.blocking?.length && !compliance.warnings?.length && (
+            <div className="finding ok" style={{ marginTop: 10 }}><Icon name="check" size={13} /><div>Нарушений не найдено</div></div>
+          )}
+          <div className="mini-kv tight" style={{ marginTop: 12 }}>
+            <div><span>Площадка</span><b>{compliance.platform === 'tiktok' ? 'TikTok' : 'Reels'}</b></div>
+            <div><span>Лимит описания</span><b>{compliance.limits?.captionMax} симв.</b></div>
+            <div><span>Маркировка</span><b>{compliance.labels?.ad ? 'реклама' : '—'} / {compliance.labels?.ai ? 'AI' : '—'}</b></div>
+          </div>
+        </div>
+      )}
+
+      <Field label="Описание и хештеги" hint="Быстрая правка перед публикацией — без пересборки ролика">
+        <textarea className="textarea" value={caption} onChange={(e) => setCaption(e.target.value)} style={{ minHeight: 96 }} />
+        <input className="input" style={{ marginTop: 8 }} value={tags} onChange={(e) => setTags(e.target.value)} placeholder="#теги через пробел" />
+      </Field>
+
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn btn-primary btn-sm" disabled={busy} onClick={recheck}><Icon name="shield" size={13} />Перепроверить</button>
+        <button className="btn btn-soft btn-sm" disabled={busy} onClick={saveCaption}><Icon name="check" size={13} />Сохранить описание</button>
+      </div>
+    </div>
+  );
+}
 
 export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
   const { refreshLight } = useApp();
@@ -121,14 +253,22 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
         ) : (
           <>
             <div className="row" style={{ gap: 14, alignItems: 'flex-start', marginBottom: 16 }}>
-              <div className="cover" style={{ width: 92, flex: 'none' }}>
-                <img src={api.coverUrl(data.cover_seed, data.title, data.format, '&i=0')} alt="" />
-              </div>
+              {data.video_path ? (
+                <div className="media-thumb" style={{ width: 122 }}>
+                  <video src={data.video_path} poster={data.cover_paths?.A} muted playsInline preload="metadata" controls />
+                </div>
+              ) : (
+                <div className="cover" style={{ width: 92, flex: 'none' }}>
+                  <img src={data.cover_paths?.A || api.coverUrl(data.cover_seed, data.title, data.format, '&i=0')} alt="" />
+                </div>
+              )}
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div className="row wrap" style={{ gap: 6, marginBottom: 8 }}>
                   <Badge tone={status.tone} dot live={status.pulse}>{status.label}</Badge>
                   <Badge tone="muted">{data.stageLabel}</Badge>
                   <Badge tone={RISK(data.risk)}>риск {data.risk}</Badge>
+                  {data.viral ? <Badge tone={data.viral >= 65 ? 'success' : data.viral >= 45 ? 'warn' : 'danger'}>скор {data.viral}</Badge> : null}
+                  {data.compliance ? <Badge tone={data.compliance.ok ? 'success' : 'danger'}>{data.compliance.ok ? 'правила ок' : 'нарушение'}</Badge> : null}
                   {data.ab_test ? <Badge tone="accent">A/B</Badge> : null}
                 </div>
                 <Progress value={data.progress} striped={data.status === 'generating'} />
@@ -137,6 +277,12 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                   {data.scheduled_at && <span><Icon name="clock" size={11} style={{ verticalAlign: -1 }} /> {dateTime(data.scheduled_at)}</span>}
                   {data.error && <span style={{ color: 'var(--red)' }} className="truncate">{data.error}</span>}
                 </div>
+                {data.video_bytes ? (
+                  <div className="media-meta">
+                    <Icon name="film" size={12} /> {data.video_path?.split('/').pop()} · {bytes(data.video_bytes)} · рендер {Math.round((data.render_ms || 0) / 1000)} с
+                    <a href={data.video_path} target="_blank" rel="noreferrer" className="link-btn">скачать</a>
+                  </div>
+                ) : null}
                 {pubs.length > 0 && (
                   <div className="hr-stats" style={{ marginTop: 12 }}>
                     <div className="hr-stat"><span className="v">{fmt(views)}</span><span className="l">просмотры</span></div>
@@ -169,6 +315,7 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
             <div className="row" style={{ gap: 4, marginBottom: 14, borderBottom: '1px solid var(--line)' }}>
               {[
                 { id: 'content', label: 'Контент' },
+                { id: 'check', label: 'Проверка' },
                 { id: 'pubs', label: `Публикации${pubs.length ? ` · ${pubs.length}` : ''}` },
                 { id: 'events', label: 'События' },
               ].map((t) => (
@@ -272,6 +419,10 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                   <button className="btn btn-primary" disabled={!dirty || busy} onClick={save}><Icon name="check" size={14} />Сохранить</button>
                 </div>
               </div>
+            )}
+
+            {tab === 'check' && (
+              <CheckPanel episode={data} onRefresh={load} />
             )}
 
             {tab === 'pubs' && (

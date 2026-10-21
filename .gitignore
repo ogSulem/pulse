@@ -8,3 +8,4 @@ data/backups/
 *.log
 .DS_Store
 web/.vite/
+data/media/
