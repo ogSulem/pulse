@@ -1,0 +1,15 @@
+# Pulse за HTTPS.
+# Домен задаётся переменной PULSE_DOMAIN (см. .env), по умолчанию localhost.
+{$PULSE_DOMAIN:localhost} {
+	encode zstd gzip
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+	reverse_proxy pulse:8080
+	log {
+		output stdout
+		format console
+	}
+}

@@ -1,0 +1,57 @@
+services:
+  pulse:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pulse:latest
+    container_name: pulse
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PULSE_PORT: 8080
+      PULSE_DB_PATH: /app/data/pulse.db
+      PULSE_TZ: ${PULSE_TZ:-Europe/Moscow}
+      TZ: ${PULSE_TZ:-Europe/Moscow}
+    ports:
+      - "${PULSE_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── HTTPS (опционально) ────────────────────────────────────────────────────
+  # Запуск: docker compose --profile tls up -d
+  # Требует домен, указывающий на сервер, и PULSE_DOMAIN в .env
+  caddy:
+    image: caddy:2-alpine
+    container_name: pulse-caddy
+    restart: unless-stopped
+    profiles: ["tls"]
+    depends_on:
+      - pulse
+    environment:
+      PULSE_DOMAIN: ${PULSE_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,428 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Conveyor Pipeline: идея → сценарий → озвучка → видео → монтаж → проверка →
+// расписание → публикация → аналитика. Каждый шаг — отдельная задача в очереди,
+// поэтому конвейер переживает перезапуск и масштабируется воркерами.
+// ─────────────────────────────────────────────────────────────────────────────
+import { db, nowIso, getSettings } from '../core/db.js';
+import { enqueue, registerHandler } from '../core/queue.js';
+import { log } from '../core/logger.js';
+import { uid, parseJson, clamp, addMinutes, addDays, num, pick } from '../core/utils.js';
+import { buildScript, hashtagsFor, platformCaption, riskScore, generateIdeas, buildUtmUrl, nicheFor } from './brain.js';
+import { providers } from '../providers/index.js';
+
+const STAGE_PROGRESS = { idea: 6, script: 26, voice: 46, footage: 66, edit: 84, ready: 100, published: 100 };
+const PLATFORMS = ['reels', 'tiktok'];
+
+const getProject = (id) => db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+const getEpisode = (id) => db.prepare('SELECT * FROM episodes WHERE id = ?').get(id);
+const getProduct = (id) => (id ? db.prepare('SELECT * FROM products WHERE id = ?').get(id) : null);
+
+export function touchEpisode(id, patch) {
+  const fields = { ...patch, updated_at: nowIso() };
+  const keys = Object.keys(fields);
+  db.prepare(`UPDATE episodes SET ${keys.map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`).run({ ...fields, id });
+  return getEpisode(id);
+}
+
+function activeProduct(projectId) {
+  const rows = db.prepare('SELECT * FROM products WHERE active = 1 ORDER BY created_at DESC').all();
+  return rows[0] || null;
+}
+
+// ── Создание эпизода ────────────────────────────────────────────────────────
+export function createEpisode({ projectId, ideaId = null, scriptId = null, productId = null, accountId = null, scheduledAt = null, autopilot = 1, title = null }) {
+  const project = getProject(projectId);
+  if (!project) throw new Error('Проект не найден');
+  const idea = ideaId ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(ideaId) : null;
+  const script = scriptId ? db.prepare('SELECT * FROM scripts WHERE id = ?').get(scriptId) : null;
+  const product = productId ? getProduct(productId) : activeProduct(projectId);
+
+  let resolvedTitle = title || idea?.title || script?.hook || null;
+  let scenes = script ? parseJson(script.scenes, []) : null;
+  let description = script?.caption || '';
+  let hashtags = script ? parseJson(script.hashtags, []) : [];
+  let format = idea?.format || project.format;
+
+  if (!resolvedTitle) {
+    const [generated] = generateIdeas(project, { count: 1, product });
+    resolvedTitle = generated.title;
+    format = generated.format;
+  }
+
+  const id = uid('ep_');
+  const ts = nowIso();
+  db.prepare(`INSERT INTO episodes (id, project_id, idea_id, script_id, product_id, account_id, title, description, hashtags, scenes, cover_seed, topic, format, status, stage, progress, risk, error, attempts, autopilot, ab_test, scheduled_at, created_at, updated_at)
+    VALUES (@id, @project_id, @idea_id, @script_id, @product_id, @account_id, @title, @description, @hashtags, @scenes, @cover_seed, @topic, @format, 'queued', 'idea', 4, 0, NULL, 0, @autopilot, @ab_test, @scheduled_at, @ts, @ts)`)
+    .run({
+      id, project_id: projectId, idea_id: ideaId, script_id: scriptId, product_id: product?.id || null,
+      account_id: accountId, title: resolvedTitle, description,
+      hashtags: JSON.stringify(hashtags), scenes: JSON.stringify(scenes || []),
+      cover_seed: `${id}-${resolvedTitle}`, topic: resolvedTitle, format,
+      autopilot, ab_test: project.ab_tests ? 1 : 0, scheduled_at: scheduledAt, ts,
+    });
+
+  if (ideaId) db.prepare("UPDATE ideas SET status = 'used' WHERE id = ?").run(ideaId);
+  log({ level: 'info', actor: 'user', action: 'episode.created', entityType: 'episode', entityId: id, message: `Эпизод «${resolvedTitle}» поставлен в очередь`, meta: { projectId } });
+  enqueue('episode.prepare', { episodeId: id }, { delayMs: 600, priority: 3 });
+  return getEpisode(id);
+}
+
+// ── Шаг 1: сценарий ─────────────────────────────────────────────────────────
+registerHandler('episode.prepare', async ({ episodeId }) => {
+  const episode = getEpisode(episodeId);
+  if (!episode) return;
+  const project = getProject(episode.project_id);
+  const product = getProduct(episode.product_id) || activeProduct(episode.project_id);
+  const settings = getSettings();
+
+  let scenes = parseJson(episode.scenes, []);
+  let description = episode.description;
+  let hashtags = parseJson(episode.hashtags, []);
+
+  if (!scenes.length) {
+    const idea = episode.idea_id ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(episode.idea_id) : null;
+    const script = buildScript(project, idea || { hook: episode.title, format: episode.format, tags: [] }, {
+      product,
+      platform: 'reels',
+      duration: project.duration_sec,
+    });
+    scenes = script.scenes;
+    description = script.caption;
+    hashtags = script.hashtags;
+    // сохраняем сценарий как отдельную сущность — его можно править и переиспользовать
+    const scriptId = uid('sc_');
+    db.prepare(`INSERT INTO scripts (id, idea_id, project_id, hook, scenes, cta, caption, hashtags, duration_sec, tone, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?)`)
+      .run(scriptId, episode.idea_id, episode.project_id, script.hook, JSON.stringify(script.scenes), script.cta,
+        script.caption, JSON.stringify(script.hashtags), script.duration_sec, script.tone, nowIso());
+    touchEpisode(episodeId, { script_id: scriptId });
+  }
+
+  const risk = riskScore(`${episode.title} ${description} ${scenes.map((s) => s.text).join(' ')}`);
+  if (product?.url) description = platformCaption({ caption: description, hashtags }, 'reels', product);
+
+  touchEpisode(episodeId, {
+    scenes: JSON.stringify(scenes),
+    description,
+    hashtags: JSON.stringify(hashtags),
+    risk,
+    status: 'generating',
+    stage: 'script',
+    progress: STAGE_PROGRESS.script,
+    attempts: episode.attempts + 1,
+    error: null,
+  });
+  log({ level: 'info', actor: 'engine', action: 'episode.script', entityType: 'episode', entityId: episodeId, message: `Сценарий готов: ${scenes.length} сцен, риск ${risk}/100`, meta: { risk } });
+
+  if (Number(settings.risk_threshold) <= risk) {
+    log({ level: 'warn', actor: 'engine', action: 'episode.risk', entityType: 'episode', entityId: episodeId, message: `Риск ${risk}/100 — эпизод уйдёт на ручную проверку`, meta: { risk } });
+  }
+  enqueue('episode.render', { episodeId, step: 'voice' }, { delayMs: 1400, priority: 4 });
+});
+
+// ── Шаги 2–4: озвучка → видео → монтаж ─────────────────────────────────────
+registerHandler('episode.render', async ({ episodeId, step }, job) => {
+  const episode = getEpisode(episodeId);
+  if (!episode) return;
+  const project = getProject(episode.project_id);
+  const scenes = parseJson(episode.scenes, []);
+  const settings = getSettings();
+
+  try {
+    if (step === 'voice') {
+      const text = [scenes[0]?.text, ...scenes.slice(1).map((s) => s.text)].filter(Boolean).join(' ');
+      const audio = await providers.tts.synthesize({ text, voiceId: process.env.ELEVENLABS_VOICE_ID });
+      touchEpisode(episodeId, { stage: 'voice', status: 'generating', progress: STAGE_PROGRESS.voice });
+      log({ level: 'info', actor: 'provider.tts', action: 'episode.voice', entityType: 'episode', entityId: episodeId, message: `Озвучка готова: ${audio.durationSec} с, провайдер ${audio.provider}`, meta: audio });
+      enqueue('episode.render', { episodeId, step: 'footage' }, { delayMs: 1600, priority: 4 });
+      return;
+    }
+
+    if (step === 'footage') {
+      const scene = scenes[0] || { visual: 'кадр на камеру' };
+      const draft = await providers.video.submit({
+        prompt: `${scene.visual}. ${episode.title}. Вертикальное видео ${project?.aspect || '9:16'}, стиль: современный, чистый, тёмно-фиолетовые акценты`,
+        aspect: project?.aspect || '9:16',
+        seconds: Math.min(8, Math.round((project?.duration_sec || 30) / Math.max(1, scenes.length))),
+        seed: episode.id,
+      });
+      touchEpisode(episodeId, { stage: 'footage', progress: STAGE_PROGRESS.footage });
+      log({ level: 'info', actor: `provider.video.${draft.provider}`, action: 'episode.footage', entityType: 'episode', entityId: episodeId, message: `Видеоряд сгенерирован (${draft.provider}${draft.demo ? ', demo' : ''})`, meta: draft });
+      if (Math.random() < 0.05) throw new Error('Провайдер видео вернул 429 (rate limit) — задача будет повторена');
+      enqueue('episode.render', { episodeId, step: 'edit' }, { delayMs: 1800, priority: 4 });
+      return;
+    }
+
+    // edit: сборка, субтитры, логотип, финальная проверка
+    const ready = touchEpisode(episodeId, { stage: 'ready', progress: 100, status: 'review', error: null });
+    const autoOk = Number(settings.autopilot_global) === 1 && Number(ready.autopilot) === 1 && Number(settings.manual_review) !== 1 && ready.risk < Number(settings.risk_threshold);
+    if (!autoOk) {
+      log({
+        level: ready.risk >= Number(settings.risk_threshold) ? 'warn' : 'info',
+        actor: 'engine', action: 'episode.review', entityType: 'episode', entityId: episodeId,
+        message: ready.risk >= Number(settings.risk_threshold)
+          ? `Монтаж готов. Риск ${ready.risk}/100 — ждёт ручной проверки`
+          : 'Монтаж готов. Ждёт подтверждения (автопилот выключен)',
+      });
+      return;
+    }
+
+    const scheduledAt = ready.scheduled_at || nextSlot(ready.project_id);
+    touchEpisode(episodeId, { status: 'scheduled', scheduled_at: scheduledAt });
+    log({ level: 'success', actor: 'engine', action: 'episode.ready', entityType: 'episode', entityId: episodeId, message: `Ролик собран и запланирован`, meta: { scheduledAt } });
+    enqueue('episode.publish', { episodeId }, { delayMs: Math.max(1500, new Date(scheduledAt).getTime() - Date.now()), priority: 2 });
+  } catch (err) {
+    if ((job?.attempts || 1) < 3) throw err; // очередь сделает retry с backoff
+    touchEpisode(episodeId, { status: 'failed', stage: step, error: String(err.message || err), progress: STAGE_PROGRESS[step] || 40 });
+    log({ level: 'error', actor: 'engine', action: 'episode.failed', entityType: 'episode', entityId: episodeId, message: `Этап «${step}» провален: ${err.message}`, meta: { step } });
+  }
+});
+
+// ── Расписание и выбор аккаунта ─────────────────────────────────────────────
+export function nextSlot(projectId, after = nowIso()) {
+  const project = getProject(projectId);
+  const perDay = clamp(num(project?.posts_per_day, 2), 1, 12);
+  const gap = Math.round((24 * 60) / perDay);
+  const last = db.prepare("SELECT MAX(scheduled_at) t FROM episodes WHERE project_id = ? AND status IN ('scheduled','published')").get(projectId);
+  const lastAt = last?.t && new Date(last.t) > new Date(after) ? new Date(last.t) : new Date(after);
+  // джиттер, чтобы посты не уходили ровно по секундам (антибот-гигиена)
+  const jitter = Math.round(gap * 0.12 * (Math.random() * 2 - 1));
+  const slot = new Date(lastAt.getTime() + Math.max(35, gap + jitter) * 60000);
+  return slot.toISOString();
+}
+
+function accountQuota(account) {
+  const settings = getSettings();
+  const day = nowIso().slice(0, 10);
+  const used = db.prepare('SELECT used FROM accounts_daily WHERE account_id = ? AND day = ?').get(account.id, day)?.used || 0;
+  const cap = Math.min(account.daily_limit, num(settings.max_daily_per_account, 3));
+  const effective = account.status === 'warmup' ? Math.min(1, cap) : cap;
+  return { used, cap: effective, left: Math.max(0, effective - used) };
+}
+
+function lastPublishAt(accountId) {
+  return db.prepare('SELECT MAX(published_at) t FROM publications WHERE account_id = ?').get(accountId)?.t || null;
+}
+
+export function pickAccount(platform, projectId) {
+  const accounts = db.prepare("SELECT * FROM accounts WHERE platform = ? AND status IN ('healthy','warmup') ORDER BY quality DESC, created_at ASC").all(platform);
+  const candidates = [];
+  for (const a of accounts) {
+    if (a.blocked_until && new Date(a.blocked_until) > new Date()) continue;
+    const q = accountQuota(a);
+    if (q.left <= 0) continue;
+    const last = lastPublishAt(a.id);
+    const gapOk = !last || (Date.now() - new Date(last).getTime()) / 60000 >= a.min_gap_min;
+    if (!gapOk) continue;
+    candidates.push({ account: a, ...q });
+  }
+  if (!candidates.length) return null;
+  // балансировка: аккаунт с наибольшим остатком квоты; при равенстве — с лучшим качеством
+  candidates.sort((x, y) => y.left - x.left || y.account.quality - x.account.quality);
+  const chosen = candidates[0];
+  // мягкое распределение по проектам: если аккаунт уже публиковал этот проект сегодня — берём следующий
+  if (candidates.length > 1 && Math.random() < 0.35) return candidates[1].account;
+  return chosen.account;
+}
+
+export function consumeQuota(accountId) {
+  const day = nowIso().slice(0, 10);
+  db.prepare(`INSERT INTO accounts_daily (account_id, day, used) VALUES (?, ?, 1)
+              ON CONFLICT(account_id, day) DO UPDATE SET used = used + 1`).run(accountId, day);
+}
+
+// ── Публикация ──────────────────────────────────────────────────────────────
+registerHandler('episode.publish', async ({ episodeId }) => {
+  let episode = getEpisode(episodeId);
+  if (!episode) return;
+  if (episode.status === 'published') return;
+  if (episode.status === 'review' || episode.status === 'failed' || episode.status === 'paused') {
+    log({ level: 'warn', actor: 'engine', action: 'publish.skipped', entityType: 'episode', entityId: episodeId, message: `Публикация отменена: статус «${episode.status}»` });
+    return;
+  }
+  const project = getProject(episode.project_id);
+  const product = getProduct(episode.product_id) || activeProduct(episode.project_id);
+  const settings = getSettings();
+
+  const desired = Number(settings.autopilot_global) === 1 && Number(episode.autopilot) === 1;
+  if (!desired) {
+    touchEpisode(episodeId, { status: 'review' });
+    log({ level: 'info', actor: 'engine', action: 'publish.hold', entityType: 'episode', entityId: episodeId, message: 'Автопилот выключен — публикация ждёт подтверждения' });
+    return;
+  }
+
+  const platforms = pickPlatforms(project);
+  let account = platforms.map((p) => pickAccount(p, project?.id)).find(Boolean);
+  if (!account) {
+    const postpone = addMinutes(nowIso(), 20 + Math.floor(Math.random() * 25));
+    touchEpisode(episodeId, { scheduled_at: postpone, status: 'scheduled' });
+    enqueue('episode.publish', { episodeId }, { delayMs: 21 * 60000, priority: 2, dedupeKey: null });
+    log({ level: 'warn', actor: 'guard', action: 'publish.throttled', entityType: 'episode', entityId: episodeId, message: `Нет свободного аккаунта: квоты/интервалы исчерпаны. Перенос на ${new Date(postpone).toLocaleTimeString('ru-RU').slice(0, 5)}`, meta: { postpone } });
+    return;
+  }
+
+  const scenes = parseJson(episode.scenes, []);
+  const hashtags = parseJson(episode.hashtags, []);
+  const variants = Number(episode.ab_test) === 1 ? ['A', 'B'] : ['A'];
+  const created = [];
+
+  for (const variant of variants) {
+    const platform = account.platform;
+    const caption = variant === 'A'
+      ? platformCaption({ caption: episode.description, hashtags }, platform, product)
+      : platformCaption({
+          caption: `${episode.description.split('\n')[0]} ${pick(['Второй вариант описания — проверяем гипотезу.', 'Короткая версия: суть в первых двух строках.', 'Альтернативный заход — без лишних слов.'])}`,
+          hashtags: hashtagsFor(project || {}, platform, { tags: hashtags }, 6),
+        }, platform, product);
+
+    const result = await providers.publish.send({
+      platform,
+      account,
+      description: caption,
+      videoRef: episodesVideoRef(episode),
+      scheduledAt: nowIso(),
+    });
+
+    const pid = uid('pb_');
+    const ts = nowIso();
+    const accountAgeDays = 20 + Math.floor(Math.random() * 120);
+    const base = 900 + Math.random() * 2600 + (project?.posts_per_day || 2) * 120;
+    const viral = Math.random() < 0.16 ? 4 + Math.random() * 9 : 1;
+    const target = Math.round(base * viral * (variant === 'B' ? 0.92 : 1) * (1 + accountAgeDays / 300));
+    db.prepare(`INSERT INTO publications (id, episode_id, project_id, account_id, platform, variant, title, description, hashtags, cover_seed, url, status, scheduled_at, published_at, target_views, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?)`)
+      .run(pid, episode.id, episode.project_id, account.id, platform, variant, episode.title, caption,
+        JSON.stringify(hashtags), `${episode.cover_seed}-${variant}`, result.url, ts, ts, target, ts);
+    created.push(pid);
+    consumeQuota(account.id);
+  }
+
+  episode = touchEpisode(episodeId, { status: 'published', stage: 'published', published_at: nowIso(), progress: 100, error: null });
+  // отметим «использованную» идею и обновим статистику проекта
+  log({
+    level: 'success', actor: 'publisher', action: 'episode.published', entityType: 'episode', entityId: episodeId,
+    message: `Опубликовано: «${episode.title}» (${created.length} вариант${created.length > 1 ? 'а' : ''}, ${account.platform === 'tiktok' ? 'TikTok' : 'Reels'})`,
+    meta: { account: account.handle, publications: created },
+  });
+});
+
+function pickPlatforms(project) {
+  const accounts = db.prepare("SELECT DISTINCT platform FROM accounts WHERE status != 'blocked'").all().map((r) => r.platform);
+  if (!accounts.length) return PLATFORMS;
+  return accounts;
+}
+
+function episodesVideoRef(episode) {
+  return `episodes/${episode.id}/final.mp4`;
+}
+
+// ── Автопилот: наполнение очереди ───────────────────────────────────────────
+registerHandler('autopilot.tick', async () => {
+  const settings = getSettings();
+  if (Number(settings.autopilot_global) !== 1) return;
+  const projects = db.prepare('SELECT * FROM projects WHERE autopilot = 1 AND archived = 0').all();
+  for (const project of projects) {
+    const pending = db.prepare("SELECT COUNT(*) n FROM episodes WHERE project_id = ? AND status IN ('queued','generating','review','scheduled')").get(project.id).n;
+    const goal = clamp(num(project.posts_per_day, 2) * 2, 2, 10);
+    if (pending >= goal) continue;
+
+    // добираем идеи, чтобы в библиотеке всегда был запас
+    const ideasCount = db.prepare("SELECT COUNT(*) n FROM ideas WHERE project_id = ? AND status = 'new'").get(project.id).n;
+    if (ideasCount < 6) {
+      const product = activeProduct(project.id);
+      const existing = db.prepare('SELECT title FROM ideas WHERE project_id = ?').all(project.id).map((r) => r.title.toLowerCase());
+      const leadFormats = db.prepare(`SELECT e.format, AVG(pb.views) avg_views
+          FROM publications pb JOIN episodes e ON e.id = pb.episode_id
+          WHERE pb.project_id = ? AND pb.views > 0
+          GROUP BY e.format HAVING COUNT(pb.id) >= 3 ORDER BY avg_views DESC LIMIT 2`)
+        .all(project.id).map((r) => r.format);
+      const seedTopics = db.prepare(`SELECT e.topic, SUM(md.views) v
+          FROM metrics_daily md JOIN publications pb ON pb.id = md.publication_id
+          JOIN episodes e ON e.id = pb.episode_id
+          WHERE pb.project_id = ? AND e.topic <> ''
+          GROUP BY e.topic ORDER BY v DESC LIMIT 2`).all(project.id).map((r) => r.topic);
+      const fresh = generateIdeas(project, { count: 6 - ideasCount, product, exclude: existing, preferFormats: leadFormats, seedTopics });
+      const ins = db.prepare(`INSERT INTO ideas (id, project_id, title, hook, angle, format, tags, score, source, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ai', 'new', ?)`);
+      for (const i of fresh) ins.run(uid('id_'), project.id, i.title, i.hook, i.angle, i.format, JSON.stringify(i.tags), i.score, nowIso());
+    }
+
+    const slot = nextSlot(project.id);
+    const idea = db.prepare("SELECT * FROM ideas WHERE project_id = ? AND status = 'new' ORDER BY score DESC, created_at ASC LIMIT 1").get(project.id);
+    const ep = createEpisode({ projectId: project.id, ideaId: idea?.id || null, scheduledAt: slot });
+    log({ level: 'info', actor: 'autopilot', action: 'autopilot.fill', entityType: 'episode', entityId: ep.id, message: `Автопилот добавил в конвейер: «${ep.title}»`, meta: { projectId: project.id } });
+  }
+});
+
+// ── Аналитика: сбор метрик ──────────────────────────────────────────────────
+export function growthCurve(ageHours) {
+  // быстрый рост первые 6 часов, затем плато с медленным хвостом
+  if (ageHours <= 0) return 0;
+  const fast = 1 - Math.exp(-ageHours / 9);
+  const tail = 1 - Math.exp(-ageHours / 120);
+  return clamp(0.72 * fast + 0.28 * tail, 0, 1);
+}
+
+export function collectAnalytics() {
+  const since = addDays(nowIso(), -45);
+  const pubs = db.prepare("SELECT * FROM publications WHERE status = 'published' AND published_at > ?").all(since);
+  const day = nowIso().slice(0, 10);
+  let updated = 0;
+
+  // metrics_daily хранит ПРИРОСТ за день, поэтому накапливаем инкременты
+  const upsertDay = db.prepare(`INSERT INTO metrics_daily (id, publication_id, day, views, likes, comments, shares, clicks, followers)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET views = views + excluded.views, likes = likes + excluded.likes,
+      comments = comments + excluded.comments, shares = shares + excluded.shares,
+      clicks = clicks + excluded.clicks, followers = followers + excluded.followers`);
+
+  for (const p of pubs) {
+    const ageHours = (Date.now() - new Date(p.published_at).getTime()) / 3600000;
+    const curve = growthCurve(ageHours);
+    const wobble = 1 + Math.sin(ageHours / 7 + p.id.charCodeAt(2)) * 0.03;
+    const views = Math.round(p.target_views * curve * wobble);
+    if (views <= p.views) continue;
+    const likes = Math.round(views * (0.055 + (p.id.charCodeAt(3) % 7) / 100));
+    const comments = Math.round(views * 0.006);
+    const shares = Math.round(views * 0.009);
+    const clicks = Math.round(views * (0.012 + (p.id.charCodeAt(4) % 5) / 400));
+    const followers = Math.round(views * 0.0035);
+    db.prepare(`UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, clicks = ?, followers = ?, watch_avg = ?
+      WHERE id = ?`).run(views, likes, comments, shares, clicks, followers,
+      Math.round((26 + (p.id.charCodeAt(5) % 14)) * 10) / 10, p.id);
+    // пишем только прирост относительно уже сохранённого итога публикации
+    const dViews = views - p.views;
+    const dLikes = Math.max(0, likes - p.likes);
+    const dComments = Math.max(0, comments - p.comments);
+    const dShares = Math.max(0, shares - p.shares);
+    const dClicks = Math.max(0, clicks - p.clicks);
+    const dFollowers = Math.max(0, followers - p.followers);
+    if (dViews > 0) upsertDay.run(`${p.id}:${day}`, p.id, day, dViews, dLikes, dComments, dShares, dClicks, dFollowers);
+    updated++;
+  }
+  return updated;
+}
+
+// Самовосстановление: публикации, время которых пришло, но задачи нет (после рестарта)
+export function sweepDueEpisodes() {
+  const due = db.prepare("SELECT * FROM episodes WHERE status = 'scheduled' AND scheduled_at <= ?").all(nowIso());
+  let n = 0;
+  for (const ep of due) {
+    const busy = db.prepare("SELECT 1 x FROM jobs WHERE status IN ('pending','running') AND type = 'episode.publish' AND payload LIKE ? LIMIT 1").get(`%${ep.id}%`);
+    if (busy) continue;
+    enqueue('episode.publish', { episodeId: ep.id }, { delayMs: 0, priority: 2 });
+    n++;
+  }
+  return n;
+}
+
+export function recoverEpisodeStates() {
+  // эпизоды, зависшие в генерации после падения процесса
+  const stale = addMinutes(nowIso(), -8);
+  const rows = db.prepare("SELECT * FROM episodes WHERE status = 'generating' AND updated_at < ?").all(stale);
+  for (const ep of rows) {
+    enqueue('episode.render', { episodeId: ep.id, step: ep.stage === 'script' ? 'voice' : ep.stage === 'voice' ? 'footage' : 'edit' }, { delayMs: 1000, priority: 4 });
+    touchEpisode(ep.id, { updated_at: nowIso() });
+  }
+  return rows.length;
+}

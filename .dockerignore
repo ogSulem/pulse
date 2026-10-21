@@ -1,0 +1,10 @@
+node_modules
+web/dist
+data
+.git
+.gitignore
+*.log
+.env
+docs
+deploy
+README.md
