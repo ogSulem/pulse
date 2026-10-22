@@ -4,8 +4,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { db, nowIso, ensureSettings } from '../core/db.js';
 import { uid, seededRandom, addDays, addMinutes } from '../core/utils.js';
+import { zonedToUtc, localParts } from '../engine/schedule.js';
 import { buildScript, hashtagsFor, generateIdeas, riskScore, COVER_PALETTES } from '../engine/brain.js';
 import { growthCurve } from '../engine/pipeline.js';
+import { revenueFor, disclosureFor, syncCampaignMetrics } from '../engine/ads.js';
+import { simulateTraffic } from '../engine/money.js';
 import { log } from '../core/logger.js';
 
 const PROJECTS = [
@@ -26,12 +29,17 @@ const PROJECTS = [
   },
 ];
 
+// Портфель из трёх площадок: у каждого аккаунта своя роль и своя история роста.
+// followers — реальные подписчики на момент старта демо (дальше растут из факта).
 const ACCOUNTS = [
-  { platform: 'reels', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 3, min_gap_min: 110, quality: 92, hue: 268 },
-  { platform: 'reels', handle: 'momentum.app', display_name: 'Momentum', status: 'healthy', daily_limit: 3, min_gap_min: 95, quality: 84, hue: 250 },
-  { platform: 'reels', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'warmup', daily_limit: 2, min_gap_min: 140, quality: 71, hue: 300 },
-  { platform: 'tiktok', handle: 'pulse.studio', display_name: 'Pulse', status: 'healthy', daily_limit: 3, min_gap_min: 90, quality: 88, hue: 275 },
-  { platform: 'tiktok', handle: 'momentum.app', display_name: 'Momentum', status: 'cooldown', daily_limit: 2, min_gap_min: 120, quality: 63, hue: 240 },
+  { platform: 'reels', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 3, min_gap_min: 110, quality: 92, hue: 268, followers: 24800, project: 'pulse' },
+  { platform: 'reels', handle: 'momentum.app', display_name: 'Momentum', status: 'healthy', daily_limit: 3, min_gap_min: 95, quality: 84, hue: 250, followers: 18400, project: 'momentum' },
+  { platform: 'reels', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'warmup', daily_limit: 2, min_gap_min: 140, quality: 71, hue: 300, followers: 6100, project: 'fitflow' },
+  { platform: 'tiktok', handle: 'pulse.studio', display_name: 'Pulse', status: 'healthy', daily_limit: 3, min_gap_min: 90, quality: 88, hue: 275, followers: 41200, project: 'pulse' },
+  { platform: 'tiktok', handle: 'momentum.app', display_name: 'Momentum', status: 'cooldown', daily_limit: 2, min_gap_min: 120, quality: 63, hue: 240, followers: 12600, project: 'momentum' },
+  { platform: 'youtube', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 2, min_gap_min: 240, quality: 86, hue: 8, followers: 9800, project: 'pulse' },
+  { platform: 'youtube', handle: 'momentum.shorts', display_name: 'Momentum Shorts', status: 'warmup', daily_limit: 1, min_gap_min: 300, quality: 68, hue: 355, followers: 3200, project: 'momentum' },
+  { platform: 'youtube', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'healthy', daily_limit: 2, min_gap_min: 260, quality: 74, hue: 20, followers: 1150, project: 'fitflow' },
 ];
 
 const PRODUCTS = [
@@ -46,11 +54,14 @@ function demoChecks(seedIndex) {
   const viral = 38 + ((seedIndex * 17) % 46);
   const warn = seedIndex % 5 === 0;
   const low = viral < 45;
+  // Демо-данные должны быть непротиворечивы: опубликованный ролик не может
+  // быть заблокирован комплаенсом. Правило «лёгких денег» — предупреждение,
+  // а не блок, поэтому в блокировки оно не попадает.
   const compliance = {
-    ok: !low,
-    score: low ? 64 : 92,
+    ok: true,
+    score: warn ? 88 : 96,
     platform: seedIndex % 2 ? 'tiktok' : 'reels',
-    blocking: low ? [{ id: 'fin-getrich', severity: 'block', reason: 'Формулировка «лёгких денег»: площадки понижают охват и могут ограничить аккаунт', match: 'заработа' }] : [],
+    blocking: [],
     warnings: warn ? [{ id: 'headline-claim', severity: 'warn', reason: 'Есть признаки рекламы, но нет пометки — Pulse добавит её сам', match: 'скидк' }] : [],
     findings: [],
     limits: { captionMax: 2200, hashtagsRecommended: 6, publishPer24h: seedIndex % 2 ? 15 : 50 },
@@ -92,21 +103,44 @@ const LOG_SEED = [
 ];
 
 function truncateAll() {
-  const tables = ['metrics_daily', 'publications', 'episodes', 'scripts', 'ideas', 'products', 'accounts', 'projects', 'jobs', 'logs', 'accounts_daily'];
+  const tables = ['campaign_posts', 'campaigns', 'brands', 'metrics_daily', 'conversions', 'clicks', 'publications', 'episodes', 'scripts', 'ideas', 'products', 'accounts', 'projects', 'jobs', 'logs', 'accounts_daily'];
   for (const t of tables) db.prepare(`DELETE FROM ${t}`).run();
 }
 
+// демо-реальность: лента активнее в определённые часы, поэтому охват зависит
+// от локального времени публикации. Именно этот эффект потом «находит»
+// engine/schedule.js на собственных данных — и показывает основу решения.
+function hourBoost(publishedAt) {
+  const tz = process.env.PULSE_TZ || 'Europe/Moscow';
+  let hour = 12;
+  try {
+    hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false }).format(new Date(publishedAt))) % 24;
+  } catch {}
+  const peaks = hour >= 11 && hour <= 13 || hour >= 18 && hour <= 21;
+  const shoulder = hour >= 9 && hour <= 22;
+  if (peaks) return 1.22;
+  if (shoulder) return 1;
+  return 0.62;
+}
+
 function makePublicationsFor(episode, project, accounts, rnd, publishedAt) {
-  const platforms = rnd() > 0.45 ? ['reels', 'tiktok'] : ['reels'];
+  const platforms = ['reels'];
+  if (rnd() > 0.4) platforms.push('tiktok');
+  // Shorts — не «копия везде»: только часть роликов, иначе охват размывается
+  if (rnd() > 0.6) platforms.push('youtube');
   const out = [];
   for (const platform of platforms) {
-    const pool = accounts.filter((a) => a.platform === platform && a.status !== 'blocked');
+    // аккаунт публикует только контент своего бренда — история не смешивается
+    const pool = accounts.filter((a) => a.platform === platform && a.status !== 'blocked'
+      && (!a.project_id || !project?.id || a.project_id === project.id));
     if (!pool.length) continue;
     const account = pool[Math.floor(rnd() * pool.length)];
-    const variants = rnd() > 0.55 ? ['A', 'B'] : ['A'];
+    const variants = platform === 'youtube' || rnd() <= 0.55 ? ['A'] : ['A', 'B']; // у Shorts A/B не делаем
     const viral = rnd() < 0.14 ? 5 + rnd() * 8 : 1;
     const base = 900 + rnd() * 2200;
-    const targetA = Math.round(base * viral * (1 + account.quality / 260));
+    // у Shorts ниже базовый охват, но выше «долгий хвост»: множитель честнее
+    const platformFactor = platform === 'youtube' ? 0.75 : 1;
+    const targetA = Math.round(base * viral * platformFactor * (1 + account.quality / 260) * hourBoost(publishedAt));
     for (const variant of variants) {
       // оба варианта A/B живут на одном аккаунте, разница только в обложке/описании
       const target = Math.round(targetA * (variant === 'B' ? 0.7 + rnd() * 0.6 : 1));
@@ -118,6 +152,9 @@ function makePublicationsFor(episode, project, accounts, rnd, publishedAt) {
 
 export function seedBase() {
   ensureSettings();
+  // демо-проект условно прошёл аудит Google: иначе вся история Shorts была бы приватной
+  // и экран роста показывал бы нули. В live это включает владелец после проверки проекта.
+  db.prepare("UPDATE settings SET value = '1' WHERE key = 'youtube_audited'").run();
   const rnd = seededRandom('pulse-demo-v1');
   const ts = nowIso();
 
@@ -134,11 +171,12 @@ export function seedBase() {
   const accountRows = [];
   for (const a of ACCOUNTS) {
     const id = uid('ac_');
-    db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '09:00', '23:00', 'Europe/Moscow', ?, '', ?, ?)`)
+    const projectId = projectIds[a.project] || null;
+    db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, followers, followers_source, followers_updated_at, project_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '09:00', '23:00', 'Europe/Moscow', ?, '', ?, 'seed', ?, ?, ?, ?)`)
       .run(id, a.platform, a.handle, a.display_name, a.hue, a.status, a.daily_limit, a.min_gap_min, a.quality,
-        addDays(ts, -(60 + Math.floor(rnd() * 240))), ts);
-    accountRows.push({ ...a, id });
+        a.followers || 0, ts, projectId, addDays(ts, -(60 + Math.floor(rnd() * 240))), ts);
+    accountRows.push({ ...a, id, project_id: projectId });
   }
 
   const productRows = [];
@@ -176,8 +214,15 @@ export function seedBase() {
       const postsToday = Math.max(1, Math.round(postsPerDay * (0.7 + rnd() * 0.7)));
       for (let k = 0; k < postsToday; k++) {
         const idea = ideaRows[Math.floor(rnd() * ideaRows.length)];
-        const script = buildScript(project, idea, { product, platform: 'reels', duration: project.duration_sec });
-        const publishedAt = addMinutes(addDays(ts, -d), 9 * 60 + k * 300 + Math.floor(rnd() * 90));
+        // 80/20: продаём не в каждом ролике, иначе падает досмотр и охват.
+        // Детерминированно: каждый 4-й выпуск — прямой CTA, остальные — польза.
+        const promoDirect = (d + k) % 4 === 0;
+        const episodeProduct = promoDirect ? product : null;
+        const script = buildScript(project, idea, { product: episodeProduct, platform: 'reels', duration: project.duration_sec });
+        // публикуем в локальные часы (11:00 и 19:00 — пики ленты), а не «сейчас + 9 часов»
+        const dayParts = localParts(addDays(ts, -d), process.env.PULSE_TZ || 'Europe/Moscow');
+        const hourSlot = [11, 19, 15][k % 3];
+        const publishedAt = zonedToUtc(dayParts.year, dayParts.month, dayParts.day, hourSlot, Math.floor(rnd() * 50), process.env.PULSE_TZ || 'Europe/Moscow').toISOString();
         const episodeId = uid('ep_');
         const scriptId = uid('sc_');
         db.prepare(`INSERT INTO scripts (id, idea_id, project_id, hook, scenes, cta, caption, hashtags, duration_sec, tone, status, created_at)
@@ -187,7 +232,7 @@ export function seedBase() {
         const risk = riskScore(`${idea.title} ${script.caption}`);
         db.prepare(`INSERT INTO episodes (id, project_id, idea_id, script_id, product_id, account_id, title, description, hashtags, scenes, cover_seed, topic, format, status, stage, progress, risk, error, attempts, autopilot, ab_test, scheduled_at, published_at, cost_cents, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'published', 'published', 100, ?, NULL, 1, 1, 1, ?, ?, ?, ?, ?)`)
-          .run(episodeId, project.id, idea.id, scriptId, product.id, idea.title, script.caption,
+          .run(episodeId, project.id, idea.id, scriptId, episodeProduct?.id || null, idea.title, script.caption,
             JSON.stringify(script.hashtags), JSON.stringify(script.scenes), `${episodeId}-${idea.title}`,
             idea.title, idea.format, risk, publishedAt, publishedAt, EPISODE_COST_CENTS, publishedAt, publishedAt);
 
@@ -207,7 +252,9 @@ export function seedBase() {
             cost_cents: Math.round(EPISODE_COST_CENTS / Math.max(1, pubList.length)),
             url: pub.platform === 'tiktok'
               ? `https://www.tiktok.com/@${pub.account.handle}/video/${Math.floor(rnd() * 9e17)}`
-              : `https://www.instagram.com/reel/${Math.floor(rnd() * 9e9).toString(36)}/`,
+              : pub.platform === 'youtube'
+                ? `https://www.youtube.com/shorts/${Math.floor(rnd() * 1e12).toString(36)}`
+                : `https://www.instagram.com/reel/${Math.floor(rnd() * 9e9).toString(36)}/`,
             published_at: publishedAt, target_views: pub.target,
           });
           publishedCount++;
@@ -231,9 +278,13 @@ export function seedBase() {
           }
           // итоговые значения публикации должны совпадать с суммой дневных приростов,
           // иначе сборщик аналитики запишет в «сегодня» всю накопленную сумму
+          // удержание: база площадки × качество аккаунта + бонус за «залетевший» ролик.
+          // Диапазон честный: 45–85%, а не «красивые» 99% у всех подряд.
+          const baseRetention = pub.platform === 'youtube' ? 52 : pub.platform === 'tiktok' ? 46 : 50;
+          const retention = baseRetention + (pub.account.quality - 70) * 0.25 + (pub.target > 6000 ? 12 : 0) + rnd() * 8;
           db.prepare(`UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, clicks = ?, followers = ?, watch_avg = ? WHERE id = ?`)
             .run(prevViews, prevLikes, Math.round(prevViews * 0.006), Math.round(prevViews * 0.009), prevClicks, prevFollowers,
-              Math.round((24 + rnd() * 18) * 10) / 10, pid);
+              Math.round(Math.min(88, Math.max(38, retention)) * 10) / 10, pid);
         }
       }
     }
@@ -268,6 +319,115 @@ export function seedBase() {
         plan.risk || riskScore(script.caption), plan.error || null, scheduledAt, EPISODE_COST_CENTS,
         new Date(now - (plan.status === 'scheduled' ? 60000 : 300000)).toISOString(),
         new Date(now - (plan.status === 'scheduled' ? 60000 : 300000)).toISOString());
+  }
+
+  // ── реклама: бренды и живые кампании ────────────────────────────────────
+  // Нужны, чтобы экран «Реклама» сразу показывал реальные деньги: кто платит,
+  // сколько выходов сделано, что уже оплачено и где не хватает маркировки.
+  const CAMPAIGNS = [
+    {
+      brand: { name: 'Nordwind', legal_name: 'ООО «Нордвинд»', inn: '7701234567', contact: 'ads@nordwind.ru' },
+      name: 'Nordwind — зимняя капсула', model: 'fixed', budget: 180000, rate: 45000, posts_target: 4, deliver: 4,
+      status: 'active', erid: '2VtzqxP9dKf', mention: '@nordwind', hashtags: ['#nordwind', '#зима'],
+      brief: 'Показать 3 вещи из капсулы, без «купите» — сценарий через личный опыт. Обязательно erid и @nordwind.',
+      days: [-6, 12], daily_cap: 1,
+    },
+    {
+      brand: { name: 'FitFlow', legal_name: 'ИП Соколова А. В.', inn: '770987654321', contact: 'brand@fitflow.ru' },
+      name: 'FitFlow — приложение тренировок', model: 'cpm', budget: 90000, rate: 320, posts_target: 24, deliver: 14,
+      status: 'active', erid: '2VtzqwR4mNp', mention: '@fitflow.app', hashtags: ['#fitflow', '#тренировки'],
+      brief: 'Сторителлинг «как я бросил зал и вернулся», CTA в описании, ссылка в шапке.',
+      days: [-14, 20], daily_cap: 2,
+    },
+    {
+      brand: { name: 'Skillkit', legal_name: 'ООО «Скилкит»', inn: '7811223344', contact: 'partners@skillkit.io' },
+      name: 'Skillkit — курсы по аналитике', model: 'cpa', budget: 150000, rate: 1200, posts_target: 26, deliver: 16,
+      status: 'active', erid: '2VtzqxT7bLz', mention: '@skillkit', hashtags: ['#skillkit', '#аналитика'],
+      brief: 'Разбор кейса + промокод PULSE20. Оплата за оплативших курс, постбэк приходит автоматически.',
+      days: [-3, 30], daily_cap: 2,
+    },
+    {
+      brand: { name: 'Nordwind', legal_name: 'ООО «Нордвинд»', inn: '7701234567', contact: 'ads@nordwind.ru' },
+      name: 'Nordwind — бартер, осенняя съёмка', model: 'barter', budget: 0, rate: 0, posts_target: 2, deliver: 2,
+      status: 'done', erid: '', marking: 'none', mention: '@nordwind', hashtags: ['#nordwind'],
+      brief: 'Бартер: вещи за ролик. Деньги не начисляются, но выходы учитываются.',
+      days: [-40, -12], daily_cap: 1,
+    },
+  ];
+
+  const brandIds = new Map();
+  const campaignRows = [];
+  for (const c of CAMPAIGNS) {
+    let brandId = brandIds.get(c.brand.name);
+    if (!brandId) {
+      brandId = uid('br_');
+      db.prepare('INSERT INTO brands (id, name, legal_name, inn, contact, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(brandId, c.brand.name, c.brand.legal_name, c.brand.inn, c.brand.contact, '', addDays(ts, -60));
+      brandIds.set(c.brand.name, brandId);
+    }
+    const id = uid('cm_');
+    const startsAt = addDays(ts, c.days[0]);
+    const endsAt = addDays(ts, c.days[1]);
+    db.prepare(`INSERT INTO campaigns (id, brand_id, project_id, name, model, budget_cents, rate_cents, posts_target,
+        starts_at, ends_at, status, brief, mention, link_url, hashtags, erid, marking, paid_cents, daily_cap, created_at, updated_at)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, 0, ?, ?, ?)`)
+      .run(id, brandId, c.name, c.model, Math.round(c.budget * 100), Math.round(c.rate * 100), c.posts_target,
+        startsAt, endsAt, c.status, c.brief, c.mention, JSON.stringify(c.hashtags), c.erid, c.marking || 'erid', c.daily_cap,
+        addDays(ts, c.days[0]), addDays(ts, c.days[0]));
+    campaignRows.push({ ...c, id, brandId, startsAt, endsAt });
+  }
+
+  // демо-трафик до раздачи кампаний: у CPA-модели уже есть конверсии для начислений
+  if ((process.env.PULSE_MODE || 'demo') !== 'live') simulateTraffic({ budget: 60000 });
+
+  // раздаём кампании части уже вышедших роликов и считаем деньги по факту просмотров
+  // каждый выход = одна публикация (A/B на одном аккаунте — это два выхода)
+  const pubPool = db.prepare(`SELECT pb.id pub_id, pb.views, pb.clicks, pb.published_at, e.id ep_id, e.description
+    FROM publications pb JOIN episodes e ON e.id = pb.episode_id
+    WHERE pb.status = 'published'
+      AND EXISTS (SELECT 1 FROM clicks c WHERE c.publication_id = pb.id)
+    ORDER BY pb.published_at DESC`).all();
+  const convByPub = new Map(db.prepare('SELECT publication_id pid, COUNT(*) n FROM conversions WHERE publication_id IS NOT NULL GROUP BY publication_id')
+    .all().map((r) => [r.pid, r.n]));
+  let cursor = 0;
+  let campaignPosts = 0;
+  for (const campaign of campaignRows) {
+    const disclosure = disclosureFor({ brand_id: campaign.brandId, erid: campaign.erid, marking: 'erid' });
+    const touched = new Set();
+    const quota = Math.min(campaign.posts_target, campaign.deliver ?? campaign.posts_target);
+    for (let taken = 0; taken < quota && cursor < pubPool.length; taken++) {
+      const pub = pubPool[cursor++];
+      if (!touched.has(pub.ep_id)) {
+        touched.add(pub.ep_id);
+        db.prepare('UPDATE episodes SET campaign_id = ?, ad_disclosure = ? WHERE id = ?')
+          .run(campaign.id, disclosure, pub.ep_id);
+      }
+      const revenue = revenueFor(
+        { model: campaign.model, rate_cents: Math.round(campaign.rate * 100), posts_target: campaign.posts_target },
+        { views: pub.views, clicks: pub.clicks, conversions: convByPub.get(pub.pub_id) || 0 },
+      );
+      db.prepare('INSERT INTO campaign_posts (id, campaign_id, episode_id, publication_id, revenue_cents, views, clicks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(uid('cp_'), campaign.id, pub.ep_id, pub.pub_id, revenue, pub.views, pub.clicks, pub.published_at);
+      campaignPosts++;
+    }
+  }
+
+  // метрики досинхронизируются так же, как в проде после сбора аналитики
+  syncCampaignMetrics();
+
+  // кампании, где все выходы сделаны, закрываются автоматически
+  for (const campaign of campaignRows) {
+    const done = db.prepare('SELECT COUNT(*) n FROM campaign_posts WHERE campaign_id = ?').get(campaign.id).n;
+    if (done >= campaign.posts_target) db.prepare("UPDATE campaigns SET status = 'done' WHERE id = ?").run(campaign.id);
+  }
+
+  // оплаты: часть счетов уже закрыта, часть — в дебиторке (видно на экране «Реклама»)
+  for (const c of campaignRows) {
+    const earned = db.prepare('SELECT COALESCE(SUM(revenue_cents),0) v FROM campaign_posts WHERE campaign_id = ?').get(c.id).v;
+    const status = db.prepare('SELECT status FROM campaigns WHERE id = ?').get(c.id).status;
+    // закрытая кампания закрыта и по деньгам, активная — частично оплачена (дебиторка видна на экране)
+    const paid = status === 'done' ? earned : Math.round(earned * 0.6);
+    db.prepare('UPDATE campaigns SET paid_cents = ? WHERE id = ?').run(paid, c.id);
   }
 
   // ── журнал ────────────────────────────────────────────────────────────────

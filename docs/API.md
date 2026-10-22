@@ -226,8 +226,8 @@ curl -s -X PATCH http://localhost:8080/api/accounts/ac_31bd… \
 | Метод | Путь | Назначение |
 |-------|------|-----------|
 | GET | `/accounts` | аккаунты + остаток квоты на сегодня |
-| POST | `/accounts` | добавить |
-| PATCH | `/accounts/{id}` | лимиты, окно, статус, качество |
+| POST | `/accounts` | добавить (`platform`: `reels` / `tiktok` / `youtube`, `project_id` — бренд аккаунта) |
+| PATCH | `/accounts/{id}` | лимиты, окно, статус, качество, площадка, `project_id` (`""` — универсальный) |
 | DELETE | `/accounts/{id}` | удалить |
 | POST | `/accounts/{id}/connect` | подключить реальный API: `{ token, externalId?, expiresAt? }` |
 | DELETE | `/accounts/{id}/connect` | отозвать токен (аккаунт остаётся в списке) |
@@ -370,6 +370,34 @@ PATCH /api/episodes/{id}/caption
 
 Быстрая правка перед публикацией: текст и теги, без пересборки ролика.
 
+### Интеллект: расписание, прогноз, A/B
+
+| Метод | Путь | Что возвращает |
+|-------|------|----------------|
+| GET | `/insights/schedule?days=&projectId=` | профиль 24 часов по площадкам, лучшие часы, источник (`prior`/`data`), следующий слот с причиной |
+| GET | `/insights/forecast?episodeId=` | прогноз охвата, дохода, прибыли и ROI ролика + разложение по множителям |
+| GET | `/insights/growth?days=` | здоровье проектов (`scale`/`hold`/`fix`/`pause`), A/B-сводка, качество аккаунтов, рейтинг роликов по прогнозу |
+| POST | `/insights/apply-policy` | применить темп автопилота по деньгам (1–6 постов в день), вернуть что изменилось |
+| GET | `/abtest/summary?projectId=` | сколько тестов закрыто, средний разрыв, предпочитаемый вариант проекта |
+| POST | `/abtest/evaluate` | принудительно закрыть созревшие тесты и вернуть решения |
+| POST | `/insights/recalibrate` | пересчитать веса вирусного скора на своих роликах |
+
+```bash
+curl -s "http://localhost:8080/api/insights/schedule" -H "Authorization: Bearer $TOKEN"
+# → { "timezone": "Europe/Moscow",
+#     "platforms": [{ "platform": "reels", "learned": true, "samples": 153,
+#                     "best": [{ "hour": 19, "score": 1.02, "samples": 54, "source": "data" }, …] }],
+#     "plan": { "at": "2026-10-22T16:07:00.000Z", "hour": 19, "source": "data",
+#               "reason": "19:07 — ваш лучший час по 54 публикациям (скор 1.02)" } }
+
+curl -s "http://localhost:8080/api/insights/forecast?episodeId=ep_…" -H "Authorization: Bearer $TOKEN"
+# → { "expectedViews": 4628, "revenue": 63.4, "cost": 66, "profit": -2.6, "roi": -4,
+#     "factors": { "baseline": 3200, "baselineSource": "project", "viral": {…}, "hour": {…}, "account": {…} } }
+```
+
+`POST /abtest/evaluate` отвечает списком решений: `{ episodeId, winner: "A"|"B"|"tie", lift, ctrA, ctrB }`.
+Разница считается симметрично (A/B = 5000/2000 → `+60%`), а при разнице меньше 8% тест закрывается как `tie`.
+
 ### Деньги
 
 ```http
@@ -420,3 +448,299 @@ GET /api/transparency
 Возвращает проверки системы (`ok`/`warn`), фактическое потребление лимитов площадок за 24 ч,
 эпизоды, заблокированные правилами, эпизоды с низким вирусным скором, ошибки конвейера,
 статистику медиа и состояние рендера (`ffmpeg`, `sharp`, шрифты, размер кадра).
+
+---
+
+## 11. Реклама: бренды, кампании, маркировка
+
+Каждая кампания — это данные, а не переписка в мессенджере: бюджет, модель оплаты, сроки, @бренд,
+хештеги, erid и бриф. Конвейер читает их сам.
+
+| Метод | Путь | Что делает |
+|-------|------|------------|
+| GET | `/api/ads/overview` | кампании со статистикой, итоги (начислено / оплачено / дебиторка / CPM / ROI), риски маркировки, ближайшие дедлайны |
+| GET | `/api/brands` | список брендов (юрлицо, ИНН, контакт) |
+| POST | `/api/brands` | создать бренд |
+| GET | `/api/campaigns` | кампании со статистикой (`stats`) |
+| POST | `/api/campaigns` | создать кампанию (можно сразу с новым брендом по `brandName`) |
+| GET | `/api/campaigns/{id}` | кампания + выходы (`posts`) + привязанные ролики (`episodes`) + текст маркировки |
+| PATCH | `/api/campaigns/{id}` | изменить бюджет, ставку, статус, дедлайн, erid и т. д. |
+| DELETE | `/api/campaigns/{id}` | удалить кампанию вместе с историей выходов |
+| POST | `/api/campaigns/{id}/pay` | записать оплату (`{ "amount": 20000 }`) — дебиторка уменьшается |
+| POST | `/api/campaigns/{id}/attach` | привязать кампанию к ролику (`{ "episodeId": "ep_…" }`) |
+| GET | `/api/episodes/{id}/campaign` | кампания ролика, готовый текст маркировки и превью описания |
+| DELETE | `/api/episodes/{id}/campaign` | отвязать кампанию от ролика |
+| POST | `/api/ads/autofill` | разложить кампании по свободным роликам (`{ "limit": 5 }`) |
+
+### Создание кампании
+
+```http
+POST /api/campaigns
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "brandName": "Nordwind", "legalName": "ООО «Нордвинд»", "inn": "7701234567",
+  "name": "Зимняя капсула", "model": "fixed",
+  "budget": 180000, "rate": 45000, "postsTarget": 4, "dailyCap": 1,
+  "endsAt": "2026-12-01", "erid": "2VtzqxP9dKf",
+  "mention": "@nordwind", "hashtags": ["#nordwind", "#зима"],
+  "brief": "Показать 3 вещи из капсулы, без «купите»"
+}
+```
+
+`model`:
+
+| Модель | Как считается начисление за выход |
+|--------|-----------------------------------|
+| `fixed` | `rate / posts_target` — фиксированная сумма, разложенная по выходам договора |
+| `cpm` | `просмотры / 1000 × rate` |
+| `cpa` | `конверсии × rate` (конверсии по публикации из `conversions`) |
+| `barter` | 0 — деньги не начисляются, но выходы, сроки и маркировка учитываются |
+
+### Ответ `/api/ads/overview`
+
+```json
+{
+  "campaigns": [
+    { "id": "cm_…", "name": "FitFlow — приложение тренировок", "modelLabel": "за 1000 показов",
+      "brand_name": "FitFlow", "status": "active", "erid": "2VtzqwR4mNp",
+      "stats": { "posts": 14, "postsTarget": 24, "revenue": 25765.76, "paid": 10874.3,
+                 "receivable": 14891.46, "cpm": 320, "views": 80471, "postsLeft": 10,
+                 "budgetLeft": 64234.24, "todayPosts": 0, "dailyCap": 2, "canPost": true } }
+  ],
+  "totals": { "active": 2, "all": 4, "revenue": 93565.76, "paid": 69554.3, "receivable": 24011.46,
+              "spend": 1056, "profit": 92509.76, "roi": 8760, "budget": 420000,
+              "budgetLeft": 326434.24, "views": 212657, "cpm": 439.98, "posts": 36 },
+  "risks": [],
+  "deadlines": [{ "campaignId": "cm_…", "name": "FitFlow — приложение тренировок", "postsLeft": 10, "days": 20 }]
+}
+```
+
+### Маркировка
+
+Пометка собирается из данных кампании и попадает в описание при публикации (идемпотентно —
+повторная обработка не дублирует блок):
+
+```
+Реклама. ООО «Нордвинд». ИНН 7701234567. erid: 2VtzqxP9dKf
+```
+
+`GET /api/episodes/{id}/campaign` возвращает готовый `disclosure` и `preview` описания:
+
+```json
+{ "campaign": { "name": "…", "modelLabel": "фикс за ролик", "stats": { "…": "…" } },
+  "disclosure": "Реклама. ИП Соколова А. В. ИНН 770987654321. erid: 2VtzqwR4mNp",
+  "preview": "Три вещи из капсулы…\n\n@nordwind\n\n#nordwind #зима\n\n#реклама\n\nРеклама. …" }
+```
+
+Если у кампании `marking = "erid"` нет токена, публикация блокируется проверкой комплаенса
+(`ad-erid-missing`), а отсутствие пометки «Реклама» в описании — правилом `ad-marking-missing`.
+
+---
+
+## 12. Рост (v6): портфель, хуки, удержание, монетизация
+
+Экран «Рост» опирается на шесть эндпоинтов. Все они читают те же таблицы, что и движок, поэтому
+цифры в интерфейсе и в решениях автопилота совпадают.
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/growth/overview?days=30` | всё для экрана одним запросом |
+| GET | `/growth/trends?days=30` | радар трендов и собственные форматы |
+| GET | `/growth/hooks?topic=…&platform=…` | лаборатория хуков |
+| POST | `/growth/retention` | проверка удержания по сценарию |
+| GET | `/growth/monetization` | путь к деньгам по всем каналам |
+| GET | `/growth/playbook/{accountId}` | план ведения аккаунта |
+| GET | `/episodes/{id}/gate` | вердикт перед публикацией |
+
+### `GET /api/growth/overview`
+
+```json
+{ "portfolio": { "accounts": [ { "handle": "pulse.studio", "platform": "youtube", "platformLabel": "YouTube Shorts",
+      "followers": 9800, "views30": 113000, "retention": 62.3, "retentionTarget": 65,
+      "usedToday": 0, "leftToday": 2, "health": 95,
+      "nextAction": { "tone": "success", "text": "Продолжать темп и тестировать новый хук", "action": "scale" } } ],
+    "platforms": [ { "platform": "youtube", "label": "YouTube Shorts", "accounts": 3, "followers": 14150,
+      "retention": 60.7, "retentionTarget": 65, "idealSec": [22, 45], "capacity": 5 } ],
+    "totals": { "accounts": 8, "followers": 117250, "views30": 1591761, "avgRetention": 58.6,
+      "capacityPerDay": 16, "demandPerDay": 5, "headroom": 11 } },
+  "trends": { "trends": [ { "label": "Зацикленный ролик (loop)", "status": "hot", "verdict": "снимай сейчас" } ] },
+  "monetization": { "programs": [ { "id": "youtube-ypp-1", "progress": 69, "etaText": "204 дн." } ] },
+  "ads": { "totals": { "revenue": 83286 }, "campaigns": [] },
+  "platforms": { "…": "плейбуки площадок: окно хука, длительность, темп" } }
+```
+
+`days` принимает 7/14/30; влияет на окно охвата в портфеле и на радар трендов.
+
+### `GET /api/growth/hooks`
+
+```bash
+curl -s "http://localhost:8080/api/growth/hooks?topic=привычки&platform=youtube" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "topic": "привычки", "platform": "youtube", "platformLabel": "YouTube Shorts",
+  "best": { "id": "pain-question", "text": "Почему «привычки» не даёт результата?",
+            "score": 70, "hookScore": 76, "viralScore": 54, "fitsWindow": true, "readableSec": 2.8 },
+  "hooks": [ "…7 вариантов с оценками…" ],
+  "guidance": [ "Решение о свайпе: 2.1 с — хук должен звучать сразу, без «привет, друзья».",
+                "Длительность: 22–45 с, досмотр целимся в 65%." ] }
+```
+
+`topic` необязателен: без него берётся тема проекта или эпизода (`projectId` / `episodeId`).
+
+### `POST /api/growth/retention`
+
+```json
+{ "platform": "youtube", "title": "Почему Shorts не залетают",
+  "scenes": [ { "text": "Первые 2 секунды решают всё", "seconds": 4 } ],
+  "hashtags": ["#shorts", "#youtube", "#контент"] }
+```
+
+```json
+{ "verdict": "tune", "predictedCompletion": 71, "targetCompletion": 65, "durationSec": 9,
+  "hook": { "text": "Первые 2 секунды решают всё", "seconds": 2, "score": 76, "windowSec": 2.1 },
+  "checks": [ { "id": "duration", "ok": false, "severity": "warn",
+                "text": "Длительность 9 с (оптимум 22–45 с)", "fix": "Добавьте смысла до 22 с" } ] }
+```
+
+`verdict`: `ready` (0–1 замечание), `tune` (2–3), `rewrite` (4+), `fix` (есть блокирующее).
+Без `hashtags` теги считаются из описания.
+
+### `GET /api/growth/monetization`
+
+Пять программ с прогрессом по каждому условию и ETA по фактической скорости:
+
+```json
+{ "totals": { "followers": 117250, "views30": 1591761, "youtubeAccounts": 3, "tiktokFollowers": 53800 },
+  "programs": [
+    { "id": "youtube-ypp-1", "name": "YouTube Partner Program — ранний доступ", "progress": 69,
+      "etaText": "204 дн.", "requirements": [ { "label": "просмотры Shorts за 90 дней", "have": 224000, "need": 3000000 } ] },
+    { "id": "youtube-ypp-2", "progress": 51, "etaText": "больше года",
+      "note": "Shorts-просмотры не конвертируются в 4000 часов: у Shorts свой порог." },
+    { "id": "tiktok-rewards", "progress": 100, "regionLimited": true,
+      "regionNote": "Только US, UK, DE, FR, JP, KR, MX, BR" },
+    { "id": "brand-deals", "progress": 84 }, { "id": "own-product", "progress": 100 } ] }
+```
+
+`regionLimited` — не украшение: TikTok Creator Rewards реально недоступна РФ-аккаунтам, и UI
+проговаривает это прямо, вместо обещания «100% готово».
+
+### `GET /api/episodes/{id}/gate`
+
+```json
+{ "verdict": "go", "score": 89, "platform": "reels", "platformLabel": "Instagram Reels",
+  "blockers": [], "warnings": [],
+  "retention": { "predictedCompletion": 60, "targetCompletion": 60 },
+  "viral": { "score": 67 }, "forecast": { "expectedViews": 1642 },
+  "quota": { "left": 7, "cap": 50 } }
+```
+
+`verdict`: `go` — можно публиковать, `fix` — есть замечания (публикация возможна, но хуже),
+`block` — блокирующее правило (комплаенс, маркировка, нет файла). `score` 0..100 — та же величина,
+которую видит автопилот при решении.
+
+### `GET /api/growth/playbook/{accountId}`
+
+```json
+{ "account": { "handle": "fitflow.daily", "platform": "reels", "status": "warmup", "followers": 6122 },
+  "phase": "warmup", "phaseLabel": "Прогрев",
+  "cadence": { "daily": 2, "weekly": 14 },
+  "ramp": [ { "week": 1, "perDay": 1 } ],
+  "rules": [ "…" ], "issues": [ "…" ],
+  "benchmarks": { "hookWindowSec": 1.3, "idealSec": [20, 45], "completionTarget": 0.6 } }
+```
+
+
+---
+
+## 13. План, аудит и база знаний (v6.1)
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/growth/plan?days=7&projectId=` | календарь: что, когда и на какой аккаунт выйдет |
+| GET | `/growth/audit` | что мешает охвату и деньгам, с действиями |
+| GET | `/growth/knowledge` | лимиты, алгоритмы, монетизация и границы |
+
+### `GET /api/growth/plan`
+
+```json
+{ "days": 7,
+  "plan": [ { "date": "2026-10-22", "weekday": "чт", "slots": [
+      { "platform": "tiktok", "platformLabel": "TikTok", "project": "Pulse Studio",
+        "account": { "id": "ac_…", "handle": "pulse.studio" }, "time": "12:07",
+        "topic": "Нейросети, которые реально делают работу за тебя",
+        "format": "before-after",
+        "hook": "Почему «Нейросети, которые реально делают» не даёт результата?",
+        "hookScore": 70, "fitsWindow": true, "expectedViews": 2900, "expectedRevenue": 29.5,
+        "targetSec": "45–90", "why": "1.3 с на хук · досмотр 55% · тема из библиотеки" } ] } ],
+  "totals": { "posts": 68, "perWeek": 68, "expectedViews": 184775, "expectedRevenue": 4147.94,
+              "byPlatform": { "reels": 42, "tiktok": 14, "youtube": 12 } },
+  "rules": [ "Один ролик — один аккаунт внутри площадки…" ] }
+```
+
+Слоты создаются только для активных аккаунтов бренда и в пределах `daily_limit`; у Shorts — не больше
+одного выхода в день и 4 дней в неделю.
+
+### `GET /api/growth/audit`
+
+```json
+{ "score": 56, "counts": { "block": 0, "warn": 3, "info": 2 },
+  "issues": [ { "id": "tiktok-private", "severity": "warn",
+                "title": "TikTok публикует SELF_ONLY",
+                "impact": "Ролики в TikTok видны только вам — просмотров и подписчиков не будет",
+                "fix": "Подать клиент TikTok Content Posting на аудит…",
+                "action": { "label": "Открыть настройки", "to": "#/settings" } } ] }
+```
+
+`severity`: `block` — публикация или охват невозможны, `warn` — теряются охват/деньги, `info` — улучшение.
+
+### `GET /api/growth/knowledge`
+
+```json
+{ "platforms": [ { "platform": "youtube", "label": "YouTube Shorts",
+    "api": { "per24h": 100, "initPerMin": 6, "note": "…", "official": "https://…" },
+    "fields": { "captionMax": 5000, "titleMax": 100, "tagRange": [3, 5], "hashtagsMax": 15, "videoMaxSec": 180 },
+    "algorithm": { "hookWindowSec": 2.1, "idealSec": [22, 45], "completionTarget": 65 },
+    "demotions": [ "…" ], "notes": [ "…" ] } ],
+  "monetization": [ { "id": "tiktok-rewards", "region": "только US, UK, DE, FR, JP, KR, MX, BR — в РФ недоступна" } ],
+  "general": { "quotas": [ "…" ], "marking": { "ru": "…", "ai": "…" }, "truth": [ "…" ] } }
+```
+
+Все числа берутся из `engine/limits.js` и `engine/compliance.js` — база знаний не может противоречить
+проверкам публикации.
+
+## 14. Студия: креатив под ключ (v7)
+
+### `GET /api/studio/options`
+
+Что можно собрать: проекты, активные продукты, площадки с лимитами и текущая доля продающих
+роликов (`promoShare`).
+
+### `POST /api/studio`
+
+Собирает пакет под площадку. Тело: `{ projectId, ideaId?, platform, durationSec, promo, productId?, count? }`,
+где `promo` — `auto` (решает правило 80/20) | `direct` | `soft` | `none`.
+
+Ответ: `{ project, platform, durationSec, promo, best, candidates, guidance }`.
+Каждый кандидат содержит `scenes` (текст титра + роль + секунды), `captions` для всех трёх площадок,
+`title`, `coverText`, `pinnedComment`, `hashtags`, `scores { total, hook, viral, retention, retentionTarget, compliance }`,
+`warnings[]` и `alternativeHooks[]`.
+
+### `POST /api/studio/queue`
+
+Ставит готовый пакет в очередь. Тело: `{ projectId, platform, durationSec, promo, productId?, package? }`.
+Если `package` не передан, пакет собирается заново. Возвращает созданный эпизод со статусом `queued`;
+сцены, описание под площадку, `promo` и паспорт креатива уже записаны.
+
+### `POST /api/episodes/{id}/package/regenerate`
+
+Пересобирает креатив существующего ролика (`{ platform?, promo? }`) и возвращает
+`{ episode, candidates, guidance }`. Старые сцены и описание заменяются, продукт и промо-режим
+остаются, если не переданы явно.
+
+### `POST /api/pipeline/drain`
+
+Прогоняет очередь. По умолчанию отвечает сразу: `{ started: true, limit, queue }` — рендер
+продолжается в фоне. Для сценариев и CI: `{ "wait": true }` → `{ processed, queue, waited: true }`.

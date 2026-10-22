@@ -3,7 +3,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, AreaChart, BarList, Segmented, Donut, Empty, Modal } from '../components/ui.jsx';
-import { fmt, full, dateShort, time, FORMAT_LABELS, pct } from '../lib/format.js';
+import { fmt, full, dateShort, time, FORMAT_LABELS, pct, platformLabel } from '../lib/format.js';
 
 export default function Analytics() {
   const { data } = useApp();
@@ -49,6 +49,16 @@ export default function Analytics() {
     { type: 'ideas', label: 'Темы' },
     { type: 'scripts', label: 'Сценарии' },
   ];
+
+  const WEIGHT_LABELS = {
+    hook: 'хук', length: 'длина', pace: 'темп', retention: 'удержание', caption: 'описание', novelty: 'новизна',
+  };
+  const bestWeightLabel = (w) => {
+    const entries = Object.entries(w.weights || {});
+    if (!entries.length) return 'хук';
+    const [key] = entries.sort((a, b) => b[1] - a[1])[0];
+    return WEIGHT_LABELS[key] || key;
+  };
 
   return (
     <div className="page">
@@ -135,6 +145,41 @@ export default function Analytics() {
             {overview?.byFormat?.length
               ? <BarList items={overview.byFormat} valueKey="views" labelKey="label" />
               : <span className="muted" style={{ fontSize: 11.5 }}>Недостаточно данных</span>}
+          </div>
+
+          <div className="card">
+            <div className="card-title">
+              <h3>Чему научилась модель</h3>
+              <span className="sub">{overview?.intelligence?.weights?.source === 'learned' ? 'на ваших данных' : 'приоры'}</span>
+            </div>
+            {overview?.intelligence?.weights?.source === 'learned' ? (
+              <>
+                <div style={{ fontSize: 11.5, color: 'var(--text-2)', lineHeight: 1.55, marginBottom: 8 }}>
+                  Веса вирусного скора пересчитаны на {overview.intelligence.weights.samples} роликах:
+                  сильнее всего с охватом связан признак «{bestWeightLabel(overview.intelligence.weights)}».
+                </div>
+                <div className="col" style={{ gap: 5 }}>
+                  {Object.entries(overview.intelligence.weights.weights || {}).map(([k, w]) => (
+                    <div key={k} className="row" style={{ gap: 8, alignItems: 'center' }}>
+                      <span style={{ width: 96, fontSize: 10.5, color: 'var(--muted)' }}>{WEIGHT_LABELS[k] || k}</span>
+                      <span style={{ flex: 1, height: 5, borderRadius: 4, background: 'rgba(255,255,255,.08)' }}>
+                        <span style={{ display: 'block', width: `${Math.round(w * 260)}%`, maxWidth: '100%', height: '100%', borderRadius: 4, background: 'linear-gradient(90deg,#8b5cf6,#c4b5fd)' }} />
+                      </span>
+                      <b style={{ fontSize: 10.5, minWidth: 34, textAlign: 'right' }}>{Math.round(w * 100)}%</b>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <span className="muted" style={{ fontSize: 11.5 }}>
+                Пока используются приоры. После 12 опубликованных роликов веса пересчитаются по фактическому охвату.
+              </span>
+            )}
+            {overview?.intelligence?.schedule?.length ? (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line)', fontSize: 11, color: 'var(--text-2)' }}>
+                Лучшие часы: {overview.intelligence.schedule.map((s) => `${platformLabel(s.platform)} ${s.best.slice(0, 2).map((b) => `${String(b.hour).padStart(2, '0')}:00`).join(', ')}`).join(' · ')}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

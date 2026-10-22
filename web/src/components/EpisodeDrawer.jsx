@@ -4,7 +4,7 @@ import { useApp } from '../App.jsx';
 import { Drawer, Badge, Progress, Field, Confirm, useToast } from './ui.jsx';
 import Icon, { PlatformIcon } from './Icons.jsx';
 import {
-  STATUS_META, fmt, dateTime, durationLabel, relative, fmtDateTimeLocal, bytes, money, pct,
+  STATUS_META, fmt, dateTime, durationLabel, relative, fmtDateTimeLocal, bytes, money, pct, platformLabel,
 } from '../lib/format.js';
 
 const RISK = (risk) => (risk >= 70 ? 'danger' : risk >= 55 ? 'warn' : 'success');
@@ -24,6 +24,7 @@ function CheckPanel({ episode, onRefresh }) {
 
   const compliance = episode.compliance;
   const viral = episode.viral_meta;
+  const creative = episode.creative;
 
   const recheck = async () => {
     setBusy(true);
@@ -53,8 +54,54 @@ function CheckPanel({ episode, onRefresh }) {
     } finally { setBusy(false); }
   };
 
+  const regenerate = async () => {
+    setBusy(true);
+    try {
+      await api.regeneratePackage(episode.id, { promo: episode.promo || undefined });
+      toast.push({ tone: 'success', title: 'Креатив пересобран', text: 'Новые хук, сцены и описание уже в ролике' });
+      await onRefresh();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Не удалось пересобрать', text: err.message });
+    } finally { setBusy(false); }
+  };
+
   return (
     <div className="col" style={{ gap: 16 }}>
+      {creative?.hook && (
+        <div className="check-block">
+          <div className="check-block-head">
+            <span><Icon name="sparkles" size={14} /> Креатив движка</span>
+            <span className="score-pill" data-grade={creative.scores?.total >= 75 ? 'high' : creative.scores?.total >= 55 ? 'mid' : 'low'}>
+              {creative.scores?.total || 0}/100
+            </span>
+          </div>
+          <div className="col" style={{ gap: 6, marginTop: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 650 }}>«{creative.hook}»</div>
+            <div className="mini-kv tight">
+              <div><span>Хук</span><b>{creative.scores?.hook || 0}/100</b></div>
+              <div><span>Вирусность</span><b>{creative.scores?.viral || 0}/100</b></div>
+              <div><span>Удержание</span><b>{creative.scores?.retention || 0}% из {creative.scores?.retentionTarget || 0}%</b></div>
+              <div><span>Продажа</span><b>{episode.promo === 'direct' ? 'прямая ссылка' : episode.promo === 'soft' ? 'мягкое упоминание' : 'без продажи'}</b></div>
+            </div>
+            {creative.warnings?.length > 0 && (
+              <div className="col" style={{ gap: 6 }}>
+                {creative.warnings.map((w) => (
+                  <div className="finding warn" key={w.text}><Icon name="info" size={13} /><div>{w.text}</div></div>
+                ))}
+              </div>
+            )}
+            {creative.alternativeHooks?.length > 0 && (
+              <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>
+                Альтернативные хуки: {creative.alternativeHooks.map((h) => h.text).join(' · ')}
+              </div>
+            )}
+            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={regenerate} style={{ alignSelf: 'flex-start' }}>
+              <Icon name="refresh" size={13} />Пересобрать креатив
+            </button>
+          </div>
+        </div>
+      )}
+
       {!compliance && !viral && (
         <div className="notice">Проверка ещё не выполнялась — запустите её, чтобы увидеть правила и прогноз.</div>
       )}
@@ -121,7 +168,7 @@ function CheckPanel({ episode, onRefresh }) {
             <div className="finding ok" style={{ marginTop: 10 }}><Icon name="check" size={13} /><div>Нарушений не найдено</div></div>
           )}
           <div className="mini-kv tight" style={{ marginTop: 12 }}>
-            <div><span>Площадка</span><b>{compliance.platform === 'tiktok' ? 'TikTok' : 'Reels'}</b></div>
+            <div><span>Площадка</span><b>{platformLabel(compliance.platform)}</b></div>
             <div><span>Лимит описания</span><b>{compliance.limits?.captionMax} симв.</b></div>
             <div><span>Маркировка</span><b>{compliance.labels?.ad ? 'реклама' : '—'} / {compliance.labels?.ai ? 'AI' : '—'}</b></div>
           </div>
@@ -146,9 +193,28 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
   const toast = useToast();
   const [data, setData] = useState(null);
   const [tab, setTab] = useState('content');
+  const [forecast, setForecast] = useState(null);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState({ title: '', description: '', hashtags: '', scenes: [] });
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [sponsor, setSponsor] = useState(null);
+  const [campaigns, setCampaigns] = useState([]);
+
+  useEffect(() => {
+    if (!episodeId) { setForecast(null); return; }
+    let alive = true;
+    api.forecast(episodeId).then((res) => { if (alive) setForecast(res); }).catch(() => {});
+    return () => { alive = false; };
+  }, [episodeId]);
+
+  const loadSponsor = async () => {
+    if (!episodeId) return;
+    try {
+      const [sp, list] = await Promise.all([api.episodeCampaign(episodeId), api.campaigns()]);
+      setSponsor(sp);
+      setCampaigns(list || []);
+    } catch { /* экран работает и без рекламного блока */ }
+  };
 
   const load = async () => {
     if (!episodeId) return;
@@ -166,7 +232,7 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
     }
   };
 
-  useEffect(() => { setData(null); setTab('content'); setConfirmDelete(false); load(); }, [episodeId]);
+  useEffect(() => { setData(null); setTab('content'); setConfirmDelete(false); setSponsor(null); load(); loadSponsor(); }, [episodeId]);
 
   const action = async (name, extra) => {
     setBusy(true);
@@ -283,6 +349,22 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                     <a href={data.video_path} target="_blank" rel="noreferrer" className="link-btn">скачать</a>
                   </div>
                 ) : null}
+                {forecast && !pubs.length && (
+                  <div className="col" style={{ gap: 4, marginTop: 10, padding: '9px 11px', border: '1px solid var(--line)', borderRadius: 10, background: 'rgba(139,92,246,.07)' }}>
+                    <div className="row-between" style={{ gap: 8 }}>
+                      <span style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.08em', color: 'var(--violet-3)', fontWeight: 700 }}>прогноз</span>
+                      <span style={{ fontSize: 10, color: 'var(--muted)' }}>медиана {fmt(forecast.factors.baseline)} · {forecast.factors.baselineSource === 'project' ? 'свой проект' : forecast.factors.baselineSource === 'platform' ? 'площадка' : 'фолбэк'}</span>
+                    </div>
+                    <div className="row wrap" style={{ gap: 14, fontSize: 11 }}>
+                      <span><b>{fmt(forecast.expectedViews)}</b> <span style={{ color: 'var(--muted)' }}>просмотров</span></span>
+                      <span><b>{money(forecast.revenue, forecast.currency)}</b> <span style={{ color: 'var(--muted)' }}>доход</span></span>
+                      <span><b className={forecast.profit >= 0 ? 'tone-green' : 'tone-rose'}>{money(forecast.profit, forecast.currency)}</b> <span style={{ color: 'var(--muted)' }}>прибыль · ROI {forecast.roi}%</span></span>
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>
+                      скор {forecast.factors.viral.score} × {forecast.factors.viral.factor} · час {String(forecast.factors.hour.local).padStart(2, '0')}:00 × {forecast.factors.hour.score} · аккаунт × {forecast.factors.account.factor}
+                    </div>
+                  </div>
+                )}
                 {pubs.length > 0 && (
                   <div className="hr-stats" style={{ marginTop: 12 }}>
                     <div className="hr-stat"><span className="v">{fmt(views)}</span><span className="l">просмотры</span></div>
@@ -383,6 +465,61 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                   <input className="input" value={draft.hashtags} onChange={(e) => setDraft({ ...draft, hashtags: e.target.value })} />
                 </Field>
 
+                <div className="card flat" style={{ padding: 13, borderColor: sponsor?.campaign ? 'rgba(167,139,250,.3)' : 'var(--line)' }}>
+                  <div className="row-between" style={{ marginBottom: 8, gap: 10 }}>
+                    <div className="row" style={{ gap: 7 }}>
+                      <Icon name="megaphone" size={14} style={{ color: 'var(--violet-2)' }} />
+                      <b style={{ fontSize: 12.5 }}>Спонсор ролика</b>
+                      {sponsor?.campaign && (
+                        <Badge tone={sponsor.campaign.erid ? 'success' : 'warn'}>
+                          {sponsor.campaign.erid ? 'erid есть' : 'без erid'}
+                        </Badge>
+                      )}
+                    </div>
+                    {sponsor?.campaign && (
+                      <button className="link-btn" style={{ fontSize: 11 }}
+                        onClick={async () => { await api.detachCampaign(episodeId); loadSponsor(); load(); refreshLight(); }}>
+                        Отвязать
+                      </button>
+                    )}
+                  </div>
+
+                  {sponsor?.campaign ? (
+                    <div className="col" style={{ gap: 6 }}>
+                      <div style={{ fontSize: 12 }}>{sponsor.campaign.name} · {sponsor.campaign.brand_name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5 }}>
+                        {sponsor.disclosure || 'Маркировка не требуется — добавьте erid, если бренд требует ОРД.'}
+                      </div>
+                      {sponsor.campaign.brief && (
+                        <div style={{ fontSize: 11, color: 'var(--text-2)' }}>Бриф: {sponsor.campaign.brief}</div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="col" style={{ gap: 8 }}>
+                      <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5 }}>
+                        Pulse сам привяжет активную кампанию, если у ролика будет свободный слот. Можно выбрать вручную —
+                        описание, @бренд и маркировка подставятся при публикации.
+                      </div>
+                      <select className="select" style={{ fontSize: 12 }} value=""
+                        onChange={async (e) => {
+                          if (!e.target.value) return;
+                          try {
+                            await api.attachCampaign(e.target.value, episodeId);
+                            await loadSponsor(); await load(); refreshLight();
+                            toast.push({ tone: 'success', title: 'Кампания привязана', text: 'Маркировка добавится в описание автоматически' });
+                          } catch (err) {
+                            toast.push({ tone: 'error', title: 'Ошибка', text: err.message });
+                          }
+                        }}>
+                        <option value="">Привязать кампанию…</option>
+                        {campaigns.filter((c) => c.status === 'active' || c.status === 'paused').map((c) => (
+                          <option key={c.id} value={c.id}>{c.brand_name} — {c.name} ({c.modelLabel})</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
                 <div className="form-grid">
                   <Field label="Публикация">
                     <input className="input" type="datetime-local" defaultValue={fmtDateTimeLocal(data.scheduled_at)}
@@ -438,7 +575,7 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                     <div className="row-between" style={{ marginBottom: 10 }}>
                       <div className="row" style={{ gap: 8 }}>
                         <span style={{ color: 'var(--violet-2)' }}><PlatformIcon platform={p.platform} size={15} /></span>
-                        <b style={{ fontSize: 12.5 }}>{p.platform === 'tiktok' ? 'TikTok' : 'Reels'}</b>
+                        <b style={{ fontSize: 12.5 }}>{platformLabel(p.platform)}</b>
                         <span className="muted" style={{ fontSize: 11.5 }}>@{p.handle || '—'}</span>
                         <Badge tone={p.variant === 'B' ? 'accent' : 'muted'}>вариант {p.variant}</Badge>
                       </div>

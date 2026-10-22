@@ -13,6 +13,8 @@ import Money from './pages/Money.jsx';
 import Transparency from './pages/Transparency.jsx';
 import Accounts from './pages/Accounts.jsx';
 import Products from './pages/Products.jsx';
+import Ads from './pages/Ads.jsx';
+import Growth from './pages/Growth.jsx';
 import Logs from './pages/Logs.jsx';
 import Settings from './pages/Settings.jsx';
 import LaunchModal from './components/LaunchModal.jsx';
@@ -23,11 +25,14 @@ const NAV = [
   { id: 'queue', label: 'Очередь роликов', icon: 'film', hash: '#/queue', badge: 'active' },
   { id: 'calendar', label: 'Расписание', icon: 'calendar', hash: '#/calendar' },
   { id: 'projects', label: 'Проекты и темы', icon: 'sparkles', hash: '#/projects' },
+  { section: 'Рост' },
+  { id: 'growth', label: 'Рост и охваты', icon: 'growth', hash: '#/growth' },
+  { id: 'accounts', label: 'Аккаунты', icon: 'at', hash: '#/accounts' },
   { section: 'Результат' },
   { id: 'analytics', label: 'Аналитика', icon: 'chart', hash: '#/analytics' },
   { id: 'money', label: 'Деньги', icon: 'target', hash: '#/money' },
   { id: 'products', label: 'Продвижение', icon: 'package', hash: '#/products' },
-  { id: 'accounts', label: 'Аккаунты', icon: 'at', hash: '#/accounts' },
+  { id: 'ads', label: 'Реклама', icon: 'megaphone', hash: '#/ads' },
   { section: 'Доверие' },
   { id: 'transparency', label: 'Прозрачность', icon: 'shield', hash: '#/transparency', badge: 'review' },
   { id: 'logs', label: 'Журнал', icon: 'terminal', hash: '#/logs' },
@@ -43,6 +48,8 @@ const TITLES = {
   money: { title: 'Деньги', sub: 'Доход, расход, ROI и окупаемость каждого ролика' },
   transparency: { title: 'Прозрачность', sub: 'Что автоматизировано, где нужен человек и какие лимиты' },
   products: { title: 'Продвижение продукта', sub: 'Шаблоны интеграции, ссылки и UTM' },
+  growth: { title: 'Рост и охваты', sub: 'Портфель аккаунтов, хуки, удержание и путь к монетизации' },
+  ads: { title: 'Реклама и бренды', sub: 'Кампании, маркировка ОРД и спонсорские деньги' },
   accounts: { title: 'Аккаунты и квоты', sub: 'Распределение нагрузки и защита от блокировок' },
   logs: { title: 'Журнал действий', sub: 'Что произошло и когда — по каждому ролику' },
   settings: { title: 'Настройки', sub: 'Провайдеры, режим, риски, бэкап' },
@@ -92,6 +99,8 @@ function Shell({ data, refresh, refreshLight, loading }) {
     money: <Money />,
     transparency: <Transparency />,
     products: <Products />,
+    ads: <Ads />,
+    growth: <Growth />,
     accounts: <Accounts />,
     logs: <Logs />,
     settings: <Settings refresh={refresh} />,

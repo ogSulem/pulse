@@ -3,7 +3,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, Field, Modal, Confirm, Empty, useToast } from '../components/ui.jsx';
-import { ACCOUNT_STATUS, fmt } from '../lib/format.js';
+import { ACCOUNT_STATUS, fmt, platformLabel } from '../lib/format.js';
 
 const STATUS_OPTIONS = [
   { id: 'healthy', label: 'Активен' },
@@ -12,7 +12,7 @@ const STATUS_OPTIONS = [
   { id: 'blocked', label: 'Блокировка' },
 ];
 
-const blank = { platform: 'reels', handle: '', display_name: '', daily_limit: 3, min_gap_min: 90, window_start: '09:00', window_end: '23:00', status: 'warmup' };
+const blank = { platform: 'reels', handle: '', display_name: '', daily_limit: 3, min_gap_min: 90, window_start: '09:00', window_end: '23:00', status: 'warmup', project_id: '' };
 
 export default function Accounts() {
   const { data, refresh, refreshLight } = useApp();
@@ -26,6 +26,8 @@ export default function Accounts() {
   const [tokenForm, setTokenForm] = useState({ token: '', externalId: '' });
 
   const accounts = data.accounts || [];
+  const projects = data.projects || [];
+  const projectName = (id) => projects.find((p) => p.id === id)?.name || null;
   const totalCap = accounts.filter((a) => a.status !== 'blocked').reduce((a, x) => a + x.cap, 0);
   const totalUsed = accounts.reduce((a, x) => a + x.used_today, 0);
   const healthy = accounts.filter((a) => a.status === 'healthy').length;
@@ -140,7 +142,8 @@ export default function Accounts() {
                       <Badge tone={st.tone} dot>{st.label}</Badge>
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
-                      {a.platform === 'tiktok' ? 'TikTok' : 'Instagram Reels'} · {a.display_name} · качество {a.quality}
+                      {platformLabel(a.platform)} · {a.display_name} · качество {a.quality}
+                      {a.project_id ? ` · ${projectName(a.project_id) || 'бренд'}` : ' · универсальный'}
                     </div>
                     <div className="row" style={{ gap: 6, marginTop: 5 }}>
                       <Badge tone={a.connected ? 'success' : 'muted'} dot>{a.connected ? 'API подключён' : 'без токена'}</Badge>
@@ -231,6 +234,13 @@ export default function Accounts() {
             <select className="select" value={form.platform} onChange={(e) => setForm({ ...form, platform: e.target.value })}>
               <option value="reels">Instagram Reels</option>
               <option value="tiktok">TikTok</option>
+              <option value="youtube">YouTube Shorts</option>
+            </select>
+          </Field>
+          <Field label="Бренд / проект" hint="Аккаунт получает ролики только своего проекта. «Универсальный» — любой проект">
+            <select className="select" value={form.project_id || ''} onChange={(e) => setForm({ ...form, project_id: e.target.value })}>
+              <option value="">Универсальный</option>
+              {projects.filter((p) => !p.archived).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </Field>
           <Field label="@handle">
@@ -258,7 +268,7 @@ export default function Accounts() {
       </Modal>
 
       <Modal open={Boolean(connecting)} onClose={() => setConnecting(null)} title={`Подключить @${connecting?.handle || ''}`}
-        subtitle={connecting?.platform === 'tiktok' ? 'TikTok Content Posting API' : 'Instagram Graph API (Reels)'}
+        subtitle={connecting?.platform === 'tiktok' ? 'TikTok Content Posting API' : connecting?.platform === 'youtube' ? 'YouTube Data API v3 (Shorts)' : 'Instagram Graph API (Reels)'}
         footer={<>
           <button className="btn" onClick={() => setConnecting(null)}>Отмена</button>
           <button className="btn btn-primary" disabled={busy} onClick={connect}><Icon name="check" size={14} />Подключить</button>
@@ -268,21 +278,26 @@ export default function Accounts() {
             <Icon name="shield" size={15} />
             <span>
               Токен шифруется AES-256-GCM прямо на сервере и никогда не отдаётся во фронтенд.
-              Права: {connecting?.platform === 'tiktok' ? 'video.publish, video.upload' : 'instagram_content_publish, instagram_manage_insights'}.
+              Права: {connecting?.platform === 'tiktok' ? 'video.publish, video.upload'
+                : connecting?.platform === 'youtube' ? 'youtube.upload, youtube.readonly'
+                : 'instagram_content_publish, instagram_manage_insights'}.
             </span>
           </div>
           <Field label="Access token" hint="Долгоживущий токен из кабинета разработчика площадки">
             <input className="input" type="password" value={tokenForm.token} autoComplete="off"
               onChange={(e) => setTokenForm({ ...tokenForm, token: e.target.value })} placeholder="вставьте токен" />
           </Field>
-          <Field label={connecting?.platform === 'tiktok' ? 'Open ID (необязательно)' : 'Instagram user id'} hint="Для Instagram обязателен: по нему идут media и insights">
+          <Field label={connecting?.platform === 'tiktok' ? 'Open ID (необязательно)' : connecting?.platform === 'youtube' ? 'Channel ID (необязательно)' : 'Instagram user id'}
+            hint={connecting?.platform === 'youtube' ? 'Можно оставить пустым: канал определится по токену, подписчики подтянутся из API' : 'Для Instagram обязателен: по нему идут media и insights'}>
             <input className="input" value={tokenForm.externalId}
               onChange={(e) => setTokenForm({ ...tokenForm, externalId: e.target.value })} placeholder="например, 17841400000000000" />
           </Field>
           <div className="field-hint">
             {connecting?.platform === 'tiktok'
               ? 'Без аудита клиента TikTok публикует только в приватный аккаунт (SELF_ONLY) — Pulse выставит это автоматически.'
-              : 'Instagram забирает видео по публичному адресу: задайте PULSE_PUBLIC_URL в .env (например, https://pulse.example.com).'}
+              : connecting?.platform === 'youtube'
+                ? 'Без аудита проекта Google загрузки уходят приватно; после аудита включите публичность в настройках. Отдельного Shorts API нет — вертикальное видео ≤ 3 минут считается автоматически.'
+                : 'Instagram забирает видео по публичному адресу: задайте PULSE_PUBLIC_URL в .env (например, https://pulse.example.com).'}
           </div>
         </div>
       </Modal>
@@ -305,6 +320,12 @@ export default function Accounts() {
             </Field>
             <Field label="Окно до">
               <input className="input" type="time" value={editing.window_end} onChange={(e) => setEditing({ ...editing, window_end: e.target.value })} />
+            </Field>
+            <Field label="Бренд / проект" span hint="Смена бренда перенаправит ролики другого проекта на другие аккаунты">
+              <select className="select" value={editing.project_id || ''} onChange={(e) => setEditing({ ...editing, project_id: e.target.value })}>
+                <option value="">Универсальный</option>
+                {projects.filter((p) => !p.archived).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
             </Field>
             <Field label="Качество аккаунта (влияет на приоритет)" span>
               <input type="range" min="0" max="100" value={editing.quality} onChange={(e) => setEditing({ ...editing, quality: Number(e.target.value) })} />

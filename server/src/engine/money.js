@@ -1,10 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Money — сквозная юнит-экономика: клики, конверсии, доход, расход, ROI.
 //
-// Модель дохода честная и двухканальная:
+// Модель дохода честная и трёхканальная:
 //   1. рекламный доход площадки — просмотры / 1000 × RPM (своя ставка для Reels
 //      и TikTok, задаётся в настройках);
-//   2. продажи с ролика — клики → конверсии → цена × маржа.
+//   2. продажи с ролика — клики → конверсии → цена × маржа;
+//   3. бренд-кампании — фикс/CPM/CPA по факту выходов (campaign_posts).
 //
 // Расход — себестоимость производства ролика (видео + TTS + LLM + рендер),
 // сохраняется в эпизоде и раскидывается на публикации.
@@ -15,6 +16,7 @@
 import { db, getSettings, nowIso } from '../core/db.js';
 import { uid, num, clamp, addDays, parseJson } from '../core/utils.js';
 import { log } from '../core/logger.js';
+import { PLATFORMS, PLATFORM_LABELS, PLATFORM_API_LIMITS, platformCap } from './limits.js';
 
 const DAY = 86400000;
 const iso = (ms) => new Date(ms).toISOString();
@@ -24,8 +26,14 @@ const hashish = (str) => {
   return Math.abs(h);
 };
 
-export const rpmFor = (platform, settings = getSettings()) =>
-  platform === 'tiktok' ? num(settings.rpm_tiktok, 60) : num(settings.rpm_reels, 120);
+// метки площадок приходят из engine/limits.js — один источник правды
+export { PLATFORM_LABELS };
+
+export const rpmFor = (platform, settings = getSettings()) => {
+  if (platform === 'tiktok') return num(settings.rpm_tiktok, 60);
+  if (platform === 'youtube') return num(settings.rpm_youtube, 30);
+  return num(settings.rpm_reels, 120);
+};
 
 /**
  * Демо-симулятор трафика: превращает счётчики площадок в реальные записи
@@ -66,7 +74,7 @@ export function simulateTraffic({ onlyMissing = true, budget = 400 } = {}) {
     // конверсии: часть кликов превращается в покупку
     const candidates = db.prepare(`SELECT c.id, c.publication_id, c.project_id, c.ts
       FROM clicks c LEFT JOIN conversions v ON v.click_id = c.id
-      WHERE v.id IS NULL LIMIT 2000`).all();
+      WHERE v.id IS NULL LIMIT 20000`).all();
     for (const c of candidates) {
       const seed = hashish(`conv:${c.id}`);
       if ((seed % 10000) / 10000 >= convRate) continue;
@@ -126,11 +134,20 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
   const filter = projectId ? 'AND pb.project_id = ?' : '';
   const params = projectId ? [projectId] : [];
 
+  // «за 30 дней» — это ровно 30 дней. Раньше фильтра по дате не было вовсе и
+  // окно показывало всю историю. Берём ролики, вышедшие в периоде, и те, что
+  // набрали просмотры/клики/конверсии именно в этом периоде, — иначе старые
+  // ролики, которые продолжают работать, выпадали бы из отчёта.
   const pubs = db.prepare(`SELECT pb.*, e.cost_cents episode_cost, pj.name project_name
     FROM publications pb
     LEFT JOIN episodes e ON e.id = pb.episode_id
     LEFT JOIN projects pj ON pj.id = pb.project_id
-    WHERE pb.status = 'published' ${filter}`).all(...params);
+    WHERE pb.status = 'published' AND (
+      pb.published_at >= ?
+      OR EXISTS (SELECT 1 FROM metrics_daily md WHERE md.publication_id = pb.id AND md.day >= ?)
+      OR EXISTS (SELECT 1 FROM clicks c WHERE c.publication_id = pb.id AND c.ts >= ?)
+      OR EXISTS (SELECT 1 FROM conversions v WHERE v.publication_id = pb.id AND v.ts >= ?)
+    ) ${filter}`).all(since, since.slice(0, 10), since, since, ...params);
 
   // просмотры за период берём из metrics_daily, чтобы окно было честным
   const viewsByPub = new Map(db.prepare(`SELECT md.publication_id, SUM(md.views) v
@@ -142,6 +159,13 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
     LEFT JOIN publications pb ON pb.id = c.publication_id
     WHERE c.ts >= ? ${filter} GROUP BY c.publication_id`).all(since, ...params).map((r) => [r.publication_id, r.n]));
 
+  // спонсорские деньги: фактические начисления по выходам кампаний
+  const sponsorByPub = new Map(db.prepare(`SELECT cp.publication_id pid, SUM(cp.revenue_cents) s
+    FROM campaign_posts cp
+    JOIN publications pb ON pb.id = cp.publication_id
+    WHERE cp.publication_id IS NOT NULL AND pb.published_at >= ? ${filter}
+    GROUP BY cp.publication_id`).all(since, ...params).map((r) => [r.pid, r.s || 0]));
+
   const convByPub = new Map(db.prepare(`SELECT v.publication_id, COUNT(*) n, SUM(v.value_cents) s FROM conversions v
     LEFT JOIN publications pb ON pb.id = v.publication_id
     WHERE v.ts >= ? ${filter} GROUP BY v.publication_id`).all(since, ...params).map((r) => [r.publication_id, r]));
@@ -149,7 +173,7 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
   const perProject = new Map();
   const perPlatform = new Map();
   const perPub = [];
-  let revenueAds = 0; let revenueConv = 0; let cost = 0; let views = 0; let clicks = 0; let conversions = 0;
+  let revenueAds = 0; let revenueConv = 0; let revenueSponsor = 0; let cost = 0; let views = 0; let clicks = 0; let conversions = 0;
 
   for (const p of pubs) {
     const v = viewsByPub.get(p.id) || 0;
@@ -157,28 +181,33 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
     const cv = convByPub.get(p.id) || { n: 0, s: 0 };
     const adsCents = Math.round((v / 1000) * rpmFor(p.platform, settings) * 100);
     const convCents = cv.s || 0;
-    // себестоимость уже разложена по публикациям (A/B делит её пополам)
-    const costCents = p.cost_cents || p.episode_cost || 0;
+    const sponsorCents = sponsorByPub.get(p.id) || 0;
+    // себестоимость уже разложена по публикациям (A/B делит её пополам).
+    // Ролик, вышедший до окна, не съел бюджет этого периода — не приписываем.
+    const inPeriod = String(p.published_at || '') >= since;
+    const costCents = inPeriod ? (p.cost_cents || p.episode_cost || 0) : 0;
 
     views += v; clicks += c; conversions += cv.n;
-    revenueAds += adsCents; revenueConv += convCents; cost += costCents;
+    revenueAds += adsCents; revenueConv += convCents; revenueSponsor += sponsorCents; cost += costCents;
 
     const bucket = (map, key, name) => {
-      const cur = map.get(key) || { id: key, name, views: 0, clicks: 0, conversions: 0, revenue: 0, cost: 0, publications: 0 };
+      const cur = map.get(key) || { id: key, name, views: 0, clicks: 0, conversions: 0, revenue: 0, cost: 0, publications: 0, sponsor: 0 };
       cur.views += v; cur.clicks += c; cur.conversions += cv.n;
-      cur.revenue += adsCents + convCents; cur.cost += costCents; cur.publications += 1;
+      cur.revenue += adsCents + convCents + sponsorCents; cur.cost += costCents; cur.publications += 1;
+      cur.sponsor += sponsorCents;
       map.set(key, cur);
     };
     bucket(perProject, p.project_id, p.project_name || 'Проект');
-    bucket(perPlatform, p.platform, p.platform === 'tiktok' ? 'TikTok' : 'Instagram Reels');
+    bucket(perPlatform, p.platform, PLATFORM_LABELS[p.platform] || p.platform);
 
     if (v > 0) {
       perPub.push({
         id: p.id, episodeId: p.episode_id, title: p.title, platform: p.platform, privacy: p.privacy,
         views: v, clicks: c, conversions: cv.n,
-        revenue: (adsCents + convCents) / 100,
+        revenue: (adsCents + convCents + sponsorCents) / 100,
+        sponsor: sponsorCents / 100,
         cost: costCents / 100,
-        profit: (adsCents + convCents - costCents) / 100,
+        profit: (adsCents + convCents + sponsorCents - costCents) / 100,
         rpm: v > 0 ? Number(((adsCents / 100) / (v / 1000)).toFixed(2)) : 0,
         ctr: v > 0 ? Number(((c / v) * 100).toFixed(2)) : 0,
         epc: c > 0 ? Number(((convCents / 100) / c).toFixed(2)) : 0,
@@ -207,7 +236,7 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
     };
   });
 
-  const revenue = (revenueAds + revenueConv) / 100;
+  const revenue = (revenueAds + revenueConv + revenueSponsor) / 100;
   const costTotal = cost / 100;
   const profit = revenue - costTotal;
   const roi = costTotal > 0 ? Number(((profit / costTotal) * 100).toFixed(1)) : null;
@@ -223,6 +252,7 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
       revenue: round2(revenue),
       revenueAds: round2(revenueAds / 100),
       revenueConv: round2(revenueConv / 100),
+      revenueSponsor: round2(revenueSponsor / 100),
       cost: round2(costTotal),
       profit: round2(profit),
       roi,
@@ -239,14 +269,30 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
     top: sorted.slice(0, 8),
     worst: sorted.slice(-5).reverse(),
     series,
+    sponsor: (() => {
+      const rows = db.prepare(`SELECT c.id, c.name, c.model, b.name brand, c.budget_cents, c.paid_cents,
+          COALESCE(SUM(cp.revenue_cents),0) revenue, COUNT(cp.id) posts
+        FROM campaigns c JOIN brands b ON b.id = c.brand_id
+        LEFT JOIN campaign_posts cp ON cp.campaign_id = c.id
+          AND cp.created_at >= ?
+        GROUP BY c.id ORDER BY revenue DESC`).all(since);
+      return rows.map((r) => ({
+        id: r.id, name: r.name, brand: r.brand, model: r.model,
+        revenue: round2((r.revenue || 0) / 100),
+        paid: round2((r.paid_cents || 0) / 100),
+        budget: round2((r.budget_cents || 0) / 100),
+        posts: r.posts || 0,
+      }));
+    })(),
     assumptions: {
       rpmReels: num(settings.rpm_reels, 120),
       rpmTiktok: num(settings.rpm_tiktok, 60),
+      rpmYoutube: num(settings.rpm_youtube, 30),
       convRate: num(settings.conv_rate, 1.6),
       price: num(settings.product_price, 2490),
       margin: num(settings.product_margin, 0.55),
       costPerVideo: round2(num(settings.cost_video, 0.9) + num(settings.cost_tts, 0.25) + num(settings.cost_llm, 0.1) + num(settings.cost_render, 0.05)),
-      note: 'RPM — доход площадки за 1000 просмотров; конверсии считаются по фактическим покупкам из postback. Расход — себестоимость производства, без учёта времени.',
+      note: 'RPM — доход площадки за 1000 просмотров; конверсии — по фактическим покупкам из postback; бренд-кампании — по факту выходов (фикс/CPM/CPA). Расход — себестоимость производства, без учёта времени.',
     },
   };
 }
@@ -286,11 +332,14 @@ export function transparency() {
     WHERE viral > 0 AND viral < ? ORDER BY viral ASC LIMIT 6`).all(num(settings.min_viral_score, 45));
   const failed = db.prepare("SELECT id, title, error, stage FROM episodes WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 5").all();
   const media = db.prepare("SELECT COUNT(*) n, SUM(video_bytes) bytes, SUM(render_ms) ms FROM episodes WHERE video_bytes > 0").get();
-  const quotas = ['reels', 'tiktok'].map((platform) => {
+  const quotas = PLATFORMS.map((platform) => {
     const since = addDays(nowIso(), -1);
     const used = db.prepare("SELECT COUNT(*) n FROM publications WHERE platform = ? AND published_at > ? AND status = 'published'").get(platform, since).n;
-    const cap = platform === 'tiktok' ? 15 : 50;
-    return { platform, used, cap, left: Math.max(0, cap - used), window: 'скользящие 24 ч' };
+    const cap = platformCap(platform, settings);
+    return {
+      platform, label: PLATFORM_LABELS[platform], used, cap, left: Math.max(0, cap - used),
+      window: 'скользящие 24 ч', apiLimit: PLATFORM_API_LIMITS[platform].per24h, apiNote: PLATFORM_API_LIMITS[platform].note,
+    };
   });
 
   const checks = [
@@ -305,6 +354,13 @@ export function transparency() {
         : 'Неаудированный клиент: публикуем только приватно (SELF_ONLY), максимум 5 аккаунтов/24 ч',
     },
     {
+      id: 'youtube-audit', label: 'Публичность YouTube',
+      state: Number(settings.youtube_audited) === 1 ? 'ok' : 'warn',
+      detail: Number(settings.youtube_audited) === 1
+        ? 'Проект Google прошёл аудит: Shorts публикуются публично'
+        : 'Без аудита Google загрузки только приватные — включите после проверки проекта',
+    },
+    {
       id: 'labels', label: 'Маркировка AI и рекламы', state: Number(settings.ai_label) === 1 && Number(settings.ad_label) === 1 ? 'ok' : 'warn',
       detail: `AI: ${Number(settings.ai_label) === 1 ? 'включена' : 'выключена'} · реклама: ${Number(settings.ad_label) === 1 ? 'включена' : 'выключена'}`,
     },
@@ -313,8 +369,27 @@ export function transparency() {
       detail: `Порог риска ${settings.risk_threshold}/100 и вирусного скора ${settings.min_viral_score}/100 — ниже уходит в проверку`,
     },
     {
-      id: 'render', label: 'Рендер файлов', state: media.n > 0 ? 'ok' : 'warn',
-      detail: `${media.n} роликов, ${((media.bytes || 0) / 1048576).toFixed(1)} МБ, среднее ${media.n ? Math.round((media.ms || 0) / media.n / 100) / 10 : 0} с на ролик`,
+      id: 'ads-marking', label: 'Маркировка бренд-кампаний',
+      state: (() => {
+        const risky = db.prepare(`SELECT COUNT(*) n FROM campaigns WHERE status = 'active' AND marking = 'erid' AND (erid IS NULL OR erid = '')`).get().n;
+        return risky === 0 ? 'ok' : 'warn';
+      })(),
+      detail: (() => {
+        const row = db.prepare(`SELECT COUNT(*) n FROM campaigns WHERE status = 'active' AND marking = 'erid' AND (erid IS NULL OR erid = '')`).get();
+        const total = db.prepare("SELECT COUNT(*) n FROM campaigns WHERE status = 'active'").get().n;
+        return row.n === 0
+          ? `Активных кампаний: ${total}. У всех есть пометка «Реклама» и erid в описании`
+          : `${row.n} активных кампаний без erid — публикация с ними блокируется`;
+      })(),
+    },
+    {
+      id: 'render', label: 'Рендер файлов',
+      // пустой архив — это ещё не проблема: на свежей базе роликов просто нет.
+      // Тревога уместна, когда ролики уже должны быть, а файлов нет.
+      state: media.n > 0 ? 'ok' : (counts.review || counts.scheduled || counts.published ? 'warn' : 'info'),
+      detail: media.n
+        ? `${media.n} роликов, ${((media.bytes || 0) / 1048576).toFixed(1)} МБ, среднее ${Math.round((media.ms || 0) / media.n / 100) / 10} с на ролик`
+        : 'Файлов пока нет — появятся после первого рендера',
     },
     {
       id: 'storage', label: 'Хранение данных', state: 'ok',

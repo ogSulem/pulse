@@ -1,3 +1,11 @@
+export const PLATFORM_LABELS = {
+  reels: 'Instagram Reels',
+  tiktok: 'TikTok',
+  youtube: 'YouTube Shorts',
+};
+
+export const platformLabel = (platform) => PLATFORM_LABELS[platform] || platform || '—';
+
 export const fmt = (n) => {
   const num = Number(n) || 0;
   if (Math.abs(num) >= 1_000_000) return (num / 1_000_000).toFixed(num >= 10_000_000 ? 0 : 1).replace('.0', '').replace('.', ',') + 'M';

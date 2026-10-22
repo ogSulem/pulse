@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
-import { Badge, Segmented, AreaChart, Empty, Kpi, ScoreRing } from '../components/ui.jsx';
+import { Badge, Segmented, AreaChart, Empty, Kpi, ScoreRing, useToast } from '../components/ui.jsx';
 import { fmt, full, money, moneyShort, pct, relative } from '../lib/format.js';
 
 const RANGES = [
@@ -30,6 +30,9 @@ export default function Money() {
   const [projectId, setProjectId] = useState('all');
   const [money_, setMoney] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [growth, setGrowth] = useState(null);
+  const [applying, setApplying] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     let alive = true;
@@ -37,6 +40,26 @@ export default function Money() {
     api.money({ days, projectId }).then((res) => { if (alive) setMoney(res); }).catch(() => {}).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [days, projectId, data.pipeline?.published]);
+
+  useEffect(() => {
+    let alive = true;
+    api.growth({ days }).then((res) => { if (alive) setGrowth(res); }).catch(() => {});
+    return () => { alive = false; };
+  }, [days, data.pipeline?.published]);
+
+  const applyPolicy = async () => {
+    setApplying(true);
+    try {
+      const res = await api.applyPolicy();
+      const changed = (res.projects || []).filter((p) => p.changed);
+      setGrowth(await api.growth({ days }).catch(() => growth));
+      toast?.push?.({ tone: 'success', title: changed.length ? `Темп обновлён: ${changed.map((p) => `${p.name} → ${p.postsPerDay}/день`).join(', ')}` : 'Пока менять нечего — данных мало' });
+    } catch (err) {
+      toast?.push?.({ tone: 'error', title: err?.message || 'Не получилось применить' });
+    } finally {
+      setApplying(false);
+    }
+  };
 
   const t = money_?.totals;
   const currency = money_?.currency || '₽';
@@ -51,8 +74,8 @@ export default function Money() {
           <div className="eyebrow">юнит-экономика</div>
           <h1 className="page-h1">Деньги</h1>
           <p className="page-sub">
-            Доход из двух каналов — реклама площадок и продажи по ссылкам. Расход — себестоимость роликов.
-            Ничего не «нарисовано»: каждая цифра складывается из записей в базе.
+            Три канала дохода — реклама площадок, спонсорские интеграции и продажи по ссылкам.
+            Расход — себестоимость роликов. Ничего не «нарисовано»: каждая цифра складывается из записей в базе.
           </p>
         </div>
         <div className="row wrap" style={{ gap: 10 }}>
@@ -84,6 +107,10 @@ export default function Money() {
             <div className="money-bar">
               <div className="money-bar-label"><span>Реклама площадок</span><b>{t ? money(t.revenueAds, currency) : '—'}</b></div>
               <div className="bar-track"><div className="bar-fill" style={{ width: `${t && t.revenue ? Math.round((t.revenueAds / t.revenue) * 100) : 0}%`, background: 'linear-gradient(90deg,#a78bfa,#c4b5fd)' }} /></div>
+            </div>
+            <div className="money-bar">
+              <div className="money-bar-label"><span>Спонсорские интеграции</span><b>{t ? money(t.revenueSponsor, currency) : '—'}</b></div>
+              <div className="bar-track"><div className="bar-fill" style={{ width: `${t && t.revenue ? Math.round((t.revenueSponsor / t.revenue) * 100) : 0}%`, background: 'linear-gradient(90deg,#22d3ee,#67e8f9)' }} /></div>
             </div>
             <div className="money-bar">
               <div className="money-bar-label"><span>Продажи по ссылкам</span><b>{t ? money(t.revenueConv, currency) : '—'}</b></div>
@@ -245,6 +272,110 @@ export default function Money() {
           </div>
         </div>
       </div>
+
+      {/* ── Умные деньги: что делать с темпом проектов ──────────────────── */}
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="card-title">Умные деньги</div>
+            <div className="card-sub">
+              ROI за {growth?.projects?.[0]?.days || days} дней по факту публикаций — и решение, что делать с темпом
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            {growth?.ab?.closed ? (
+              <Badge tone="accent" dot>A/B закрыто: {growth.ab.closed}{growth.ab.avgLift ? ` · средний разрыв ${Math.round(growth.ab.avgLift)}%` : ''}</Badge>
+            ) : null}
+            <button className="btn btn-ghost btn-sm" onClick={applyPolicy} disabled={applying}>
+              <Icon name="zap" size={13} /> {applying ? 'Применяем…' : 'Применить темп'}
+            </button>
+          </div>
+        </div>
+
+        <div className="col" style={{ gap: 8 }}>
+          {(growth?.projects || []).map((p) => {
+            const tone = p.action === 'scale' ? 'var(--green)' : p.action === 'fix' ? 'var(--amber, #f59e0b)' : p.action === 'pause' ? 'var(--rose)' : 'var(--violet-2)';
+            const label = p.action === 'scale' ? 'масштабировать' : p.action === 'fix' ? 'чинить' : p.action === 'pause' ? 'притормозить' : 'держать темп';
+            return (
+              <div key={p.projectId} className="row-between wrap" style={{ gap: 10, padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 12, background: 'rgba(255,255,255,.02)' }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="row" style={{ gap: 8 }}>
+                    <b style={{ fontSize: 12.5 }}>{p.name}</b>
+                    <span style={{ fontSize: 10.5, color: tone, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em' }}>{label}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 3, lineHeight: 1.5 }}>{p.reason}</div>
+                </div>
+                <div className="row" style={{ gap: 16 }}>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: 13, fontWeight: 750 }} className={p.profit >= 0 ? 'tone-green' : 'tone-rose'}>{money(p.profit, currency)}</div>
+                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>прибыль · ROI {Math.round(p.roi)}%</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: 13, fontWeight: 750 }}>{p.postsPerDay}/день</div>
+                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>текущий темп</div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          {!(growth?.projects || []).length && <div className="empty-inline">Нужны опубликованные ролики, чтобы считать ROI</div>}
+        </div>
+
+        {(growth?.ranked || []).length > 0 && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--line)' }}>
+            <div className="card-sub" style={{ marginBottom: 8 }}>Прогноз ближайших роликов — что выгоднее выпускать первым</div>
+            <div className="col" style={{ gap: 6 }}>
+              {growth.ranked.slice(0, 4).map((r) => (
+                <div key={r.episodeId} className="row-between" style={{ gap: 10, fontSize: 11.5 }}>
+                  <span className="truncate" style={{ flex: 1, color: 'var(--text-2)' }}>{r.title}</span>
+                  <span className="mono" style={{ color: 'var(--muted)' }}>{fmt(r.views)} просм.</span>
+                  <b className={r.profit >= 0 ? 'tone-green' : 'tone-rose'} style={{ minWidth: 76, textAlign: 'right' }}>{money(r.profit, currency)}</b>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Спонсорские кампании ─────────────────────────────────────────── */}
+      {(money_?.sponsor || []).length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Спонсорские кампании</div>
+              <div className="card-sub">начисления по выходам внутри периода · оплаты — накопительно</div>
+            </div>
+            <a className="btn btn-ghost btn-sm" href="#/ads"><Icon name="megaphone" size={14} /> Реклама</a>
+          </div>
+          <div className="col" style={{ gap: 8 }}>
+            {money_.sponsor.map((c) => {
+              const recv = Math.max(0, c.revenue - c.paid);
+              const share = c.budget > 0 ? Math.min(100, Math.round((c.revenue / c.budget) * 100)) : 0;
+              return (
+                <div key={c.id} className="row-between wrap" style={{ gap: 10, padding: '9px 11px', border: '1px solid var(--line)', borderRadius: 10 }}>
+                  <div style={{ flex: '1 1 200px', minWidth: 160 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 650 }}>{c.name}</div>
+                    <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>
+                      {c.brand} · {c.posts} выходов · бюджет {money(c.budget, currency)}
+                      {share ? ` · использовано ${share}%` : ''}
+                    </div>
+                  </div>
+                  <div className="row wrap" style={{ gap: 18 }}>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700 }}>{money(c.revenue, currency)}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)' }}>начислено</div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700 }} className={recv > 0 ? 'tone-amber' : 'tone-green'}>{money(recv, currency)}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)' }}>к оплате</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── Допущения ───────────────────────────────────────────────────── */}
       <div className="card assumptions">

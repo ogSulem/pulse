@@ -180,6 +180,12 @@ export default function Settings({ refresh }) {
             hint="Без аудита Direct Post разрешён только в приватные аккаунты (SELF_ONLY) и максимум на 5 креаторов в сутки — это ограничение площадки, а не Pulse."
           />
           <Toggle
+            checked={String(settings.youtube_audited) === '1'}
+            onChange={(v) => patch({ youtube_audited: v ? 1 : 0 })}
+            label="Проект Google прошёл аудит"
+            hint="Без аудита YouTube принимает только приватные загрузки. После проверки проекта включите — Shorts начнут выходить публично (вертикальное видео ≤ 3 минут)."
+          />
+          <Toggle
             checked={String(settings.ai_label) === '1'}
             onChange={(v) => patch({ ai_label: v ? 1 : 0 })}
             label="Маркировать ИИ-контент"
@@ -190,6 +196,12 @@ export default function Settings({ refresh }) {
             onChange={(v) => patch({ ad_label: v ? 1 : 0 })}
             label="Маркировать рекламу"
             hint="Пометка «Реклама: <продукт>» в описании, если у ролика есть продукт."
+          />
+          <Toggle
+            checked={String(settings.ads_enabled ?? '1') === '1'}
+            onChange={(v) => patch({ ads_enabled: v ? '1' : '0' })}
+            label="Автораздача бренд-кампаний"
+            hint="Pulse сам привязывает активные кампании к свободным роликам с учётом бюджета, дневного кэпа и дедлайна. Выключите, если размещаете интеграции только вручную."
           />
           <div className="hr" />
           <NumberField label="Минимальный вирусный скор" suffix="/100" value={settings.min_viral_score} busy={busy}
@@ -215,6 +227,8 @@ export default function Settings({ refresh }) {
               hint="доход за 1000 просмотров" onSave={(v) => patch({ rpm_reels: v })} />
             <NumberField label="RPM TikTok" suffix={settings.currency} value={settings.rpm_tiktok} busy={busy}
               hint="доход за 1000 просмотров" onSave={(v) => patch({ rpm_tiktok: v })} />
+            <NumberField label="RPM Shorts" suffix={settings.currency} value={settings.rpm_youtube} busy={busy}
+              hint="доход за 1000 просмотров Shorts (после монетизации канала)" onSave={(v) => patch({ rpm_youtube: v })} />
             <NumberField label="Цена продукта" suffix={settings.currency} value={settings.product_price} busy={busy}
               onSave={(v) => patch({ product_price: v })} />
             <NumberField label="Маржа" suffix="доля" value={settings.product_margin} busy={busy}

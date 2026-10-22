@@ -3,6 +3,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, Progress, Empty, useToast } from '../components/ui.jsx';
+import { platformLabel } from '../lib/format.js';
 import EpisodeDrawer from '../components/EpisodeDrawer.jsx';
 import { fmt, dateTime, relative, STATUS_META, FORMAT_LABELS, plural } from '../lib/format.js';
 
@@ -108,6 +109,7 @@ export default function Queue({ onLaunch }) {
                     <span className="hide-md" style={{ opacity: 0.5 }}>·</span>
                     <span className="hide-md">{FORMAT_LABELS[e.format] || e.format}</span>
                     {e.viral > 0 && <Badge tone={e.viral >= 65 ? 'success' : e.viral >= 45 ? 'warn' : 'danger'}>скор {e.viral}</Badge>}
+                    {e.campaign_name && <Badge tone="accent"><Icon name="megaphone" size={10} /> {e.campaign_brand || 'реклама'}</Badge>}
                     {e.compliance && !e.compliance.ok && <Badge tone="danger"><Icon name="shield" size={10} /> правила</Badge>}
                     {e.risk >= 55 && <Badge tone={e.risk >= 70 ? 'danger' : 'warn'}>риск {e.risk}</Badge>}
                   </span>
@@ -189,7 +191,7 @@ export default function Queue({ onLaunch }) {
         <div className="card">
           <div className="card-title"><h3>Площадки</h3></div>
           <div className="col" style={{ gap: 10 }}>
-            {['reels', 'tiktok'].map((platform) => {
+            {['reels', 'tiktok', 'youtube'].map((platform) => {
               const list = (data.accounts || []).filter((a) => a.platform === platform);
               const cap = list.reduce((a, x) => a + x.cap, 0);
               const used = list.reduce((a, x) => a + x.used_today, 0);
@@ -197,7 +199,7 @@ export default function Queue({ onLaunch }) {
                 <div key={platform} className="card flat" style={{ padding: 12 }}>
                   <div className="row-between" style={{ marginBottom: 8 }}>
                     <span className="row" style={{ gap: 7, fontSize: 12.5, fontWeight: 650 }}>
-                      <PlatformIcon platform={platform} size={14} />{platform === 'tiktok' ? 'TikTok' : 'Instagram Reels'}
+                      <PlatformIcon platform={platform} size={14} />{platformLabel(platform)}
                     </span>
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>{list.length} акк.</span>
                   </div>

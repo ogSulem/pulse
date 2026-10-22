@@ -44,12 +44,30 @@ export const PLATFORM_RULES = {
     hashtagsMax: 30,
     videoMaxSec: 900,
     videoMaxBytes: 300 * 1024 * 1024,
-    publishPer24h: 100,          // лимит API, фактически в UI держим меньший
+    publishPer24h: 50,           // Instagram: 50 API-публикаций в скользящие 24 ч
     apiCallsPerUser: '4800 × показы / 24 ч',
     notes: [
       'Один API-пост = 1 единица лимита на публикацию (Reels, фото, карусель).',
       'Окно лимита скользящее 24 часа, а не «до полуночи».',
       'Публикация идёт через media container → media_publish; контейнер живёт 24 часа.',
+    ],
+  },
+  youtube: {
+    label: 'YouTube Shorts',
+    captionMax: 5000,            // описание: 5000 БАЙТ, проверяем отдельно
+    captionMaxBytes: 5000,
+    titleMax: 100,
+    hashtagsRecommended: 3,
+    hashtagsMax: 15,
+    videoMaxSec: 180,            // вертикальное видео ≤ 3 минут YouTube считает Shorts
+    videoMaxBytes: 256 * 1024 * 1024 * 1024,
+    publishPer24h: 100,          // своя квота videos.insert: 100 загрузок/сутки на проект
+    apiCallsPerUser: '100 uploads/сутки (отдельный bucket) + 10 000 units на остальное',
+    notes: [
+      'Отдельного Shorts API нет: вертикальное видео ≤ 3 минут классифицируется автоматически.',
+      'Заголовок ≤ 100 символов, описание ≤ 5000 байт, теги ≤ 500 символов суммарно.',
+      'Неаудированный проект Google может загружать только приватные видео.',
+      'Shorts-просмотры не идут в 4000 часов: у Partner Program отдельный порог по Shorts.',
     ],
   },
   tiktok: {
@@ -75,7 +93,7 @@ const strip = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ');
  * Проверяет текст ролика и возвращает отчёт.
  * severity: 'block' — нельзя планировать автоматически, 'warn' — можно, но с предупреждением.
  */
-export function checkCompliance({ title = '', description = '', scenes = [], platform = 'reels', hashtags = [], adLabel = true, aiLabel = true }) {
+export function checkCompliance({ title = '', description = '', scenes = [], platform = 'reels', hashtags = [], adLabel = true, aiLabel = true, campaign = null }) {
   const haystack = strip([title, description, ...(scenes || []).map((s) => s.text || s)].join(' '));
   const findings = RULES.filter((r) => r.re.test(haystack)).map((r) => ({
     id: r.id,
@@ -89,11 +107,35 @@ export function checkCompliance({ title = '', description = '', scenes = [], pla
   if (caption.length > rules.captionMax) {
     findings.push({ id: 'caption-length', severity: 'block', reason: `Описание длиннее лимита ${rules.label} (${rules.captionMax} символов)`, match: `${caption.length}` });
   }
+  // у YouTube лимит описания в байтах, а не символах: кириллица весит два
+  if (rules.captionMaxBytes && Buffer.byteLength(caption, 'utf8') > rules.captionMaxBytes) {
+    findings.push({ id: 'caption-bytes', severity: 'block', reason: `Описание YouTube больше 5000 байт (${Buffer.byteLength(caption, 'utf8')})`, match: 'utf8' });
+  }
+  if (rules.titleMax && String(title || '').length > rules.titleMax) {
+    findings.push({ id: 'title-length', severity: 'block', reason: `Заголовок YouTube длиннее ${rules.titleMax} символов`, match: String(String(title || '').length) });
+  }
   if ((hashtags || []).length > rules.hashtagsMax) {
     findings.push({ id: 'hashtags-count', severity: 'warn', reason: `Слишком много хештегов: рекомендуем ${rules.hashtagsRecommended}–${rules.hashtagsMax}`, match: String((hashtags || []).length) });
   }
   if (adLabel && /(промокод|скидк|купи|закажи)/i.test(haystack) && !/реклама|ad\b|партнёрск|партнерск/i.test(haystack)) {
     findings.push({ id: 'ad-disclosure', severity: 'warn', reason: 'Есть признаки рекламы, но нет пометки — Pulse добавит её в описание', match: 'ad' });
+  }
+
+  // ── реклама и маркировка ──────────────────────────────────────────────────
+  // Ролик в бренд-кампании обязан иметь erid (для РФ-рынка) и явную пометку.
+  // Это блокирующая проверка: непромаркированная реклама — штраф, а не «стиль».
+  if (campaign) {
+    const text = strip(description);
+    const marked = /реклама|#реклама|\bad\b/i.test(text);
+    if (campaign.marking !== 'none' && !marked) {
+      findings.push({ id: 'ad-marking-missing', severity: 'block', reason: 'Ролик в бренд-кампании без пометки «Реклама» — публикация остановлена', match: '#реклама' });
+    }
+    if (campaign.marking === 'erid' && !campaign.erid) {
+      findings.push({ id: 'ad-erid-missing', severity: 'block', reason: 'У кампании нет erid-токена ОРД — реклама без маркировки публиковаться не может', match: 'erid' });
+    }
+    if (campaign.erid && !text.includes(String(campaign.erid).toLowerCase())) {
+      findings.push({ id: 'ad-erid-not-in-caption', severity: 'warn', reason: `erid ${campaign.erid} не найден в описании — Pulse добавит его при публикации`, match: campaign.erid });
+    }
   }
 
   const blocking = findings.filter((f) => f.severity === 'block');

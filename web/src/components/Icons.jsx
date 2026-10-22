@@ -36,7 +36,11 @@ const PATHS = {
   alert: 'M12 3l9 16H3zM12 9v5M12 17h.01',
   info: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5M12 8h.01',
   layers: 'M12 3l9 5-9 5-9-5zM3 13l9 5 9-5M3 17l9 5 9-5',
+  megaphone: 'M3 11v2a1 1 0 0 0 1 1h2l4 3V7L6 10H4a1 1 0 0 0-1 1zM14 8a5 5 0 0 1 0 8M17 5a9 9 0 0 1 0 14',
+  coins: 'M9 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM15 22a6 6 0 0 0 0-12M9 6v4l2 1',
+  growth: 'M3 17l5.5-5.5 4 4L21 6M21 6h-6M21 6v6',
   target: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+  receipt: 'M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6',
   flame: 'M12 2s5 4.5 5 9a5 5 0 0 1-10 0c0-1.5.5-2.8 1-3.5.4 1.3 1.2 2 2 2 0-3 2-7.5 2-7.5z',
   heart: 'M12 20s-7-4.3-7-9a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 4.7-7 9-7 9z',
   share: 'M15 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8.6 13.5l6.8 4M15.4 6.5l-6.8 4',
@@ -93,6 +97,15 @@ export function Logo({ size = 34 }) {
 }
 
 export function PlatformIcon({ platform, size = 16 }) {
+  if (platform === 'youtube') {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="2" y="5" width="20" height="14" rx="4.5" fill="currentColor" opacity="0.16" />
+        <rect x="2" y="5" width="20" height="14" rx="4.5" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M10 9.2v5.6l5-2.8z" fill="currentColor" />
+      </svg>
+    );
+  }
   if (platform === 'tiktok') {
     return (
       <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">

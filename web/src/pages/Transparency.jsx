@@ -4,16 +4,18 @@ import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, Empty, Progress, ScoreRing } from '../components/ui.jsx';
 import EpisodeDrawer from '../components/EpisodeDrawer.jsx';
-import { fmt, full, money, bytes, pct, relative } from '../lib/format.js';
+import { fmt, full, money, bytes, pct, relative, platformLabel } from '../lib/format.js';
 
 const STATE = {
   ok: { tone: 'success', icon: 'check', label: 'ок' },
+  // info — не проблема, а пояснение: например, роликов ещё не рендерили
+  info: { tone: 'muted', icon: 'info', label: 'инфо' },
   warn: { tone: 'warn', icon: 'alert', label: 'внимание' },
   fail: { tone: 'danger', icon: 'x', label: 'блок' },
 };
 
 function Check({ item }) {
-  const s = STATE[item.state] || STATE.warn;
+  const s = STATE[item.state] || STATE.info;
   return (
     <div className={`check-row ${item.state}`}>
       <div className={`check-icon ${s.tone}`}><Icon name={s.icon} size={14} /></div>
@@ -100,7 +102,7 @@ export default function Transparency() {
             {t.quotas.map((q) => (
               <div key={q.platform}>
                 <div className="row-between" style={{ marginBottom: 7 }}>
-                  <span className="row" style={{ gap: 8 }}><PlatformIcon platform={q.platform} size={15} />{q.platform === 'tiktok' ? 'TikTok' : 'Reels'}</span>
+                  <span className="row" style={{ gap: 8 }}><PlatformIcon platform={q.platform} size={15} />{q.label || platformLabel(q.platform)}</span>
                   <span className="mono" style={{ fontSize: 11.5 }}>{q.used}/{q.cap}</span>
                 </div>
                 <Progress value={q.cap ? (q.used / q.cap) * 100 : 0} tone={q.left === 0 ? 'danger' : q.used / q.cap > 0.7 ? 'warn' : 'accent'} />

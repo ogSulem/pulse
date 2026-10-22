@@ -4,12 +4,25 @@ import { enqueue, jobStats, drain, requeueDead, recoverStale } from '../core/que
 import { log, recentLogs } from '../core/logger.js';
 import { uid, parseJson, clamp, num, slugify, addDays, addMinutes, fmtNum } from '../core/utils.js';
 import { FORMAT_LABELS, FORMATS, generateIdeas, hashtagsFor, coverSvg, nicheFor, riskScore, NICHES_LIST } from '../engine/brain.js';
-import { createEpisode, nextSlot, pickAccount, collectAnalytics, sweepDueEpisodes, recoverEpisodeStates, touchEpisode } from '../engine/pipeline.js';
+import { createEpisode, nextSlot, nextSlotPlan, pickAccount, platformQuota, collectAnalytics, sweepDueEpisodes, recoverEpisodeStates, touchEpisode } from '../engine/pipeline.js';
+import { scheduleInsights, bestHours, planSlot, upcomingSlots, localParts } from '../engine/schedule.js';
+import { forecastEpisode, projectHealth, autopilotPolicy, rankEpisodes, recalculateAccountQuality } from '../engine/forecast.js';
+import { evaluateAB, abSummary, preferredVariant } from '../engine/abtest.js';
+import {
+  adsOverview, campaignRow, campaignStats, createBrand, createCampaign, updateCampaign,
+  payCampaign, attachCampaign, pickCampaign, autofillCampaigns, disclosureFor, decorateCaption,
+} from '../engine/ads.js';
 import { providers } from '../providers/index.js';
 import { moneySummary, transparency, recordClick, recordConversion, simulateTraffic, rpmFor } from '../engine/money.js';
+import {
+  portfolio, accountPlaybook, trendRadar, hookLab, retentionPlan, monetizationPlan, publishGate,
+  contentPlan, platformKnowledge, platformAudit, PLATFORM_PLAYBOOK,
+} from '../engine/growth.js';
 import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
+import { PLATFORM_LABELS, PLATFORM_API_LIMITS, PLATFORMS } from '../engine/limits.js';
+import { studio, buildPackage, promotionDecision, PROMO_SHARE } from '../engine/creative.js';
 import { encryptSecret, decryptSecret, maskSecret } from '../core/secrets.js';
-import { scoreViral, saveViral } from '../engine/viral.js';
+import { scoreViral, saveViral, recalibrate } from '../engine/viral.js';
 import { renderInfo, renderAvailable, MEDIA_DIR } from '../engine/render.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,6 +50,7 @@ const episodeRow = (e) => e && ({
   cover_paths: parseJson(e.cover_paths, {}),
   compliance: parseJson(e.compliance, null),
   viral_meta: parseJson(e.viral_meta, null),
+  creative: parseJson(e.creative, null),
   statusLabel: STATUS_LABELS[e.status] || e.status,
   stageLabel: STAGE_LABELS[e.stage] || e.stage,
 });
@@ -331,7 +345,9 @@ api.get('/episodes', (req, res) => {
   }
   if (projectId) { where.push('e.project_id = ?'); params.push(projectId); }
   const rows = db.prepare(`SELECT e.*, p.name project_name, p.color project_color,
-      (SELECT COUNT(*) FROM publications pb WHERE pb.episode_id = e.id) pubs
+      (SELECT COUNT(*) FROM publications pb WHERE pb.episode_id = e.id) pubs,
+      (SELECT c.name FROM campaigns c WHERE c.id = e.campaign_id) campaign_name,
+      (SELECT b.name FROM campaigns c JOIN brands b ON b.id = c.brand_id WHERE c.id = e.campaign_id) campaign_brand
     FROM episodes e LEFT JOIN projects p ON p.id = e.project_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY COALESCE(e.scheduled_at, e.updated_at) DESC LIMIT ?`).all(...params, clamp(num(limit, 60), 1, 200));
@@ -467,9 +483,24 @@ api.get('/pipeline/status', (_req, res) => {
   res.json({ byStatus, stages, queue: jobStats(), active, upcoming, providers: providers.status() });
 });
 
-api.post('/pipeline/drain', async (_req, res) => {
-  const processed = await drain(12);
-  res.json({ processed, queue: jobStats() });
+api.post('/pipeline/drain', async (req, res) => {
+  const limit = clamp(num(req.body?.limit, 12), 1, 24);
+  // Рендер ролика занимает десятки секунд. Раньше запрос ждал всю пачку и
+  // обрывался по таймауту, а интерфейс показывал «обработано 0» — будто ничего
+  // не произошло. Теперь отвечаем сразу, а очередь крутится в фоне.
+  const before = jobStats();
+  if (req.body?.wait) {
+    const processed = await drain(limit);
+    return res.json({ processed, queue: jobStats(), waited: true });
+  }
+  const run = drain(limit)
+    .then((processed) => {
+      log({ level: 'info', actor: 'user', action: 'queue.drain', message: `Очередь прогнана: ${processed} задач`, meta: { processed } });
+      return processed;
+    })
+    .catch((err) => log({ level: 'error', actor: 'user', action: 'queue.drain_failed', message: String(err.message || err) }));
+  globalThis.__lastDrain = run;
+  res.json({ started: true, limit, queue: before });
 });
 
 api.post('/pipeline/requeue', (_req, res) => {
@@ -491,13 +522,18 @@ api.post('/accounts', (req, res) => {
   if (!b.handle) return res.status(400).json({ error: 'validation', message: 'Укажите @handle аккаунта' });
   const id = uid('ac_');
   const ts = nowIso();
-  db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, b.platform === 'tiktok' ? 'tiktok' : 'reels', String(b.handle).replace(/^@/, ''), String(b.display_name || b.handle).replace(/^@/, ''),
+  if (b.platform && !['reels', 'tiktok', 'youtube'].includes(b.platform)) {
+    return res.status(400).json({ error: 'validation', message: 'Площадка должна быть reels, tiktok или youtube' });
+  }
+  const platform = b.platform || 'reels';
+  const projectId = b.project_id && db.prepare('SELECT id FROM projects WHERE id = ?').get(b.project_id) ? b.project_id : null;
+  db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, project_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, platform, String(b.handle).replace(/^@/, ''), String(b.display_name || b.handle).replace(/^@/, ''),
       num(b.avatar_hue, Math.floor(Math.random() * 360)), String(b.status || 'warmup'),
       clamp(num(b.daily_limit, 3), 1, 10), clamp(num(b.min_gap_min, 90), 15, 720),
       String(b.window_start || '09:00'), String(b.window_end || '23:00'), String(b.timezone || 'Europe/Moscow'),
-      clamp(num(b.quality, 70), 0, 100), String(b.notes || ''), ts, ts);
+      clamp(num(b.quality, 70), 0, 100), String(b.notes || ''), projectId, ts, ts);
   log({ level: 'success', actor: 'user', action: 'account.added', entityType: 'account', entityId: id, message: `Аккаунт @${String(b.handle).replace(/^@/, '')} добавлен (${b.platform || 'reels'})` });
   res.status(201).json(accountRow(db.prepare('SELECT * FROM accounts WHERE id = ?').get(id)));
 });
@@ -522,7 +558,7 @@ api.post('/accounts/:id/connect', (req, res) => {
     .run(encrypted, externalId || account.external_id || null, req.body?.expiresAt || null, 'healthy', nowIso(), account.id);
   log({
     level: 'success', actor: 'user', action: 'account.connected', entityType: 'account', entityId: account.id,
-    message: `@${account.handle} подключён к ${account.platform === 'tiktok' ? 'TikTok' : 'Instagram'} (токен зашифрован)`,
+    message: `@${account.handle} подключён к ${PLATFORM_PLAYBOOK[account.platform]?.label || account.platform} (токен зашифрован)`,
     meta: { platform: account.platform, externalId: externalId || null },
   });
   res.json(accountRow(db.prepare('SELECT * FROM accounts WHERE id = ?').get(account.id)));
@@ -541,6 +577,12 @@ api.patch('/accounts/:id', (req, res) => {
   for (const k of ['handle', 'display_name', 'status', 'daily_limit', 'min_gap_min', 'window_start', 'window_end', 'timezone', 'quality', 'notes', 'blocked_until']) {
     if (k in (req.body || {})) patch[k] = req.body[k];
   }
+  // бренд-привязка: пустая строка = универсальный аккаунт, значение = конкретный проект
+  if ('project_id' in (req.body || {})) {
+    const pid = req.body.project_id;
+    patch.project_id = pid && db.prepare('SELECT id FROM projects WHERE id = ?').get(pid) ? pid : null;
+  }
+  if ('platform' in (req.body || {}) && ['reels', 'tiktok', 'youtube'].includes(req.body.platform)) patch.platform = req.body.platform;
   if (patch.status === 'blocked' && !patch.blocked_until) patch.blocked_until = addDays(nowIso(), 7);
   if (patch.status && patch.status !== 'blocked') patch.blocked_until = null;
   db.prepare(`UPDATE accounts SET ${Object.keys(patch).map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`).run({ ...patch, id: a.id });
@@ -587,6 +629,381 @@ api.patch('/products/:id', (req, res) => {
 api.delete('/products/:id', (req, res) => {
   db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
+});
+
+// ─── Реклама: бренды, кампании, маркировка и деньги ─────────────────────────
+// ─── Рост: портфель аккаунтов, тренды, хуки, удержание, монетизация ─────────
+api.get('/growth/overview', (req, res) => {
+  const days = clamp(num(req.query.days, 30), 7, 90);
+  let ads = null;
+  try { ads = adsOverview(); } catch { ads = null; }
+  res.json({
+    portfolio: portfolio(),
+    trends: trendRadar({ days }),
+    monetization: monetizationPlan(),
+    ads: ads ? { totals: ads.totals, campaigns: ads.campaigns.length } : null,
+    audit: platformAudit(),
+    platforms: PLATFORM_PLAYBOOK,
+  });
+});
+
+// План на неделю: что, во сколько и на какой аккаунт выйдет
+api.get('/growth/plan', (req, res) => {
+  const days = clamp(num(req.query.days, 7), 1, 28);
+  const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
+  res.json(contentPlan({ days, projectId }));
+});
+
+// База знаний: лимиты, алгоритмы, монетизация — с числами и ссылками на доки площадок
+api.get('/growth/knowledge', (_req, res) => {
+  res.json(platformKnowledge());
+});
+
+// Аудит: что мешает охвату и деньгам прямо сейчас, с действиями
+api.get('/growth/audit', (_req, res) => {
+  res.json(platformAudit());
+});
+
+api.get('/growth/trends', (req, res) => {
+  res.json(trendRadar({ days: clamp(num(req.query.days, 30), 7, 90) }));
+});
+
+api.get('/growth/hooks', (req, res) => {
+  const episode = req.query.episodeId ? db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.query.episodeId) : null;
+  const project = req.query.projectId && req.query.projectId !== 'all'
+    ? db.prepare('SELECT * FROM projects WHERE id = ?').get(req.query.projectId)
+    : episode?.project_id ? db.prepare('SELECT * FROM projects WHERE id = ?').get(episode.project_id) : null;
+  const topic = req.query.topic || episode?.topic || episode?.title || project?.niche || '';
+  const platform = String(req.query.platform || 'reels');
+  res.json({ ...hookLab({ topic, platform, niche: project?.niche || '' }), episodeId: episode?.id || null });
+});
+
+api.post('/growth/retention', (req, res) => {
+  const b = req.body || {};
+  const episode = b.episodeId ? db.prepare('SELECT * FROM episodes WHERE id = ?').get(b.episodeId) : null;
+  const scenes = b.scenes || (episode ? parseJson(episode.scenes, []) : []);
+  res.json(retentionPlan({
+    scenes,
+    title: b.title || episode?.title || '',
+    description: b.description ?? episode?.description ?? '',
+    platform: b.platform || 'reels',
+    durationSec: b.durationSec || null,
+    hashtags: b.hashtags || (episode ? parseJson(episode.hashtags, []) : null),
+  }));
+});
+
+api.get('/growth/monetization', (_req, res) => res.json(monetizationPlan()));
+
+api.get('/growth/playbook/:accountId', (req, res) => {
+  const plan = accountPlaybook(req.params.accountId);
+  if (!plan) return res.status(404).json({ error: 'not_found', message: 'Аккаунт не найден' });
+  res.json(plan);
+});
+
+// ─── Студия: движок сам собирает ролик — хук, сцены, описание, обложку ──────
+// Возвращает не «один сценарий», а 3 кандидата с оценками и объяснением,
+// почему выбран именно этот: охват, удержание, комплаенс.
+api.get('/studio/options', (_req, res) => {
+  const projects = db.prepare('SELECT id, name, niche, format, duration_sec, tone FROM projects WHERE archived = 0 ORDER BY name').all();
+  const products = db.prepare('SELECT id, name, url, pitch, proof, template, active FROM products ORDER BY created_at DESC').all();
+  res.json({
+    projects,
+    products,
+    platforms: PLATFORMS.map((p) => ({ id: p, label: PLATFORM_LABELS[p], limits: PLATFORM_API_LIMITS[p] })),
+    promoShare: PROMO_SHARE,
+  });
+});
+
+api.post('/studio', (req, res) => {
+  const b = req.body || {};
+  const project = b.projectId
+    ? db.prepare('SELECT * FROM projects WHERE id = ?').get(b.projectId)
+    : db.prepare('SELECT * FROM projects WHERE archived = 0 ORDER BY created_at LIMIT 1').get();
+  if (!project) return res.status(404).json({ error: 'project_not_found', message: 'Сначала создайте проект' });
+
+  const idea = b.ideaId ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(b.ideaId) : null;
+  const platform = PLATFORMS.includes(b.platform) ? b.platform : 'reels';
+  const durationSec = clamp(num(b.durationSec, project.duration_sec || 30), 12, 90);
+
+  // продажу решает не пользователь, а правило 80/20 — но можно переопределить
+  // продажу обычно решает правило 80/20, но человек может переопределить
+  const manual = b.promo && b.promo !== 'auto';
+  const decision = manual
+    ? { intensity: b.promo, product: null, share: 0, reason: b.promo === 'none' ? 'Продажа отключена вручную' : 'Уровень продажи выбран вручную' }
+    : promotionDecision({ project });
+  const fallbackProduct = db.prepare('SELECT * FROM products WHERE active = 1 ORDER BY created_at DESC LIMIT 1').get();
+  const product = decision.intensity === 'none' ? null
+    : (b.productId
+      ? db.prepare('SELECT * FROM products WHERE id = ?').get(b.productId)
+      : (decision.product || (manual ? fallbackProduct : null)));
+
+  const pack = studio({
+    project, idea: idea || {}, product, platform, durationSec,
+    promo: decision.intensity, campaign: b.campaignId ? db.prepare('SELECT * FROM campaigns WHERE id = ?').get(b.campaignId) : null,
+    count: clamp(num(b.count, 3), 1, 3),
+  });
+  res.json({
+    project: { id: project.id, name: project.name, niche: project.niche },
+    platform,
+    durationSec,
+    promo: { ...decision, product: product ? { id: product.id, name: product.name } : null },
+    ...pack,
+  });
+});
+
+// Поставить готовый пакет в очередь: сцены, описание и паспорт креатива
+// сохраняются на эпизоде, чтобы рендер и публикация ничего не придумывали заново.
+api.post('/studio/queue', (req, res) => {
+  const b = req.body || {};
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(b.projectId);
+  if (!project) return res.status(404).json({ error: 'project_not_found' });
+  const platform = PLATFORMS.includes(b.platform) ? b.platform : 'reels';
+  const promo = ['direct', 'soft', 'none'].includes(b.promo) ? b.promo : 'none';
+  // продающий ролик без продукта — это потерянный CTA. Если продукт не выбрали,
+  // берём тот, что движок предложил бы сам.
+  const product = promo === 'none'
+    ? null
+    : (b.productId
+      ? db.prepare('SELECT * FROM products WHERE id = ?').get(b.productId)
+      : (promotionDecision({ project }).product
+        || db.prepare('SELECT * FROM products WHERE active = 1 ORDER BY created_at DESC LIMIT 1').get()));
+
+  let pack = b.package;
+  if (!pack?.scenes?.length) {
+    // клиент мог не передать пакет (например, из плана) — собираем заново
+    pack = buildPackage({
+      project,
+      idea: b.ideaId ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(b.ideaId) : {},
+      product, platform, durationSec: clamp(num(b.durationSec, project.duration_sec || 30), 12, 90),
+      promo, attempt: 0,
+    });
+  }
+
+  const scheduledAt = b.scheduledAt || nextSlot(project.id);
+  const episode = createEpisode({
+    projectId: project.id, ideaId: b.ideaId || null, title: pack.title || null,
+    scheduledAt, autopilot: b.autopilot === false ? 0 : 1,
+  });
+  // фиксируем креатив: сцены = титры, описание = под выбранную площадку
+  touchEpisode(episode.id, {
+    scenes: JSON.stringify(pack.scenes),
+    description: pack.captions?.[platform] || pack.caption || '',
+    caption_platform: platform,
+    hashtags: JSON.stringify(pack.hashtags || []),
+    format: pack.format || project.format,
+    topic: pack.topic || pack.title || '',
+    product_id: product?.id || null,
+    promo,
+    creative: JSON.stringify({
+      hook: pack.hook, hookScore: pack.hookScore, format: pack.format,
+      formatLabel: pack.formatLabel, scores: pack.scores, warnings: pack.warnings,
+      alternativeHooks: pack.alternativeHooks, coverText: pack.coverText,
+      pinnedComment: pack.pinnedComment, captions: pack.captions,
+      product: pack.product,
+    }),
+  });
+  log({
+    level: 'info', actor: 'user', action: 'studio.queue', entityType: 'episode', entityId: episode.id,
+    message: `Из студии в очередь: «${pack.hook || pack.title}» · ${PLATFORM_LABELS[platform]}`,
+    meta: { scores: pack.scores, promo, product: product?.name || null, platform },
+  });
+  res.status(201).json(episodeRow(db.prepare('SELECT * FROM episodes WHERE id = ?').get(episode.id)));
+});
+
+// Пересобрать креатив уже созданного ролика (человек не согласен с хуком/описанием)
+api.post('/episodes/:id/package/regenerate', (req, res) => {
+  const e = db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: 'not_found' });
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(e.project_id);
+  const platform = PLATFORMS.includes(req.body?.platform) ? req.body.platform : (e.caption_platform || 'reels');
+  const promo = ['direct', 'soft', 'none'].includes(req.body?.promo) ? req.body.promo : (e.promo || 'none');
+  const product = promo === 'none' ? null : (e.product_id ? db.prepare('SELECT * FROM products WHERE id = ?').get(e.product_id) : null);
+  const pack = studio({
+    project, idea: { title: e.topic || e.title, format: e.format },
+    product, platform, durationSec: parseJson(e.scenes, []).reduce((s, x) => s + num(x.seconds, 0), 0) || project.duration_sec,
+    promo, count: 3,
+  });
+  const best = pack.best;
+  touchEpisode(e.id, {
+    scenes: JSON.stringify(best.scenes),
+    description: best.captions?.[platform] || best.caption || e.description,
+    caption_platform: platform,
+    hashtags: JSON.stringify(best.hashtags || []),
+    promo,
+    creative: JSON.stringify({
+      hook: best.hook, hookScore: best.hookScore, format: best.format, formatLabel: best.formatLabel,
+      scores: best.scores, warnings: best.warnings, alternativeHooks: best.alternativeHooks,
+      coverText: best.coverText, pinnedComment: best.pinnedComment, captions: best.captions, product: best.product,
+    }),
+    risk: riskScore(`${best.title} ${best.caption}`),
+  });
+  log({
+    level: 'info', actor: 'user', action: 'studio.regenerate', entityType: 'episode', entityId: e.id,
+    message: `Креатив пересобран: «${best.hook}» · скор ${best.scores.total}/100`,
+  });
+  res.json({ episode: episodeRow(db.prepare('SELECT * FROM episodes WHERE id = ?').get(e.id)), candidates: pack.candidates, guidance: pack.guidance });
+});
+
+api.get('/episodes/:id/gate', (req, res) => {
+  const gate = publishGate(req.params.id);
+  if (!gate) return res.status(404).json({ error: 'not_found', message: 'Ролик не найден' });
+  res.json(gate);
+});
+
+api.get('/ads/overview', (_req, res) => {
+  res.json(adsOverview());
+});
+
+api.get('/brands', (_req, res) => res.json(db.prepare('SELECT * FROM brands ORDER BY created_at DESC').all()));
+
+api.post('/brands', (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'validation', message: 'Нужно название бренда' });
+  const brand = createBrand({
+    name: b.name, legalName: b.legalName || b.legal_name || '', inn: b.inn || '',
+    contact: b.contact || '', notes: b.notes || '',
+  });
+  res.status(201).json(brand);
+});
+
+api.get('/campaigns', (_req, res) => {
+  const rows = db.prepare(`SELECT c.*, b.name brand_name, b.legal_name, b.inn, p.name project_name
+    FROM campaigns c JOIN brands b ON b.id = c.brand_id LEFT JOIN projects p ON p.id = c.project_id
+    ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 WHEN 'draft' THEN 2 ELSE 3 END, c.ends_at IS NULL, c.ends_at ASC`).all();
+  res.json(rows.map((c) => ({ ...campaignRow(c), stats: campaignStats(c.id) })));
+});
+
+api.get('/campaigns/:id', (req, res) => {
+  const c = db.prepare(`SELECT c.*, b.name brand_name, b.legal_name, b.inn FROM campaigns c
+    JOIN brands b ON b.id = c.brand_id WHERE c.id = ?`).get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'not_found', message: 'Кампания не найдена' });
+  const posts = db.prepare(`SELECT cp.*, e.title, e.status episode_status, pb.url, pb.platform
+    FROM campaign_posts cp LEFT JOIN episodes e ON e.id = cp.episode_id
+    LEFT JOIN publications pb ON pb.id = cp.publication_id
+    WHERE cp.campaign_id = ? ORDER BY cp.created_at DESC`).all(c.id);
+  const episodes = db.prepare(`SELECT id, title, status, scheduled_at FROM episodes
+    WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 20`).all(c.id);
+  res.json({ ...campaignRow(c), stats: campaignStats(c.id), posts, episodes, disclosure: disclosureFor(c) });
+});
+
+api.post('/campaigns', (req, res) => {
+  try {
+    const campaign = createCampaign(req.body || {});
+    res.status(201).json({ ...campaignRow(campaign), stats: campaignStats(campaign.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'validation', message: String(err.message || err) });
+  }
+});
+
+api.patch('/campaigns/:id', (req, res) => {
+  try {
+    const campaign = updateCampaign(req.params.id, req.body || {});
+    res.json({ ...campaignRow(campaign), stats: campaignStats(campaign.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'validation', message: String(err.message || err) });
+  }
+});
+
+api.delete('/campaigns/:id', (req, res) => {
+  // сначала снимаем спонсора с роликов, иначе останутся висящие ссылки и старая маркировка
+  db.prepare("UPDATE episodes SET campaign_id = NULL, ad_disclosure = '' WHERE campaign_id = ?").run(req.params.id);
+  db.prepare('DELETE FROM campaigns WHERE id = ?').run(req.params.id);
+  log({ level: 'info', actor: 'user', action: 'campaign.deleted', entityType: 'campaign', entityId: req.params.id, message: 'Кампания удалена' });
+  res.json({ ok: true });
+});
+
+api.post('/campaigns/:id/pay', (req, res) => {
+  try {
+    const amount = req.body?.amount;
+    if (!amount) return res.status(400).json({ error: 'validation', message: 'Нужна сумма оплаты' });
+    const campaign = payCampaign(req.params.id, amount);
+    res.json({ ok: true, ...campaignRow(campaign), stats: campaignStats(campaign.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'validation', message: String(err.message || err) });
+  }
+});
+
+api.post('/campaigns/:id/attach', (req, res) => {
+  try {
+    const episodeId = req.body?.episodeId || req.body?.episode_id;
+    if (!episodeId) return res.status(400).json({ error: 'validation', message: 'Нужен episodeId' });
+    const result = attachCampaign(episodeId, req.params.id, { force: Boolean(req.body?.force) });
+    res.json({ ok: true, ...result, stats: campaignStats(req.params.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'validation', message: String(err.message || err) });
+  }
+});
+
+api.delete('/episodes/:id/campaign', (req, res) => {
+  attachCampaign(req.params.id, null);
+  res.json({ ok: true });
+});
+
+api.post('/ads/autofill', (req, res) => {
+  const filled = autofillCampaigns({ limit: clamp(num(req.body?.limit, 5), 1, 20) });
+  res.json({ ok: true, filled, pick: pickCampaign({})?.campaign?.name || null });
+});
+
+api.get('/episodes/:id/campaign', (req, res) => {
+  const episode = db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.params.id);
+  if (!episode) return res.status(404).json({ error: 'not_found' });
+  const campaign = episode.campaign_id ? db.prepare(`SELECT c.*, b.name brand_name, b.legal_name, b.inn
+    FROM campaigns c JOIN brands b ON b.id = c.brand_id WHERE c.id = ?`).get(episode.campaign_id) : null;
+  res.json({
+    campaign: campaign ? { ...campaignRow(campaign), stats: campaignStats(campaign.id) } : null,
+    disclosure: campaign ? disclosureFor(campaign) : '',
+    preview: campaign ? decorateCaption(episode.description || '', campaign) : (episode.description || ''),
+  });
+});
+
+// ─── Интеллект: когда публиковать, сколько это принесёт, что выиграл A/B ────
+api.get('/insights/schedule', (req, res) => {
+  const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
+  const project = projectId ? db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId) : null;
+  const target = project || db.prepare('SELECT * FROM projects WHERE archived = 0 LIMIT 1').get();
+  res.json({
+    ...scheduleInsights({ days: clamp(num(req.query.days, 45), 7, 120) }),
+    plan: target ? planSlot(target.id) : null,
+    upcoming: upcomingSlots(6).map((u) => ({ ...u, localTime: `${String(localParts(new Date(u.scheduled_at), getSettings().timezone || 'UTC').hour).padStart(2, '0')}:${String(localParts(new Date(u.scheduled_at), getSettings().timezone || 'UTC').minute).padStart(2, '0')}` })),
+  });
+});
+
+api.get('/insights/forecast', (req, res) => {
+  const episode = req.query.episodeId ? db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.query.episodeId) : null;
+  if (!episode) return res.status(404).json({ error: 'not_found', message: 'Ролик не найден' });
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(episode.project_id);
+  const account = episode.account_id ? db.prepare('SELECT * FROM accounts WHERE id = ?').get(episode.account_id) : null;
+  res.json(forecastEpisode({ episode, project, account, scheduledAt: episode.scheduled_at }));
+});
+
+api.get('/insights/growth', (req, res) => {
+  const projects = db.prepare('SELECT * FROM projects WHERE archived = 0 ORDER BY created_at ASC').all();
+  res.json({
+    projects: projects.map((p) => ({ projectId: p.id, name: p.name, postsPerDay: p.posts_per_day, ...projectHealth(p.id, { days: clamp(num(req.query.days, 14), 3, 90) }) })),
+    ab: abSummary(),
+    accounts: recalculateAccountQuality({ apply: false }),
+    ranked: rankEpisodes({ limit: 8 }).map((r) => ({ episodeId: r.episodeId, title: r.title, status: r.status, profit: r.forecast.profit, roi: r.forecast.roi, views: r.forecast.expectedViews })),
+  });
+});
+
+api.post('/insights/apply-policy', (_req, res) => {
+  const result = autopilotPolicy({ apply: true });
+  res.json({ ok: true, projects: result.map((p) => ({ projectId: p.projectId, name: p.name, postsPerDay: p.postsPerDay, changed: p.changed, action: p.health.action, reason: p.health.reason })) });
+});
+
+api.get('/abtest/summary', (req, res) => {
+  const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
+  res.json({ ...abSummary({ projectId }), preferred: projectId ? preferredVariant(projectId) : null });
+});
+
+api.post('/insights/recalibrate', (_req, res) => {
+  const result = recalibrate();
+  res.json({ ok: true, ...result });
+});
+
+api.post('/abtest/evaluate', (_req, res) => {
+  const decided = evaluateAB();
+  res.json({ ok: true, decided: decided.length, results: decided.map((d) => ({ episodeId: d.episodeId, title: d.title, winner: d.winner, lift: d.lift, ctrA: d.ctrA, ctrB: d.ctrB })) });
 });
 
 // ─── Аналитика ──────────────────────────────────────────────────────────────
@@ -706,6 +1123,15 @@ api.get('/analytics/overview', (req, res) => {
     byFormat,
     byTheme,
     top,
+    intelligence: {
+      bestHours: bestHours(projectId ? null : 'reels', 3),
+      schedule: scheduleInsights().platforms.map((p) => ({ platform: p.platform, best: p.best, learned: p.learned, samples: p.samples })),
+      ab: abSummary({ projectId }),
+      weights: (() => {
+        const meta = (() => { try { return JSON.parse(getSettings().viral_weights || 'null'); } catch { return null; } })();
+        return meta ? { source: 'learned', samples: meta.samples, weights: meta.weights, lift: meta.lift } : { source: 'prior' };
+      })(),
+    },
     ab: ab.map((r) => {
       const a = r.a_views || 0;
       const b = r.b_views || 0;
@@ -756,16 +1182,20 @@ api.get('/accounts/:id/limit', async (req, res) => {
   if (!account) return res.status(404).json({ error: 'not_found' });
   const limit = await providers.stats.limit({ platform: account.platform, account });
   if (!limit) {
+    // Локальный ответ должен быть таким же, как у движка: считаем фактические
+    // публикации за 24 ч и рабочий потолок Pulse, а не абстрактный лимит API.
+    const pq = platformQuota(account.platform);
     return res.json({
       platform: account.platform,
+      label: PLATFORM_LABELS[account.platform] || account.platform,
       connected: Boolean(account.access_token),
-      limit: account.platform === 'tiktok' ? { total: 15, used: null, left: null } : { total: 50, used: null, left: null },
-      source: 'локальные настройки',
+      limit: { total: pq.cap, used: pq.used, left: pq.left, window_sec: 86400, apiLimit: PLATFORM_API_LIMITS[account.platform].per24h },
+      source: 'локальный расчёт',
       note: !account.access_token
         ? 'Подключите токен, чтобы видеть точный остаток из API площадки'
         : account.platform === 'tiktok'
           ? 'TikTok не отдаёт остаток лимита через API: считаем по фактическим публикациям за 24 ч'
-          : 'Площадка не ответила (нет сети или истёк токен) — показываем локальный лимит',
+          : PLATFORM_API_LIMITS[account.platform].note,
     });
   }
   res.json({ platform: account.platform, connected: true, limit, source: 'api' });
@@ -827,9 +1257,9 @@ api.patch('/settings', (req, res) => {
   const allowed = [
     'autopilot_global', 'manual_review', 'risk_threshold', 'max_daily_per_account', 'timezone',
     // площадки
-    'tiktok_audited', 'tiktok_privacy', 'ai_label', 'ad_label', 'min_viral_score',
+    'tiktok_audited', 'tiktok_privacy', 'youtube_audited', 'ai_label', 'ad_label', 'min_viral_score', 'ads_enabled',
     // деньги и себестоимость
-    'currency', 'rpm_reels', 'rpm_tiktok', 'conv_rate', 'ctr_estimate', 'product_price', 'product_margin',
+    'currency', 'rpm_reels', 'rpm_tiktok', 'rpm_youtube', 'conv_rate', 'ctr_estimate', 'product_price', 'product_margin',
     'cost_video', 'cost_tts', 'cost_llm', 'cost_render', 'postback_key',
   ];
   const patch = {};

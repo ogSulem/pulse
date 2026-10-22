@@ -16,5 +16,12 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: false,
+    // React и ReactDOM меняются редко: отдельный чанк кешируется браузером
+    // между деплоями и не тянет за собой весь интерфейс.
+    rollupOptions: {
+      output: {
+        manualChunks: (id) => (id.includes('node_modules/react') ? 'react' : undefined),
+      },
+    },
   },
 });

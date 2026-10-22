@@ -48,7 +48,7 @@ episodes 1─* jobs (через payload)     logs — независимый а�
 | Поле | Тип | Смысл |
 |------|-----|-------|
 | id | uuid PK | |
-| platform | enum(`reels`,`tiktok`) | площадка |
+| platform | enum(`reels`,`tiktok`,`youtube`) | площадка |
 | handle, display_name | text | @ник |
 | status | enum(`healthy`,`warmup`,`cooldown`,`blocked`) | состояние |
 | daily_limit | int | личная квота в день |
@@ -62,6 +62,9 @@ episodes 1─* jobs (через payload)     logs — независимый а�
 | external_id | text | id бизнес-аккаунта на площадке (`ig_user_id`, TikTok `open_id`) — нужен для API-вызовов |
 | token_expires_at | timestamptz | когда истекает токен; за 3 дня аккаунт помечается «обновить» |
 | auth_note | text | что записал провайдер при подключении: scopes, кто выдал, почему отозван |
+| followers | int | подписчики аккаунта — обновляются из API площадки (`providers.stats.audience`) |
+| followers_source | text | откуда цифра: `api` / `seed` / `manual` — чтобы не путать факт с демо-данными |
+| followers_at | timestamptz | когда подписчики обновлялись в последний раз |
 
 ### accounts_daily — израсходованная квота
 `(account_id, day)` PK, `used int`. Обновляется атомарно при публикации:
@@ -98,8 +101,14 @@ episodes 1─* jobs (через payload)     logs — независимый а�
 | attempts | int | сколько раз запускали |
 | autopilot, ab_test | bool | флаги |
 | scheduled_at, published_at | timestamptz | |
+| promo | text | решение о продаже на момент сценария: `direct` / `soft` / `none` |
+| caption_platform | text | под какую площадку написан текст |
+| creative | jsonb | паспорт креатива: хук, оценки, предупреждения, альтернативы, описания по площадкам, обложка, закреплённый комментарий |
 
 Индексы: `(status, scheduled_at)`, `(project_id, created_at desc)`.
+
+Колонки `promo`, `caption_platform`, `creative` добавлены миграцией (`ensureColumns`) — существующие
+базы обновляются на старте без потери данных.
 
 ### publications — факт публикации (и A/B-вариант)
 | Поле | Тип | Смысл |
@@ -178,7 +187,7 @@ CREATE TABLE pulse.projects (
 
 CREATE TABLE pulse.accounts (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  platform     text NOT NULL CHECK (platform IN ('reels','tiktok')),
+  platform     text NOT NULL CHECK (platform IN ('reels','tiktok','youtube')),
   handle       text NOT NULL,
   status       text NOT NULL DEFAULT 'warmup'
                CHECK (status IN ('healthy','warmup','cooldown','blocked')),
@@ -188,6 +197,9 @@ CREATE TABLE pulse.accounts (
   window_end   time NOT NULL DEFAULT '23:00',
   timezone     text NOT NULL DEFAULT 'Europe/Moscow',
   quality      int  NOT NULL DEFAULT 70,
+  followers    int  NOT NULL DEFAULT 0,
+  followers_source text NOT NULL DEFAULT 'manual',
+  followers_at timestamptz,
   secret_ref   text,
   warmup_until timestamptz,
   blocked_until timestamptz,
@@ -390,6 +402,9 @@ RETURNING j.*;
 | `viral` | INTEGER | вирусный скор 0–100 |
 | `viral_meta` | TEXT (JSON) | разбор по факторам и рекомендации |
 | `cost_cents` | INTEGER | себестоимость ролика в копейках |
+| `ab_winner` | TEXT | `A` / `B` / `tie` — решение закрытого A/B-теста |
+| `ab_meta` | TEXT (JSON) | охват и CTR вариантов, разрыв, z-оценка, уверенность |
+| `forecast` | TEXT (JSON) | прогноз, с которым ролик ушёл в публикацию (охват, доход, ROI, множители) |
 
 ### Новые поля `publications`
 
@@ -429,8 +444,123 @@ RETURNING j.*;
 
 Индексы: `ix_conv_pub(publication_id)`, `ix_conv_ext(external_id) WHERE external_id IS NOT NULL`.
 
+### `settings.viral_weights`
+
+JSON вида `{ "weights": { "hook": 0.31, … }, "lift": { "hook": 1.4, … }, "samples": 104, "at": "…" }`.
+Веса вирусного скора, пересчитанные на своих публикациях; при отсутствии ключа используются приоры.
+
 ### Миграции
 
 `migrate()` выполняет `CREATE TABLE IF NOT EXISTS`, затем `ensureColumns()` (безопасные `ALTER TABLE`
 для новых полей) и разовую миграцию значений настроек v1 → v2 (`schema_v2`), чтобы ставки RPM и
 себестоимость из прошлой версии не остались в долларах.
+
+---
+
+## v5: рекламный контур
+
+Реклама — такая же предметная область, как ролики: бренд, договор, выходы и деньги живут в таблицах,
+поэтому их видно в аналитике, бэкапе и экспорте, а не в чужом чате.
+
+### `brands`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `id` | TEXT PK | `br_…` |
+| `name` | TEXT | короткое имя для интерфейса (`Nordwind`) |
+| `legal_name` | TEXT | юрлицо для маркировки (`ООО «Нордвинд»`) |
+| `inn` | TEXT | ИНН в строке «Реклама. …» |
+| `contact` | TEXT | почта/телефон менеджера |
+| `notes` | TEXT | заметки |
+| `created_at` | TEXT | ISO |
+
+### `campaigns`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `id` | TEXT PK | `cm_…` |
+| `brand_id` | TEXT FK → `brands` | рекламодатель |
+| `project_id` | TEXT FK NULL | ограничение кампании одним проектом |
+| `name` | TEXT | название кампании |
+| `model` | TEXT | `fixed` / `cpm` / `cpa` / `barter` |
+| `budget_cents` | INTEGER | бюджет договора; начисления не превышают его |
+| `rate_cents` | INTEGER | ставка: за выход (fixed), за 1000 показов (cpm), за конверсию (cpa) |
+| `posts_target` | INTEGER | сколько выходов по договору |
+| `starts_at`, `ends_at` | TEXT | окно кампании; после `ends_at` новые выходы не привязываются |
+| `status` | TEXT | `draft` / `active` / `paused` / `done` |
+| `brief` | TEXT | что показать и чего избегать — уходит в сценарий |
+| `mention` | TEXT | `@бренд`, который обязан быть в описании |
+| `hashtags` | TEXT (JSON) | обязательные хештеги кампании |
+| `erid` | TEXT | токен ОРД для маркировки |
+| `marking` | TEXT | `erid` / `brand` / `none` — сколько данных требовать в пометке |
+| `paid_cents` | INTEGER | сколько бренд уже заплатил (дебиторка = начислено − оплачено) |
+| `daily_cap` | INTEGER | максимум выходов кампании в сутки |
+| `created_at`, `updated_at` | TEXT | ISO |
+
+Статус `done` выставляется автоматически, когда число выходов достигло `posts_target`.
+
+### `campaign_posts` — фактический выход рекламы
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `id` | TEXT PK | `cp_…` |
+| `campaign_id` | TEXT FK | кампания |
+| `episode_id` | TEXT FK | ролик |
+| `publication_id` | TEXT FK NULL | конкретная публикация (площадка + аккаунт + вариант A/B) |
+| `revenue_cents` | INTEGER | начисление за этот выход по модели оплаты |
+| `views`, `clicks` | INTEGER | снимок метрик на момент синхронизации |
+| `created_at` | TEXT | дата выхода (по ней считается дневной кэп и период в «Деньгах») |
+
+Индексы: `ix_cp_campaign(campaign_id)`, `ix_cp_pub(publication_id)`.
+
+### Новые поля `episodes`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `campaign_id` | TEXT NULL | спонсор ролика; `NULL` — обычный ролик |
+| `ad_disclosure` | TEXT | готовая строка маркировки на момент привязки (аудит: что именно было в описании) |
+
+### Как считаются деньги
+
+- `campaign_posts` — единственный источник спонсорского дохода: `engine/money.js` подмешивает его
+  третьим каналом (`revenueSponsor`) к рекламе площадок и продажам по ссылкам;
+- `engine/ads.js → syncCampaignMetrics()` пересчитывает начисления из фактических просмотров и конверсий
+  после каждого сбора аналитики; бюджет кампании — жёсткий потолок (перебор невозможен);
+- оплаты (`paid_cents`) не влияют на доход — только на дебиторку: это важно для кэша, но не для P&L.
+
+### Миграции
+
+Таблицы создаются в `migrate()` через `CREATE TABLE IF NOT EXISTS`, поля `episodes.campaign_id` и
+`episodes.ad_disclosure` добавляет `ensureColumns()` — обновление существующей базы не требует ручных шагов.
+
+## v6: рост, Shorts и монетизация
+
+Изменения минимальны: рост считается из уже существующих таблиц, поэтому схема почти не менялась.
+
+### Новые поля `accounts`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `followers` | INTEGER DEFAULT 0 | подписчики аккаунта: без них прогресс к YPP и Creator Rewards не посчитать |
+| `followers_source` | TEXT DEFAULT 'manual' | `api` — из площадки, `seed` — демо, `manual` — вписано руками; UI не выдаёт демо за факт |
+| `followers_at` | TEXT NULL | время последнего обновления; `collectAnalytics()` пишет его вместе с цифрой |
+| `project_id` | TEXT NULL FK → `projects.id` | бренд, который ведёт аккаунт. `NULL` — универсальный аккаунт. `pickAccount()` не отдаёт ролик проекта чужому бренду |
+
+Правило: `providers.stats.audience()` возвращает `null`, если токена нет или API не ответил, —
+`collectAnalytics()` в этом случае **оставляет прежнее значение** и не выдумывает подписчиков.
+
+### Новые ключи `settings`
+
+| Ключ | Значение | Смысл |
+|------|----------|-------|
+| `youtube_audited` | `0` / `1` | проект Google прошёл аудит. Пока `0`, `privacyFor('youtube')` = `private`: это правило площадки, а не настройка осторожности |
+| `rpm_youtube` | число | доход на 1000 просмотров Shorts; по умолчанию 30, дальше подставляется факт |
+
+`knowledge`-таблиц под тренды и хуки нет: тренды считаются из `publications` (формат, охват, свежесть),
+хуки — из шаблонов в коде. Это осознанно: справочник шаблонов живёт в репозитории и версионируется
+вместе с правилами площадок, а не расходится с ними в базе.
+
+### Миграции
+
+`youtube` в `CHECK (platform IN …)` и колонки `accounts.followers*` добавляет `migrate()` /
+`ensureColumns()` — существующая база обновляется без ручных шагов и без потери публикаций.

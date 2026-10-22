@@ -91,12 +91,28 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 });
 
 // ── Планировщик: разбирает очередь и обновляет аналитику ────────────────────
+// Очередь и планировщик работают раздельно. Раньше тик ждал `drain(4)`, а рендер
+// ролика занимает минуту: пока он шёл, не обновлялась аналитика, не срабатывал
+// автопилот и не восстанавливались зависшие задачи — со стороны это выглядело
+// как «очередь стоит, обработано 0».
+let working = false;
+async function work() {
+  if (working) return;
+  working = true;
+  try {
+    await drain(4);
+  } catch (err) {
+    log({ level: 'warn', actor: 'worker', action: 'worker.error', message: String(err?.message || err) });
+  } finally {
+    working = false;
+  }
+}
+
 let ticking = false;
 async function tick() {
   if (ticking) return;
   ticking = true;
   try {
-    await drain(4);
     const lastAutopilot = Number(globalThis.__lastAutopilot || 0);
     if (Date.now() - lastAutopilot > 20000) {
       globalThis.__lastAutopilot = Date.now();
@@ -120,7 +136,9 @@ async function tick() {
     ticking = false;
   }
 }
+setInterval(work, 2500);
 setInterval(tick, 3000);
+setTimeout(work, 600);
 setTimeout(tick, 800);
 
 process.on('SIGTERM', () => {

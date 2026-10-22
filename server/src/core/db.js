@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE TABLE IF NOT EXISTS accounts (
   id            TEXT PRIMARY KEY,
-  platform      TEXT NOT NULL,              -- reels | tiktok
+  platform      TEXT NOT NULL,              -- reels | tiktok | youtube
   handle        TEXT NOT NULL,
   display_name  TEXT NOT NULL,
   avatar_hue    INTEGER DEFAULT 270,
@@ -226,6 +226,54 @@ CREATE TABLE IF NOT EXISTS accounts_daily (
   used       INTEGER DEFAULT 0,
   PRIMARY KEY (account_id, day)
 );
+
+-- ── Реклама: бренды, кампании и фактические выходы ─────────────────────────
+CREATE TABLE IF NOT EXISTS brands (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  legal_name TEXT DEFAULT '',           -- юрлицо для маркировки рекламы
+  inn        TEXT DEFAULT '',
+  contact    TEXT DEFAULT '',
+  notes      TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS campaigns (
+  id            TEXT PRIMARY KEY,
+  brand_id      TEXT NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+  project_id    TEXT,                    -- NULL = любая площадка/проект
+  name          TEXT NOT NULL,
+  model         TEXT DEFAULT 'fixed',    -- fixed | cpm | cpa | barter
+  budget_cents  INTEGER DEFAULT 0,       -- 0 = без потолка (бартер/пост-оплата)
+  rate_cents    INTEGER DEFAULT 0,       -- fixed: за пост; cpm: за 1000 показов; cpa: за конверсию
+  posts_target  INTEGER DEFAULT 1,
+  starts_at     TEXT,
+  ends_at       TEXT,
+  status        TEXT DEFAULT 'draft',    -- draft | active | paused | done
+  brief         TEXT DEFAULT '',
+  mention       TEXT DEFAULT '',         -- @бренд в описании
+  link_url      TEXT DEFAULT '',
+  hashtags      TEXT DEFAULT '[]',
+  erid          TEXT DEFAULT '',         -- токен маркировки (ОРД)
+  marking       TEXT DEFAULT 'erid',     -- erid | brand | none
+  paid_cents    INTEGER DEFAULT 0,       -- сколько бренд уже заплатил
+  daily_cap     INTEGER DEFAULT 1,       -- максимум выходов в сутки по кампании
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_campaigns_status ON campaigns(status);
+
+CREATE TABLE IF NOT EXISTS campaign_posts (
+  id             TEXT PRIMARY KEY,
+  campaign_id    TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  episode_id     TEXT NOT NULL,
+  publication_id TEXT,
+  revenue_cents  INTEGER DEFAULT 0,
+  views          INTEGER DEFAULT 0,
+  clicks         INTEGER DEFAULT 0,
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_campaign_posts ON campaign_posts(campaign_id, episode_id);
 `;
 
 // SQLite не умеет ADD COLUMN IF NOT EXISTS — добавляем колонки точечно.
@@ -240,12 +288,29 @@ function ensureColumns() {
       viral: 'INTEGER DEFAULT 0',
       viral_meta: "TEXT DEFAULT '{}'",
       cost_cents: 'INTEGER DEFAULT 0',
+      ab_winner: 'TEXT',
+      ab_meta: "TEXT DEFAULT '{}'",
+      forecast: "TEXT DEFAULT '{}'",
+      campaign_id: 'TEXT',
+      ad_disclosure: "TEXT DEFAULT ''",
+      // площадка, под которую написан текст: у каждой свой лимит и свой CTA
+      caption_platform: 'TEXT',
+      // решение по продаже продукта на момент сценария: direct | soft | none
+      promo: "TEXT DEFAULT 'none'",
+      // паспорт креатива: хук, оценки, варианты — чтобы в карточке было видно, почему так
+      creative: "TEXT DEFAULT '{}'",
     },
     accounts: {
       access_token: 'TEXT',
       external_id: 'TEXT',
       token_expires_at: 'TEXT',
       auth_note: 'TEXT',
+      // подписчики: вручную или из API канала. Нужны портфелю и прогрессу монетизации
+      followers: 'INTEGER DEFAULT 0',
+      followers_updated_at: 'TEXT',
+      followers_source: "TEXT DEFAULT 'manual'",
+      // бренд-привязка: аккаунт ведёт один проект. NULL — универсальный (можно всё)
+      project_id: 'TEXT',
     },
     publications: {
       cover_path: 'TEXT',
@@ -310,6 +375,7 @@ export const settingsDefaults = {
 
   // ── площадки: реальные лимиты и статус приложений ────────────────────────
   tiktok_audited: '0',            // 0 = неаудированный клиент → только приватные посты
+  youtube_audited: '0',           // 0 = проект Google без аудита → загрузки только private
   tiktok_privacy: 'SELF_ONLY',
   ai_label: '1',                  // помечать AI-контент (требование площадок)
   ad_label: '1',                  // помечать рекламу в описании
@@ -319,6 +385,7 @@ export const settingsDefaults = {
   currency: '₽',
   rpm_reels: '25',                // доход с 1000 просмотров Reels, ₽
   rpm_tiktok: '10',
+  rpm_youtube: '30',
   conv_rate: '1.6',               // % кликов, которые становятся покупкой
   ctr_estimate: '1.2',            // % просмотров, которые переходят по ссылке
   postback_key: '',               // секрет для POST /api/postback (пусто = demo без проверки)

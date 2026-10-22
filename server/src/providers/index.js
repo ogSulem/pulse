@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import { decryptSecret } from '../core/secrets.js';
 import tiktok from './social/tiktok.js';
 import instagram from './social/instagram.js';
+import youtube from './social/youtube.js';
 
 const env = process.env;
 const MODE = () => process.env.PULSE_MODE || 'demo';
@@ -134,7 +135,7 @@ const publicUrl = () => String(env.PULSE_PUBLIC_URL || '').replace(/\/$/, '');
  * { externalId, url, publishedAt, privacy }.
  */
 const publish = {
-  async send({ platform, account, description, videoPath, coverPath, privacy, scheduledAt }) {
+  async send({ platform, account, description, title, hashtags = [], videoPath, coverPath, privacy, scheduledAt }) {
     const demo = MODE() !== 'live';
     const token = tokenOf(account);
 
@@ -165,6 +166,29 @@ const publish = {
         privacy: privacy || 'SELF_ONLY',
         demo: false,
       };
+    }
+
+    if (platform === 'youtube') {
+      if (demo || !token) {
+        await sleep(180);
+        return {
+          externalId: `yt_demo_${Math.random().toString(36).slice(2, 12)}`,
+          url: `https://www.youtube.com/shorts/${Math.random().toString(36).slice(2, 12)}`,
+          privacy: privacy || 'private',
+          demo: true,
+        };
+      }
+      if (!videoPath || !fs.existsSync(videoPath)) throw new Error('YouTube: нет файла ролика для загрузки');
+      const firstLine = String(description || '').split('\n')[0].replace(/#\S+/g, '').trim();
+      const { videoId, url, privacy: used } = await youtube.uploadVideo({
+        token,
+        filePath: videoPath,
+        title: title || firstLine || 'Pulse',
+        description,
+        tags: hashtags,
+        privacy: privacy || 'private',
+      });
+      return { externalId: videoId, url, privacy: used, demo: false };
     }
 
     // Instagram Reels
@@ -207,6 +231,17 @@ const publish = {
   },
 };
 
+/**
+ * Закреплённый комментарий — так продукт попадает к зрителю там, где ссылка
+ * в описании не кликабельна (TikTok). В demo-режиме просто фиксируем факт.
+ */
+publish.comment = async ({ platform, account, externalId, text }) => {
+  if (platform !== 'tiktok') return { skipped: true };
+  const token = tokenOf(account);
+  if (MODE() !== 'live' || !token) return { demo: true, commentId: `cm_demo_${Math.random().toString(36).slice(2, 8)}` };
+  return tiktok.comment({ token, videoId: externalId, text });
+};
+
 /** Счётчики опубликованных роликов из API площадок (live-режим). */
 const stats = {
   async fetch({ platform, account, externalIds = [] }) {
@@ -221,6 +256,10 @@ const stats = {
         const row = await instagram.mediaStats({ token, mediaId: externalIds[0] });
         return [{ id: externalIds[0], ...row }];
       }
+      if (platform === 'youtube') {
+        const rows = await youtube.videoStats({ token, videoIds: externalIds });
+        return rows.length ? rows : null;
+      }
     } catch (err) {
       log({ level: 'warn', actor: 'provider.stats', action: 'stats.failed', message: `${platform}: метрики не получены — ${err.message}` });
       return null;
@@ -229,12 +268,26 @@ const stats = {
   },
   async limit({ platform, account }) {
     const token = tokenOf(account);
-    if (!token || platform !== 'reels' || !account?.external_id) return null;
+    if (!token) return null;
     try {
-      return await instagram.publishingLimit({ token, igUserId: account.external_id });
+      if (platform === 'reels' && account?.external_id) {
+        return await instagram.publishingLimit({ token, igUserId: account.external_id });
+      }
     } catch {
       return null;
     }
+    return null;
+  },
+  /** Подписчики канала: нужны портфелю и прогрессу монетизации */
+  async audience({ platform, account }) {
+    const token = tokenOf(account);
+    if (!token) return null;
+    try {
+      if (platform === 'youtube') return await youtube.channelStats({ token });
+    } catch (err) {
+      log({ level: 'warn', actor: 'provider.stats', action: 'audience.failed', message: `${platform}: подписчики не получены — ${err.message}` });
+    }
+    return null;
   },
 };
 
@@ -253,6 +306,7 @@ export const providers = {
       publish: [
         { id: 'meta', label: 'Meta Graph API (Reels)', live: Boolean(env.META_APP_ID), active: Boolean(env.META_APP_ID) },
         { id: 'tiktok', label: 'TikTok Content Posting API', live: Boolean(env.TIKTOK_CLIENT_KEY), active: Boolean(env.TIKTOK_CLIENT_KEY) },
+        { id: 'youtube', label: 'YouTube Data API v3 (Shorts)', live: Boolean(env.YOUTUBE_CLIENT_ID), active: Boolean(env.YOUTUBE_CLIENT_ID) },
       ],
     };
   },
