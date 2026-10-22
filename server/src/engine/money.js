@@ -134,11 +134,20 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
   const filter = projectId ? 'AND pb.project_id = ?' : '';
   const params = projectId ? [projectId] : [];
 
+  // «за 30 дней» — это ровно 30 дней. Раньше фильтра по дате не было вовсе и
+  // окно показывало всю историю. Берём ролики, вышедшие в периоде, и те, что
+  // набрали просмотры/клики/конверсии именно в этом периоде, — иначе старые
+  // ролики, которые продолжают работать, выпадали бы из отчёта.
   const pubs = db.prepare(`SELECT pb.*, e.cost_cents episode_cost, pj.name project_name
     FROM publications pb
     LEFT JOIN episodes e ON e.id = pb.episode_id
     LEFT JOIN projects pj ON pj.id = pb.project_id
-    WHERE pb.status = 'published' ${filter}`).all(...params);
+    WHERE pb.status = 'published' AND (
+      pb.published_at >= ?
+      OR EXISTS (SELECT 1 FROM metrics_daily md WHERE md.publication_id = pb.id AND md.day >= ?)
+      OR EXISTS (SELECT 1 FROM clicks c WHERE c.publication_id = pb.id AND c.ts >= ?)
+      OR EXISTS (SELECT 1 FROM conversions v WHERE v.publication_id = pb.id AND v.ts >= ?)
+    ) ${filter}`).all(since, since.slice(0, 10), since, since, ...params);
 
   // просмотры за период берём из metrics_daily, чтобы окно было честным
   const viewsByPub = new Map(db.prepare(`SELECT md.publication_id, SUM(md.views) v
@@ -173,8 +182,10 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
     const adsCents = Math.round((v / 1000) * rpmFor(p.platform, settings) * 100);
     const convCents = cv.s || 0;
     const sponsorCents = sponsorByPub.get(p.id) || 0;
-    // себестоимость уже разложена по публикациям (A/B делит её пополам)
-    const costCents = p.cost_cents || p.episode_cost || 0;
+    // себестоимость уже разложена по публикациям (A/B делит её пополам).
+    // Ролик, вышедший до окна, не съел бюджет этого периода — не приписываем.
+    const inPeriod = String(p.published_at || '') >= since;
+    const costCents = inPeriod ? (p.cost_cents || p.episode_cost || 0) : 0;
 
     views += v; clicks += c; conversions += cv.n;
     revenueAds += adsCents; revenueConv += convCents; revenueSponsor += sponsorCents; cost += costCents;
@@ -372,8 +383,13 @@ export function transparency() {
       })(),
     },
     {
-      id: 'render', label: 'Рендер файлов', state: media.n > 0 ? 'ok' : 'warn',
-      detail: `${media.n} роликов, ${((media.bytes || 0) / 1048576).toFixed(1)} МБ, среднее ${media.n ? Math.round((media.ms || 0) / media.n / 100) / 10 : 0} с на ролик`,
+      id: 'render', label: 'Рендер файлов',
+      // пустой архив — это ещё не проблема: на свежей базе роликов просто нет.
+      // Тревога уместна, когда ролики уже должны быть, а файлов нет.
+      state: media.n > 0 ? 'ok' : (counts.review || counts.scheduled || counts.published ? 'warn' : 'info'),
+      detail: media.n
+        ? `${media.n} роликов, ${((media.bytes || 0) / 1048576).toFixed(1)} МБ, среднее ${Math.round((media.ms || 0) / media.n / 100) / 10} с на ролик`
+        : 'Файлов пока нет — появятся после первого рендера',
     },
     {
       id: 'storage', label: 'Хранение данных', state: 'ok',

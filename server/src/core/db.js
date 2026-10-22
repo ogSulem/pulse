@@ -293,6 +293,12 @@ function ensureColumns() {
       forecast: "TEXT DEFAULT '{}'",
       campaign_id: 'TEXT',
       ad_disclosure: "TEXT DEFAULT ''",
+      // площадка, под которую написан текст: у каждой свой лимит и свой CTA
+      caption_platform: 'TEXT',
+      // решение по продаже продукта на момент сценария: direct | soft | none
+      promo: "TEXT DEFAULT 'none'",
+      // паспорт креатива: хук, оценки, варианты — чтобы в карточке было видно, почему так
+      creative: "TEXT DEFAULT '{}'",
     },
     accounts: {
       access_token: 'TEXT',

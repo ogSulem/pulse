@@ -129,6 +129,19 @@ export async function waitForPublish({ token, publishId, timeoutMs = 180000 }) {
   throw new Error('TikTok: публикация не завершилась за 3 минуты — статус проверится позже');
 }
 
+/**
+ * Комментарий под своим видео. Единственный кликабельный путь к продукту:
+ * внешние ссылки в описании TikTok не работают. Права: video.comment.publish.
+ */
+export async function comment({ token, videoId, text }) {
+  if (!videoId) throw new Error('TikTok: нет id видео для комментария');
+  const payload = await api('/comment/publish/', {
+    token,
+    body: { video_id: String(videoId), text: String(text || '').slice(0, 150) },
+  });
+  return { commentId: payload?.data?.comment_id || null };
+}
+
 /** Счётчики опубликованного видео (для аналитики в live-режиме). */
 export async function videoStats({ token, videoIds = [] }) {
   if (!videoIds.length) return [];
@@ -150,4 +163,4 @@ export async function videoStats({ token, videoIds = [] }) {
   }));
 }
 
-export default { uploadVideo, waitForPublish, videoStats };
+export default { uploadVideo, waitForPublish, videoStats, comment };

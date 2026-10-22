@@ -404,13 +404,16 @@ export function trendRadar({ days = 30 } = {}) {
 // Тема подставляется в кавычках: русская грамматика не ломается на любом роде и числе
 // («про «привычки»», «про «фитнес»» — одинаково корректно).
 const HOOK_PATTERNS = [
-  { id: 'contradiction', label: 'Контрадикция', template: '«{topic}»: всё, что ты знаешь, — неправда', why: 'Ломает ожидание и держит до развязки' },
-  { id: 'number', label: 'Конкретное число', template: '{n} шага в теме «{topic}» — результат за неделю', why: 'Цифра обещает измеримый результат' },
-  { id: 'pain-question', label: 'Вопрос-боль', template: 'Почему «{topic}» не даёт результата?', why: 'Зритель узнаёт свою ситуацию в первую секунду' },
-  { id: 'mistake', label: 'Ошибка', template: 'Одна ошибка в теме «{topic}» убивает результат', why: 'Прямое указание на ошибку — сильный паттерн-интеррапт' },
-  { id: 'result-first', label: 'Результат вперёд', template: 'Результат за 7 дней — а теперь как я это сделал', why: 'Показываем конец до начала, дальше держит любопытство' },
-  { id: 'loop', label: 'Петля', template: 'Досмотри до конца — первая фраза объясняет всё', why: 'Провоцирует пересмотр, а он усиливает охват' },
-  { id: 'reply', label: 'Ответ на вопрос', template: 'Спросили про «{topic}» — отвечаю', why: 'Ощущение живого диалога, хорошо для старта аккаунта' },
+  // Шаблоны короткие намеренно: окно свайпа TikTok — 1.0–1.3 с, это 3–5 слов.
+  // Длинный хук физически не успевает прозвучать, поэтому «красивые» длинные
+  // формулировки живут в альтернативах, а не в первой сцене.
+  { id: 'contradiction', label: 'Контрадикция', template: '«{topic}» — это миф', why: 'Ломает ожидание и держит до развязки' },
+  { id: 'number', label: 'Конкретное число', template: '{n} шага до результата', why: 'Цифра обещает измеримый результат' },
+  { id: 'pain-question', label: 'Вопрос-боль', template: 'Почему {topic} не работает?', why: 'Зритель узнаёт свою ситуацию в первую секунду' },
+  { id: 'mistake', label: 'Ошибка', template: '{topic}: главная ошибка', why: 'Прямое указание на ошибку — сильный паттерн-интеррапт' },
+  { id: 'result-first', label: 'Результат вперёд', template: 'Результат за 7 дней', why: 'Показываем конец до начала, дальше держит любопытство' },
+  { id: 'loop', label: 'Петля', template: 'Досмотри до развязки', why: 'Провоцирует пересмотр, а он усиливает охват' },
+  { id: 'reply', label: 'Ответ на вопрос', template: '{topic} — отвечаю', why: 'Ощущение живого диалога, хорошо для старта аккаунта' },
 ];
 
 const HOOK_STOPWORDS = new Set(['и', 'в', 'на', 'с', 'не', 'что', 'как', 'это', 'для', 'по']);
@@ -456,9 +459,10 @@ export function scoreHook(text, { platform = 'reels' } = {}) {
  */
 export function hookLab({ topic = '', platform = 'reels', niche = '' } = {}) {
   const cleanTopic = String(topic || '').trim() || niche || 'твой контент';
-  const shortTopic = cleanTopic.length > 38 ? `${cleanTopic.slice(0, 35)}…` : cleanTopic;
+  const shortTopic = shortHookTopic(cleanTopic, niche) || cleanTopic;
   const hooks = HOOK_PATTERNS.map((p, i) => {
-    const text = p.template.replace('{topic}', shortTopic).replace('{n}', String(3 + (i % 3)));
+    const raw = p.template.replace('{topic}', shortTopic).replace('{n}', String(3 + (i % 3)));
+    const text = raw.charAt(0).toUpperCase() + raw.slice(1);
     const s = scoreHook(text, { platform });
     // проверяем тот же текст вирусным скором как первую сцену — второй, независимый взгляд
     const viral = scoreViral({
@@ -469,12 +473,15 @@ export function hookLab({ topic = '', platform = 'reels', niche = '' } = {}) {
       targetSec: 25,
       topic: cleanTopic,
     });
-    const combined = Math.round(s.score * 0.65 + viral.score * 0.35);
+    // хук без темы звучит одинаково у всех и не цепляет именно эту аудиторию:
+    // даём бонус за упоминание темы, иначе в топе всегда «Результат за 7 дней»
+    const anchored = text.toLowerCase().includes(shortTopic.toLowerCase());
+    const combined = Math.round(s.score * 0.65 + viral.score * 0.35 + (anchored ? 10 : 0));
     return {
       id: p.id, type: p.label, text,
       score: combined, hookScore: s.score, viralScore: viral.score,
       fitsWindow: s.fitsWindow, readableSec: s.readableSec, words: s.words,
-      why: p.why,
+      anchored, why: p.why,
       traits: s.traits,
     };
   }).sort((a, b) => b.score - a.score);
@@ -807,6 +814,33 @@ const PLATFORM_DAYS = {
   reels: [0, 1, 2, 3, 4, 5, 6],
   youtube: [1, 3, 5, 6],
 };
+
+/**
+ * Тема для хука: максимум 2 слова. Хук читается вслух за 1–1.6 с — это и есть
+ * окно свайпа. Полная тема остаётся в заголовке и описании.
+ */
+function shortHookTopic(title, fallback = '') {
+  const LEAD = /^(почему|как|что|зачем|когда|сколько|разбор|коротко|итог)[:\s]+/i;
+  let text = String(title || '').replace(/[«»"]/g, '').trim();
+  while (LEAD.test(text)) text = text.replace(LEAD, '');
+  const STOP = new Set(['и', 'в', 'на', 'с', 'со', 'по', 'о', 'об', 'про', 'без', 'от', 'до', 'как', 'что', 'это', 'же', 'ли']);
+  const raw = text.split(/\s+/).map((w) => w.replace(/[«»"]/g, '')).filter(Boolean);
+  const words = [];
+  for (let i = 0; i < raw.length; i++) {
+    const w = raw[i];
+    const low = w.toLowerCase();
+    if (STOP.has(low)) continue;
+    // «SaaS для автоматизации» понятнее, чем «SaaS автоматизации»: предлог
+    // сохраняем, если он склеивает два слова, а не висит в конце
+    if (low === 'для' && words.length === 1 && raw[i + 1]) { words.push(w); continue; }
+    words.push(w);
+  }
+  // одно ёмкое слово лучше, чем обрубок фразы: «фитнес», а не «фитнес и»
+  const first = words[0] || '';
+  const out = words.slice(0, first.length >= 6 ? 1 : (words[1] === 'для' ? 3 : 2));
+  const clean = out.join(' ').replace(/[,:;—–-]+$/, '').trim();
+  return clean.length >= 4 ? clean.slice(0, 24) : String(fallback || '').slice(0, 22);
+}
 
 /** Короткая тема для хука: 2–3 слова, не обрезая посреди фразы */
 function shortenTopic(title, fallback = '') {

@@ -540,6 +540,74 @@ try {
   ok('проект без аккаунтов', 'ролик ушёл в проверку с понятной причиной, цикл переносов не создан');
 } catch (err) { fail('проект без аккаунтов', err); }
 
+
+// ── студия: движок сам собирает ролик под правила площадки ─────────────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const { studio, promotionDecision } = await import('../src/engine/creative.js');
+  const { PLATFORM_API_LIMITS } = await import('../src/engine/limits.js');
+  const project = db.prepare('SELECT * FROM projects ORDER BY created_at LIMIT 1').get();
+  const product = db.prepare('SELECT * FROM products WHERE active = 1 LIMIT 1').get();
+
+  const packs = {};
+  for (const platform of ['tiktok', 'reels', 'youtube']) {
+    const res = studio({ project, product, platform, durationSec: 34, promo: 'direct', count: 3 });
+    packs[platform] = res;
+    const best = res.best;
+    if (res.candidates.length !== 3) throw new Error(`${platform}: кандидатов ${res.candidates.length}, а не 3`);
+    const uniq = new Set(res.candidates.map((c) => c.hook));
+    if (uniq.size < 2) throw new Error(`${platform}: варианты не различаются`);
+    for (const c of res.candidates) {
+      const total = c.scores.total;
+      if (!(total >= 0 && total <= 100)) throw new Error(`${platform}: скор вне 0..100 — ${total}`);
+      if (c.scenes.some((sc) => sc.seconds > 6 || sc.seconds < 1)) throw new Error(`${platform}: сцена длиннее 6 с`);
+      const dur = c.scenes.reduce((a, sc) => a + sc.seconds, 0);
+      if (dur > 42 || dur < 16) throw new Error(`${platform}: длительность ${dur} с вне 16–42`);
+      // описание каждой площадки укладывается в её лимит символов
+      for (const [pl, text] of Object.entries(c.captions)) {
+        const max = PLATFORM_API_LIMITS[pl].description;
+        if (!text || text.length > max) throw new Error(`${pl}: описание ${text?.length} > ${max}`);
+      }
+      if (c.captions.tiktok && /https?:\/\//.test(c.captions.tiktok)) throw new Error('TikTok: кликабельная ссылка в описании невозможна');
+    }
+    // UTM в комментарии — по площадке публикации, иначе переходы спишутся чужому каналу
+    if (!new RegExp(`utm_source=${platform}`).test(best.pinnedComment || '')) throw new Error(`${platform}: закреплённый комментарий без UTM`);
+  }
+  const yt = packs.youtube.best;
+  if (yt.captions.youtube.length > PLATFORM_API_LIMITS.youtube.description) throw new Error('YouTube: описание не влезло');
+  if (yt.hashtags.length > 8) throw new Error('YouTube: слишком много тегов');
+  ok('студия собирает пакет', `tiktok ${packs.tiktok.best.scores.total} · reels ${packs.reels.best.scores.total} · shorts ${yt.scores.total}, описания в лимитах`);
+
+  // продажа дозируется: в свежем проекте первый ролик не продаёт
+  const decision = promotionDecision({ project });
+  if (!['direct', 'soft', 'none'].includes(decision.intensity)) throw new Error(`непонятное решение: ${decision.intensity}`);
+  const promoShare = db.prepare(`SELECT COUNT(*) total, SUM(CASE WHEN product_id IS NOT NULL THEN 1 ELSE 0 END) promo
+    FROM episodes WHERE project_id = ? AND status = 'published'`).get(project.id);
+  const share = promoShare.total ? promoShare.promo / promoShare.total : 0;
+  if (share > 0.5) throw new Error(`продающих роликов ${Math.round(share * 100)}% — это уже спам, охват упадёт`);
+  ok('продажа дозирована', `${Math.round(share * 100)}% роликов с продуктом · решение: ${decision.intensity}`);
+} catch (err) { fail('студия собирает пакет', err); }
+
+// ── креатив доезжает до очереди: сцены, описание, паспорт ─────────────────
+try {
+  const { db, nowIso } = await import('../src/core/db.js');
+  const { createEpisode, touchEpisode } = await import('../src/engine/pipeline.js');
+  const { studio } = await import('../src/engine/creative.js');
+  const project = db.prepare('SELECT * FROM projects ORDER BY created_at LIMIT 1').get();
+  const pack = studio({ project, platform: 'tiktok', durationSec: 30, promo: 'direct', count: 1 }).best;
+  const ep = createEpisode({ projectId: project.id, title: pack.title });
+  touchEpisode(ep.id, {
+    scenes: JSON.stringify(pack.scenes), description: pack.captions.tiktok,
+    promo: 'direct', caption_platform: 'tiktok', creative: JSON.stringify({ hook: pack.hook, scores: pack.scores }),
+  });
+  const row = db.prepare('SELECT * FROM episodes WHERE id = ?').get(ep.id);
+  if (JSON.parse(row.scenes).length !== pack.scenes.length) throw new Error('сцены не сохранились');
+  if (!row.description || row.promo !== 'direct') throw new Error('описание или решение о продаже потерялись');
+  if (JSON.parse(row.creative).hook !== pack.hook) throw new Error('паспорт креатива не сохранён');
+  db.prepare('DELETE FROM episodes WHERE id = ?').run(ep.id);
+  ok('креатив доезжает до очереди', `хук «${pack.hook.slice(0, 40)}…», ${pack.scenes.length} сцен`);
+} catch (err) { fail('креатив доезжает до очереди', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

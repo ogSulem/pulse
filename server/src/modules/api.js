@@ -19,7 +19,8 @@ import {
   contentPlan, platformKnowledge, platformAudit, PLATFORM_PLAYBOOK,
 } from '../engine/growth.js';
 import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
-import { PLATFORM_LABELS, PLATFORM_API_LIMITS } from '../engine/limits.js';
+import { PLATFORM_LABELS, PLATFORM_API_LIMITS, PLATFORMS } from '../engine/limits.js';
+import { studio, buildPackage, promotionDecision, PROMO_SHARE } from '../engine/creative.js';
 import { encryptSecret, decryptSecret, maskSecret } from '../core/secrets.js';
 import { scoreViral, saveViral, recalibrate } from '../engine/viral.js';
 import { renderInfo, renderAvailable, MEDIA_DIR } from '../engine/render.js';
@@ -49,6 +50,7 @@ const episodeRow = (e) => e && ({
   cover_paths: parseJson(e.cover_paths, {}),
   compliance: parseJson(e.compliance, null),
   viral_meta: parseJson(e.viral_meta, null),
+  creative: parseJson(e.creative, null),
   statusLabel: STATUS_LABELS[e.status] || e.status,
   stageLabel: STAGE_LABELS[e.stage] || e.stage,
 });
@@ -481,9 +483,24 @@ api.get('/pipeline/status', (_req, res) => {
   res.json({ byStatus, stages, queue: jobStats(), active, upcoming, providers: providers.status() });
 });
 
-api.post('/pipeline/drain', async (_req, res) => {
-  const processed = await drain(12);
-  res.json({ processed, queue: jobStats() });
+api.post('/pipeline/drain', async (req, res) => {
+  const limit = clamp(num(req.body?.limit, 12), 1, 24);
+  // Рендер ролика занимает десятки секунд. Раньше запрос ждал всю пачку и
+  // обрывался по таймауту, а интерфейс показывал «обработано 0» — будто ничего
+  // не произошло. Теперь отвечаем сразу, а очередь крутится в фоне.
+  const before = jobStats();
+  if (req.body?.wait) {
+    const processed = await drain(limit);
+    return res.json({ processed, queue: jobStats(), waited: true });
+  }
+  const run = drain(limit)
+    .then((processed) => {
+      log({ level: 'info', actor: 'user', action: 'queue.drain', message: `Очередь прогнана: ${processed} задач`, meta: { processed } });
+      return processed;
+    })
+    .catch((err) => log({ level: 'error', actor: 'user', action: 'queue.drain_failed', message: String(err.message || err) }));
+  globalThis.__lastDrain = run;
+  res.json({ started: true, limit, queue: before });
 });
 
 api.post('/pipeline/requeue', (_req, res) => {
@@ -681,6 +698,150 @@ api.get('/growth/playbook/:accountId', (req, res) => {
   const plan = accountPlaybook(req.params.accountId);
   if (!plan) return res.status(404).json({ error: 'not_found', message: 'Аккаунт не найден' });
   res.json(plan);
+});
+
+// ─── Студия: движок сам собирает ролик — хук, сцены, описание, обложку ──────
+// Возвращает не «один сценарий», а 3 кандидата с оценками и объяснением,
+// почему выбран именно этот: охват, удержание, комплаенс.
+api.get('/studio/options', (_req, res) => {
+  const projects = db.prepare('SELECT id, name, niche, format, duration_sec, tone FROM projects WHERE archived = 0 ORDER BY name').all();
+  const products = db.prepare('SELECT id, name, url, pitch, proof, template, active FROM products ORDER BY created_at DESC').all();
+  res.json({
+    projects,
+    products,
+    platforms: PLATFORMS.map((p) => ({ id: p, label: PLATFORM_LABELS[p], limits: PLATFORM_API_LIMITS[p] })),
+    promoShare: PROMO_SHARE,
+  });
+});
+
+api.post('/studio', (req, res) => {
+  const b = req.body || {};
+  const project = b.projectId
+    ? db.prepare('SELECT * FROM projects WHERE id = ?').get(b.projectId)
+    : db.prepare('SELECT * FROM projects WHERE archived = 0 ORDER BY created_at LIMIT 1').get();
+  if (!project) return res.status(404).json({ error: 'project_not_found', message: 'Сначала создайте проект' });
+
+  const idea = b.ideaId ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(b.ideaId) : null;
+  const platform = PLATFORMS.includes(b.platform) ? b.platform : 'reels';
+  const durationSec = clamp(num(b.durationSec, project.duration_sec || 30), 12, 60);
+
+  // продажу решает не пользователь, а правило 80/20 — но можно переопределить
+  // продажу обычно решает правило 80/20, но человек может переопределить
+  const manual = b.promo && b.promo !== 'auto';
+  const decision = manual
+    ? { intensity: b.promo, product: null, share: 0, reason: b.promo === 'none' ? 'Продажа отключена вручную' : 'Уровень продажи выбран вручную' }
+    : promotionDecision({ project });
+  const fallbackProduct = db.prepare('SELECT * FROM products WHERE active = 1 ORDER BY created_at DESC LIMIT 1').get();
+  const product = decision.intensity === 'none' ? null
+    : (b.productId
+      ? db.prepare('SELECT * FROM products WHERE id = ?').get(b.productId)
+      : (decision.product || (manual ? fallbackProduct : null)));
+
+  const pack = studio({
+    project, idea: idea || {}, product, platform, durationSec,
+    promo: decision.intensity, campaign: b.campaignId ? db.prepare('SELECT * FROM campaigns WHERE id = ?').get(b.campaignId) : null,
+    count: clamp(num(b.count, 3), 1, 3),
+  });
+  res.json({
+    project: { id: project.id, name: project.name, niche: project.niche },
+    platform,
+    durationSec,
+    promo: { ...decision, product: product ? { id: product.id, name: product.name } : null },
+    ...pack,
+  });
+});
+
+// Поставить готовый пакет в очередь: сцены, описание и паспорт креатива
+// сохраняются на эпизоде, чтобы рендер и публикация ничего не придумывали заново.
+api.post('/studio/queue', (req, res) => {
+  const b = req.body || {};
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(b.projectId);
+  if (!project) return res.status(404).json({ error: 'project_not_found' });
+  const platform = PLATFORMS.includes(b.platform) ? b.platform : 'reels';
+  const promo = ['direct', 'soft', 'none'].includes(b.promo) ? b.promo : 'none';
+  // продающий ролик без продукта — это потерянный CTA. Если продукт не выбрали,
+  // берём тот, что движок предложил бы сам.
+  const product = promo === 'none'
+    ? null
+    : (b.productId
+      ? db.prepare('SELECT * FROM products WHERE id = ?').get(b.productId)
+      : (promotionDecision({ project }).product
+        || db.prepare('SELECT * FROM products WHERE active = 1 ORDER BY created_at DESC LIMIT 1').get()));
+
+  let pack = b.package;
+  if (!pack?.scenes?.length) {
+    // клиент мог не передать пакет (например, из плана) — собираем заново
+    pack = buildPackage({
+      project,
+      idea: b.ideaId ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(b.ideaId) : {},
+      product, platform, durationSec: clamp(num(b.durationSec, project.duration_sec || 30), 12, 60),
+      promo, attempt: 0,
+    });
+  }
+
+  const scheduledAt = b.scheduledAt || nextSlot(project.id);
+  const episode = createEpisode({
+    projectId: project.id, ideaId: b.ideaId || null, title: pack.title || null,
+    scheduledAt, autopilot: b.autopilot === false ? 0 : 1,
+  });
+  // фиксируем креатив: сцены = титры, описание = под выбранную площадку
+  touchEpisode(episode.id, {
+    scenes: JSON.stringify(pack.scenes),
+    description: pack.captions?.[platform] || pack.caption || '',
+    caption_platform: platform,
+    hashtags: JSON.stringify(pack.hashtags || []),
+    format: pack.format || project.format,
+    topic: pack.topic || pack.title || '',
+    product_id: product?.id || null,
+    promo,
+    creative: JSON.stringify({
+      hook: pack.hook, hookScore: pack.hookScore, format: pack.format,
+      formatLabel: pack.formatLabel, scores: pack.scores, warnings: pack.warnings,
+      alternativeHooks: pack.alternativeHooks, coverText: pack.coverText,
+      pinnedComment: pack.pinnedComment, captions: pack.captions,
+      product: pack.product,
+    }),
+  });
+  log({
+    level: 'info', actor: 'user', action: 'studio.queue', entityType: 'episode', entityId: episode.id,
+    message: `Из студии в очередь: «${pack.hook || pack.title}» · ${PLATFORM_LABELS[platform]}`,
+    meta: { scores: pack.scores, promo, product: product?.name || null, platform },
+  });
+  res.status(201).json(episodeRow(db.prepare('SELECT * FROM episodes WHERE id = ?').get(episode.id)));
+});
+
+// Пересобрать креатив уже созданного ролика (человек не согласен с хуком/описанием)
+api.post('/episodes/:id/package/regenerate', (req, res) => {
+  const e = db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: 'not_found' });
+  const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(e.project_id);
+  const platform = PLATFORMS.includes(req.body?.platform) ? req.body.platform : (e.caption_platform || 'reels');
+  const promo = ['direct', 'soft', 'none'].includes(req.body?.promo) ? req.body.promo : (e.promo || 'none');
+  const product = promo === 'none' ? null : (e.product_id ? db.prepare('SELECT * FROM products WHERE id = ?').get(e.product_id) : null);
+  const pack = studio({
+    project, idea: { title: e.topic || e.title, format: e.format },
+    product, platform, durationSec: parseJson(e.scenes, []).reduce((s, x) => s + num(x.seconds, 0), 0) || project.duration_sec,
+    promo, count: 3,
+  });
+  const best = pack.best;
+  touchEpisode(e.id, {
+    scenes: JSON.stringify(best.scenes),
+    description: best.captions?.[platform] || best.caption || e.description,
+    caption_platform: platform,
+    hashtags: JSON.stringify(best.hashtags || []),
+    promo,
+    creative: JSON.stringify({
+      hook: best.hook, hookScore: best.hookScore, format: best.format, formatLabel: best.formatLabel,
+      scores: best.scores, warnings: best.warnings, alternativeHooks: best.alternativeHooks,
+      coverText: best.coverText, pinnedComment: best.pinnedComment, captions: best.captions, product: best.product,
+    }),
+    risk: riskScore(`${best.title} ${best.caption}`),
+  });
+  log({
+    level: 'info', actor: 'user', action: 'studio.regenerate', entityType: 'episode', entityId: e.id,
+    message: `Креатив пересобран: «${best.hook}» · скор ${best.scores.total}/100`,
+  });
+  res.json({ episode: episodeRow(db.prepare('SELECT * FROM episodes WHERE id = ?').get(e.id)), candidates: pack.candidates, guidance: pack.guidance });
 });
 
 api.get('/episodes/:id/gate', (req, res) => {

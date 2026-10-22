@@ -131,6 +131,7 @@ export default function Growth() {
 
   const TABS = [
     { id: 'portfolio', label: 'Портфель', icon: 'at', badge: audit?.counts?.block || 0 },
+    { id: 'studio', label: 'Студия', icon: 'sparkles' },
     { id: 'plan', label: 'План на неделю', icon: 'calendar' },
     { id: 'creative', label: 'Тренды и хуки', icon: 'zap' },
     { id: 'money', label: 'Деньги', icon: 'coins' },
@@ -619,6 +620,8 @@ export default function Growth() {
         <PlanTab plan={weekPlan} days={planDays} setDays={(d) => { setPlanDays(d); setWeekPlan(null); }} copy={copy} />
       )}
 
+      {tab === 'studio' && <StudioTab toast={toast} />}
+
       {tab === 'knowledge' && <KnowledgeTab knowledge={knowledge} playbook={overview?.platforms} />}
 
       {/* ── Модалка плана аккаунта ───────────────────────────────────────── */}
@@ -863,6 +866,331 @@ function KnowledgeTab({ knowledge, playbook }) {
           </div>
         </div>
       </div>
+    </>
+  );
+}
+
+// ─── Студия: движок собирает ролик целиком ──────────────────────────────────
+// Человек не пишет сценарий руками: он выбирает бренд, площадку и уровень
+// продажи, а Pulse предлагает три готовых пакета с оценками и объяснением.
+const ROLE_LABEL = {
+  hook: 'хук', pain: 'боль', why: 'почему', fix: 'решение', proof: 'доказательство',
+  close: 'вывод', before: 'до', turn: 'перелом', after: 'после', case: 'кейс',
+  list: 'список', item: 'пункт', myth: 'миф', truth: 'правда', inside: 'внутри',
+  plus: 'плюс', minus: 'минус', verdict: 'вердикт', scene: 'сцена',
+  what: 'что сделали', result: 'результат', lesson: 'главное', turn: 'переломная точка',
+};
+
+const PROMO_META = {
+  auto: { label: 'авто 80/20', tone: 'accent' },
+  direct: { label: 'прямая продажа', tone: 'success' },
+  soft: { label: 'мягкое упоминание', tone: 'warn' },
+  none: { label: 'без продажи', tone: 'muted' },
+};
+
+function StudioTab({ toast }) {
+  const [options, setOptions] = useState(null);
+  const [projectId, setProjectId] = useState('');
+  const [platform, setPlatform] = useState('tiktok');
+  const [durationSec, setDurationSec] = useState(32);
+  const [promo, setPromo] = useState('auto');
+  const [productId, setProductId] = useState('');
+  const [result, setResult] = useState(null);
+  const [chosen, setChosen] = useState(0);
+  const [captionTab, setCaptionTab] = useState('tiktok');
+  const [busy, setBusy] = useState(false);
+  const [queued, setQueued] = useState(null);
+
+  useEffect(() => {
+    api.studioOptions().then((res) => {
+      setOptions(res);
+      const first = res.projects?.[0];
+      if (first) {
+        setProjectId(first.id);
+        setDurationSec(first.duration_sec || 32);
+      }
+    }).catch((err) => toast.push({ tone: 'error', title: 'Студия не загрузилась', text: err.message }));
+  }, []);
+
+  const project = options?.projects?.find((p) => p.id === projectId);
+  const limits = options?.platforms?.find((p) => p.id === captionTab)?.limits || {};
+
+  const build = async () => {
+    setBusy(true);
+    setQueued(null);
+    try {
+      const res = await api.studioBuild({
+        projectId, platform, durationSec, promo,
+        productId: productId || undefined, count: 3,
+      });
+      setResult(res);
+      setChosen(0);
+      setCaptionTab(platform);
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Не удалось собрать ролик', text: err.message });
+    } finally { setBusy(false); }
+  };
+
+  const enqueue = async () => {
+    const pack = result?.candidates?.[chosen];
+    if (!pack) return;
+    setBusy(true);
+    try {
+      const episode = await api.studioQueue({
+        projectId,
+        platform,
+        durationSec,
+        promo: result.promo.intensity,
+        productId: result.promo.product?.id || undefined,
+        package: pack,
+      });
+      setQueued(episode);
+      toast.push({ tone: 'success', title: 'Ролик в очереди', text: `Публикация: ${new Date(episode.scheduled_at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` });
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Не удалось поставить в очередь', text: err.message });
+    } finally { setBusy(false); }
+  };
+
+  const copyText = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.push({ tone: 'success', title: 'Описание скопировано', text: 'Можно вставить в публикацию вручную' });
+    } catch {
+      toast.push({ tone: 'info', title: 'Скопируйте вручную', text: String(text).slice(0, 160) });
+    }
+  };
+
+  const best = result?.candidates?.[chosen] || result?.best;
+
+  return (
+    <>
+      <div className="card pad-lg">
+        <div className="card-head">
+          <div>
+            <h2>Студия: ролик под ключ</h2>
+            <p>Хук под окно свайпа, структура сцен, описание под площадку, обложка и закреплённый комментарий — собирает движок</p>
+          </div>
+          <Badge tone="accent" dot>креатив</Badge>
+        </div>
+
+        <div className="page-grid grid-4" style={{ gap: 12 }}>
+          <Field label="Проект" hint="ниша и тон берутся из проекта">
+            <select className="select" value={projectId} onChange={(e) => {
+              setProjectId(e.target.value);
+              const p = options?.projects?.find((x) => x.id === e.target.value);
+              if (p?.duration_sec) setDurationSec(p.duration_sec);
+            }}>
+              {(options?.projects || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Площадка" hint="свой лимит описания и свой CTA">
+            <Segmented value={platform} onChange={setPlatform}
+              options={[{ value: 'tiktok', label: 'TikTok' }, { value: 'reels', label: 'Reels' }, { value: 'youtube', label: 'Shorts' }]} />
+          </Field>
+          <Field label="Длительность" hint="оптимум площадки подставится сам">
+            <input className="input" type="number" min={12} max={60} value={durationSec}
+              onChange={(e) => setDurationSec(Number(e.target.value) || 32)} />
+          </Field>
+          <Field label="Продажа продукта" hint="по умолчанию решает правило 80/20">
+            <select className="select" value={promo} onChange={(e) => setPromo(e.target.value)}>
+              <option value="auto">авто — 1 продающий на 3–4 полезных</option>
+              <option value="direct">прямая — ссылка и UTM</option>
+              <option value="soft">мягкая — упоминание без ссылки</option>
+              <option value="none">без продажи</option>
+            </select>
+          </Field>
+        </div>
+
+        <div className="row wrap" style={{ gap: 8, marginTop: 14, alignItems: 'flex-end' }}>
+          <Field label="Продукт" hint={promo === 'none' ? 'не используется' : 'что продвигаем в этом ролике'}>
+            <select className="select" value={productId} disabled={promo === 'none'}
+              onChange={(e) => setProductId(e.target.value)} style={{ minWidth: 220 }}>
+              <option value="">{promo === 'auto' ? 'движок выберет сам' : 'выберите продукт'}</option>
+              {(options?.products || []).filter((p) => p.active).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+          <button className="btn btn-primary" onClick={build} disabled={busy || !projectId} style={{ gap: 7 }}>
+            <Icon name="sparkles" size={14} />{busy ? 'Собираю…' : 'Собрать ролик'}
+          </button>
+          {project && (
+            <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+              {project.niche} · {project.format}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {busy && !result && <div className="skeleton" style={{ height: 200 }} />}
+
+      {result && best && (
+        <>
+          {/* Что решил движок и почему */}
+          <div className="card pad-lg" style={{ borderColor: 'rgba(167,139,250,.2)' }}>
+            <div className="row-between wrap" style={{ gap: 10 }}>
+              <div className="row wrap" style={{ gap: 8 }}>
+                <Badge tone={PROMO_META[result.promo.intensity]?.tone || 'muted'}>
+                  {PROMO_META[result.promo.intensity]?.label}
+                </Badge>
+                {result.promo.product && <Badge tone="accent">{result.promo.product.name}</Badge>}
+                <span style={{ fontSize: 11.5, color: 'var(--text-2)' }}>{result.promo.reason}</span>
+              </div>
+              <div className="row" style={{ gap: 8, fontSize: 11, color: 'var(--muted)' }}>
+                <Icon name="clock" size={12} />длительность {best.durationSec} с
+                <Icon name="film" size={12} style={{ marginLeft: 6 }} />{best.scenes.length} сцен
+              </div>
+            </div>
+            <div className="row wrap" style={{ gap: 18, marginTop: 12 }}>
+              {[
+                ['Общий скор', best.scores.total, 100],
+                ['Хук', best.scores.hook, 100],
+                ['Вирусность', best.scores.viral, 100],
+                ['Удержание', best.scores.retention, best.scores.retentionTarget],
+                ['Комплаенс', best.scores.compliance, 100],
+              ].map(([label, value, target]) => (
+                <div key={label} className="row" style={{ gap: 8 }}>
+                  <ScoreRing value={Math.round(value)} size={36} />
+                  <div>
+                    <div style={{ fontSize: 11.5, fontWeight: 650 }}>{label}</div>
+                    <div style={{ fontSize: 10, color: 'var(--muted)' }}>
+                      {target === 100 ? `${Math.round(value)}/100` : `прогноз ${Math.round(value)}% · норма ${target}%`}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {best.warnings?.length > 0 && (
+              <div className="col" style={{ gap: 5, marginTop: 10 }}>
+                {best.warnings.map((w) => (
+                  <div key={w.text} className="row" style={{ gap: 7, fontSize: 11, color: w.severity === 'block' ? 'var(--red)' : 'var(--amber)' }}>
+                    <Icon name={w.severity === 'block' ? 'shield' : 'alert'} size={12} style={{ marginTop: 2, flex: 'none' }} />{w.text}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Три кандидата */}
+          <div className="page-grid grid-3">
+            {result.candidates.map((c, i) => (
+              <button key={c.id} onClick={() => setChosen(i)} className="card"
+                style={{
+                  textAlign: 'left', cursor: 'pointer', padding: 14,
+                  borderColor: i === chosen ? 'rgba(167,139,250,.55)' : 'var(--line)',
+                  background: i === chosen ? 'rgba(124,58,237,.09)' : 'transparent',
+                }}>
+                <div className="row-between" style={{ marginBottom: 8 }}>
+                  <Badge tone={i === chosen ? 'accent' : 'muted'}>{i === 0 ? 'лучший' : `вариант ${i + 1}`}</Badge>
+                  <ScoreRing value={c.scores.total} size={30} />
+                </div>
+                <div style={{ fontSize: 12.5, fontWeight: 650, lineHeight: 1.45, marginBottom: 6 }}>{c.hook}</div>
+                <div className="row wrap" style={{ gap: 6, fontSize: 10, color: 'var(--muted)' }}>
+                  <span>{c.formatLabel}</span><span>·</span><span>{c.durationSec} с</span><span>·</span>
+                  <span>хук {c.hookScore}/100</span>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Сценарий и описание */}
+          <div className="page-grid grid-2">
+            <div className="card pad-lg">
+              <div className="card-head">
+                <div><h2>Сценарий</h2><p>Титр = текст на экране. Одна сцена — одна мысль</p></div>
+                <Badge tone="muted">{best.formatLabel}</Badge>
+              </div>
+              <div className="col" style={{ gap: 7 }}>
+                {best.scenes.map((sc, i) => (
+                  <div key={i} className="row" style={{ gap: 10, padding: '9px 11px', border: '1px solid var(--line)', borderRadius: 10 }}>
+                    <span style={{ fontSize: 10, color: 'var(--muted)', minWidth: 16 }}>{i + 1}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, lineHeight: 1.5 }}>{sc.text}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 3 }}>
+                        {ROLE_LABEL[sc.role] || sc.role} · {sc.seconds} с{sc.visual ? ` · ${sc.visual}` : ''}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {best.alternativeHooks?.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 11, fontWeight: 650, marginBottom: 6 }}>Альтернативные хуки</div>
+                  <div className="col" style={{ gap: 5 }}>
+                    {best.alternativeHooks.map((h) => (
+                      <div key={h.text || h} className="row-between" style={{ gap: 8, fontSize: 11, padding: '6px 9px', border: '1px solid var(--line)', borderRadius: 8 }}>
+                        <span style={{ flex: 1 }}>{h.text || h}</span>
+                        {h.score ? <Badge tone="muted">{h.score}</Badge> : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="card pad-lg">
+              <div className="card-head">
+                <div><h2>Описание и обложка</h2><p>Готово под каждую площадку — с UTM и без лишних символов</p></div>
+              </div>
+              <div className="row wrap" style={{ gap: 6, marginBottom: 10 }}>
+                {['tiktok', 'reels', 'youtube'].map((pl) => (
+                  <button key={pl} onClick={() => setCaptionTab(pl)}
+                    className={captionTab === pl ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}>
+                    {platformLabel(pl)}
+                  </button>
+                ))}
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--muted)', marginBottom: 6 }}>
+                {(best.captions?.[captionTab] || '').length} / {limits.description || 2200} символов
+              </div>
+              <pre style={{
+                whiteSpace: 'pre-wrap', fontFamily: 'inherit', fontSize: 11.5, lineHeight: 1.6,
+                background: 'rgba(255,255,255,.02)', border: '1px solid var(--line)', borderRadius: 10,
+                padding: 11, margin: 0, maxHeight: 260, overflow: 'auto',
+              }}>{best.captions?.[captionTab]}</pre>
+
+              <div className="col" style={{ gap: 7, marginTop: 10, fontSize: 11 }}>
+                <div><b style={{ fontSize: 11 }}>Заголовок:</b> <span style={{ color: 'var(--text-2)' }}>{best.title}</span></div>
+                <div><b style={{ fontSize: 11 }}>Текст на обложке:</b> <span style={{ color: 'var(--text-2)' }}>{best.coverText}</span></div>
+                {best.pinnedComment && (
+                  <div><b style={{ fontSize: 11 }}>Закреплённый комментарий:</b> <span style={{ color: 'var(--text-2)' }}>{best.pinnedComment}</span></div>
+                )}
+                <div className="row wrap" style={{ gap: 4 }}>
+                  {(best.hashtags || []).map((t) => <span key={t} className="chip plain">#{String(t).replace(/^#/, '')}</span>)}
+                </div>
+              </div>
+
+              <div className="row wrap" style={{ gap: 8, marginTop: 12 }}>
+                <button className="btn btn-primary" onClick={enqueue} disabled={busy}>
+                  <Icon name="play" size={14} />В очередь
+                </button>
+                <button className="btn btn-ghost" onClick={build} disabled={busy}>
+                  <Icon name="refresh" size={14} />Пересобрать
+                </button>
+                <button className="btn btn-ghost" onClick={() => copyText(best.captions?.[captionTab])}>
+                  <Icon name="copy" size={14} />Описание
+                </button>
+              </div>
+              {queued && (
+                <div style={{ fontSize: 11, color: 'var(--green)', marginTop: 8 }}>
+                  В очереди: «{queued.title}» → {new Date(queued.scheduled_at).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {result.guidance?.length > 0 && (
+            <div className="card pad-lg">
+              <div className="card-head"><div><h2>Почему так</h2><p>Правила площадок, по которым собран этот ролик</p></div></div>
+              <div className="col" style={{ gap: 6 }}>
+                {result.guidance.map((g) => (
+                  <div key={g} className="row" style={{ gap: 8, fontSize: 11.5, color: 'var(--text-2)', lineHeight: 1.55 }}>
+                    <Icon name="info" size={12} style={{ marginTop: 2, flex: 'none' }} />{g}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </>
   );
 }

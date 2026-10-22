@@ -24,6 +24,7 @@ function CheckPanel({ episode, onRefresh }) {
 
   const compliance = episode.compliance;
   const viral = episode.viral_meta;
+  const creative = episode.creative;
 
   const recheck = async () => {
     setBusy(true);
@@ -53,8 +54,54 @@ function CheckPanel({ episode, onRefresh }) {
     } finally { setBusy(false); }
   };
 
+  const regenerate = async () => {
+    setBusy(true);
+    try {
+      await api.regeneratePackage(episode.id, { promo: episode.promo || undefined });
+      toast.push({ tone: 'success', title: 'Креатив пересобран', text: 'Новые хук, сцены и описание уже в ролике' });
+      await onRefresh();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Не удалось пересобрать', text: err.message });
+    } finally { setBusy(false); }
+  };
+
   return (
     <div className="col" style={{ gap: 16 }}>
+      {creative?.hook && (
+        <div className="check-block">
+          <div className="check-block-head">
+            <span><Icon name="sparkles" size={14} /> Креатив движка</span>
+            <span className="score-pill" data-grade={creative.scores?.total >= 75 ? 'high' : creative.scores?.total >= 55 ? 'mid' : 'low'}>
+              {creative.scores?.total || 0}/100
+            </span>
+          </div>
+          <div className="col" style={{ gap: 6, marginTop: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 650 }}>«{creative.hook}»</div>
+            <div className="mini-kv tight">
+              <div><span>Хук</span><b>{creative.scores?.hook || 0}/100</b></div>
+              <div><span>Вирусность</span><b>{creative.scores?.viral || 0}/100</b></div>
+              <div><span>Удержание</span><b>{creative.scores?.retention || 0}% из {creative.scores?.retentionTarget || 0}%</b></div>
+              <div><span>Продажа</span><b>{episode.promo === 'direct' ? 'прямая ссылка' : episode.promo === 'soft' ? 'мягкое упоминание' : 'без продажи'}</b></div>
+            </div>
+            {creative.warnings?.length > 0 && (
+              <div className="col" style={{ gap: 6 }}>
+                {creative.warnings.map((w) => (
+                  <div className="finding warn" key={w.text}><Icon name="info" size={13} /><div>{w.text}</div></div>
+                ))}
+              </div>
+            )}
+            {creative.alternativeHooks?.length > 0 && (
+              <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>
+                Альтернативные хуки: {creative.alternativeHooks.map((h) => h.text).join(' · ')}
+              </div>
+            )}
+            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={regenerate} style={{ alignSelf: 'flex-start' }}>
+              <Icon name="refresh" size={13} />Пересобрать креатив
+            </button>
+          </div>
+        </div>
+      )}
+
       {!compliance && !viral && (
         <div className="notice">Проверка ещё не выполнялась — запустите её, чтобы увидеть правила и прогноз.</div>
       )}

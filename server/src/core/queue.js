@@ -4,7 +4,7 @@
 // (enqueue / claim / ack / fail / stats), см. docs/ARCHITECTURE.md.
 // ─────────────────────────────────────────────────────────────────────────────
 import { db, nowIso } from './db.js';
-import { uid, parseJson, addMinutes } from './utils.js';
+import { uid, parseJson, addMinutes, num } from './utils.js';
 import { log } from './logger.js';
 
 const HANDLERS = new Map();
@@ -112,7 +112,18 @@ export function recoverStale() {
   return stale.n;
 }
 
+function withTimeout(promise, ms, type) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Задача ${type} не завершилась за ${Math.round(ms / 1000)} с — повтор`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 export async function drain(limit = 8) {
+  // Перед работой возвращаем в очередь задачи, у которых истёк lease: иначе
+  // ролик навсегда застревает в «генерации», а очередь выглядит пустой.
+  recoverStale();
   const jobs = claimDue(limit);
   for (const job of jobs) {
     const handler = HANDLERS.get(job.type);
@@ -121,7 +132,10 @@ export async function drain(limit = 8) {
       continue;
     }
     try {
-      await handler(parseJson(job.payload, {}), job);
+      // Зависший обработчик не должен держать очередь вечно: по истечении
+      // лимита задача падает в повтор, а lease освобождается.
+      const limitMs = num(process.env.PULSE_JOB_TIMEOUT_SEC, 420) * 1000;
+      await withTimeout(handler(parseJson(job.payload, {}), job), limitMs, job.type);
       ack(job);
     } catch (err) {
       fail(job, err);

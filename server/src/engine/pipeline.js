@@ -19,11 +19,12 @@ import {
 import { preferredVariant, evaluateAB } from './abtest.js';
 import { checkCompliance, disclosureText, saveCompliance, PLATFORM_RULES } from './compliance.js';
 import { scoreViral, saveViral, recalibrate } from './viral.js';
+import { studio, promotionDecision } from './creative.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
 const STAGE_PROGRESS = { idea: 6, script: 26, voice: 46, footage: 66, edit: 84, ready: 100, published: 100 };
-import { PLATFORMS, PLATFORM_LABELS, platformCap } from './limits.js';
+import { PLATFORMS, PLATFORM_LABELS, platformCap, PLATFORM_API_LIMITS } from './limits.js';
 
 const getProject = (id) => db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
 const getEpisode = (id) => db.prepare('SELECT * FROM episodes WHERE id = ?').get(id);
@@ -84,39 +85,81 @@ registerHandler('episode.prepare', async ({ episodeId }) => {
   const episode = getEpisode(episodeId);
   if (!episode) return;
   const project = getProject(episode.project_id);
-  const product = getProduct(episode.product_id) || activeProduct(episode.project_id);
+  // promo фиксируется на этапе сценария: в 3 из 4 роликов продажи нет.
+  // Старые эпизоды без флага ведут себя как раньше: есть product_id — продаём.
+  const promoMode = episode.promo || (episode.product_id ? 'direct' : 'none');
+  const product = promoMode === 'none'
+    ? null
+    : (getProduct(episode.product_id) || activeProduct(episode.project_id));
   const settings = getSettings();
 
   let scenes = parseJson(episode.scenes, []);
   let description = episode.description;
   let hashtags = parseJson(episode.hashtags, []);
 
-  if (!scenes.length) {
+  // ── Креатив: хук по окну свайпа, структура сцен, описание под площадку ────
+  // Раньше сценарий собирался один раз по шаблону. Теперь движок делает несколько
+  // кандидатов и берёт лучший по вирусности, удержанию и комплаенсу — и решает,
+  // уместна ли в этом ролике продажа продукта.
+  let creative = null;
+  let promo = episode.promo || null;
+  const generatedFresh = !scenes.length;
+  if (generatedFresh) {
     const idea = episode.idea_id ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(episode.idea_id) : null;
-    const script = buildScript(project, idea || { hook: episode.title, format: episode.format, tags: [] }, {
-      product,
+    const decision = promotionDecision({ project, product });
+    promo = decision.intensity;
+    const chosenProduct = decision.intensity === 'none' ? null : decision.product;
+    const pack = studio({
+      project,
+      idea: idea || { title: episode.title, format: episode.format },
+      product: chosenProduct,
       platform: 'reels',
-      duration: project.duration_sec,
+      durationSec: project.duration_sec,
+      promo: decision.intensity,
+      count: 3,
     });
-    scenes = script.scenes;
-    description = script.caption;
-    hashtags = script.hashtags;
-    // сохраняем сценарий как отдельную сущность — его можно править и переиспользовать
+    creative = pack.best;
+    scenes = creative.scenes;
+    description = creative.caption;
+    hashtags = creative.hashtags;
+    if (creative.title && (!episode.title || episode.title.length < 8)) touchEpisode(episodeId, { title: creative.title });
+    // продукт фиксируем на эпизоде: публикация не должна решать это заново
+    touchEpisode(episodeId, { product_id: chosenProduct?.id || null });
+
     const scriptId = uid('sc_');
     db.prepare(`INSERT INTO scripts (id, idea_id, project_id, hook, scenes, cta, caption, hashtags, duration_sec, tone, status, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?)`)
-      .run(scriptId, episode.idea_id, episode.project_id, script.hook, JSON.stringify(script.scenes), script.cta,
-        script.caption, JSON.stringify(script.hashtags), script.duration_sec, script.tone, nowIso());
+      .run(scriptId, episode.idea_id, episode.project_id, creative.hook, JSON.stringify(scenes),
+        String(scenes[scenes.length - 1]?.text || ''), creative.caption, JSON.stringify(hashtags),
+        creative.durationSec, project?.tone || 'friendly', nowIso());
     touchEpisode(episodeId, { script_id: scriptId });
+    log({
+      level: 'info', actor: 'creative', action: 'creative.package', entityType: 'episode', entityId: episodeId,
+      message: `Креатив собран: «${creative.hook}» · скор ${creative.scores.total}/100 · продажа: ${promo === 'direct' ? 'прямая' : promo === 'soft' ? 'мягкая' : 'без продажи'}`,
+      meta: { scores: creative.scores, format: creative.format, promo, product: chosenProduct?.name || null },
+    });
   }
 
   const risk = riskScore(`${episode.title} ${description} ${scenes.map((s) => s.text).join(' ')}`);
-  if (product?.url) description = platformCaption({ caption: description, hashtags }, 'reels', product);
+  // Описание из креативного пакета уже собрано по правилам каждой площадки
+  // (CTA, ссылка, теги). Повторно оборачивать его platformCaption нельзя:
+  // получались две ссылки и два блока тегов в одном описании.
+  // оборачиваем только сценарий, собранный здесь же; готовый текст из студии
+  // уже содержит CTA и теги под нужную площадку
+  if (generatedFresh && !creative && product?.url) description = platformCaption({ caption: description, hashtags }, 'reels', product);
 
   touchEpisode(episodeId, {
     scenes: JSON.stringify(scenes),
     description,
     hashtags: JSON.stringify(hashtags),
+    promo: promo || 'none',
+    ...(creative ? { creative: JSON.stringify({
+      hook: creative.hook, hookScore: creative.hookScore, format: creative.format,
+      formatLabel: creative.formatLabel, scores: creative.scores, warnings: creative.warnings,
+      alternativeHooks: creative.alternativeHooks, coverText: creative.coverText,
+      pinnedComment: creative.pinnedComment, captions: creative.captions,
+      product: creative.product,
+    }) } : {}),
     risk,
     status: 'generating',
     stage: 'script',
@@ -266,7 +309,9 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
       progress: 100,
       status: 'review',
       error: null,
-      description: finalDescription,
+      // храним базовое описание: маркировку и спонсорский блок добавляет
+      // публикация, иначе при каждом рендере они дублировались бы в тексте
+      description: episode.description,
       video_path: video?.videoPath || null,
       video_bytes: video?.bytes || null,
       render_ms: video?.renderMs || null,
@@ -495,9 +540,15 @@ registerHandler('episode.publish', async ({ episodeId }) => {
 
     for (const variant of variants) {
       const campaign = episode.campaign_id ? db.prepare('SELECT * FROM campaigns WHERE id = ?').get(episode.campaign_id) : null;
-      const caption = campaign
-        ? decorateCaption(buildCaption({ episode, project, product, platform, variant, hashtags }), campaign)
-        : buildCaption({ episode, project, product, platform, variant, hashtags });
+      const baseCaption = buildCaption({ episode, project, product, platform, variant, hashtags });
+      const marked = withDisclosure(baseCaption, disclosureText({
+        // если есть спонсорская кампания, её маркировка (erid) уже содержит
+        // слово «Реклама» — второй такой строки не добавляем
+        ad: !campaign && Number(settings.ad_label ?? 1) === 1 && Boolean(episode.product_id),
+        ai: Number(settings.ai_label ?? 1) === 1,
+        productName: product?.name,
+      }));
+      const caption = campaign ? decorateCaption(marked, campaign) : marked;
       const result = await providers.publish.send({
         platform,
         account,
@@ -543,6 +594,17 @@ registerHandler('episode.publish', async ({ episodeId }) => {
           Math.round(num(episode.cost_cents, 0) / Math.max(1, variants.length * targets.length)), ts);
       created.push(pid);
       consumeQuota(account.id);
+      // TikTok: внешняя ссылка в описании не кликабельна — ведём через
+      // закреплённый комментарий, это единственный рабочий путь к продукту.
+      const pinned = parseJson(episode.creative, null)?.pinnedComment;
+      if (pinned && platform === 'tiktok' && providers.publish.comment) {
+        await providers.publish.comment({ platform, account, externalId: result.externalId, text: pinned })
+          .then(() => log({
+            level: 'info', actor: 'publisher', action: 'publication.pinned', entityType: 'publication', entityId: pid,
+            message: 'Закреплённый комментарий со ссылкой на продукт опубликован',
+          }))
+          .catch((err) => log({ level: 'warn', actor: 'publisher', action: 'publication.pinned_failed', entityType: 'publication', entityId: pid, message: String(err.message || err) }));
+      }
       // ── спонсорский учёт: каждый выход фиксируется отдельно (A/B — тоже) ──
       if (campaign) {
         recordDelivery({ campaignId: campaign.id, episodeId, publicationId: pid, views: 0, clicks: 0 });
@@ -591,8 +653,32 @@ registerHandler('episode.publish', async ({ episodeId }) => {
   });
 });
 
-/** Описание под площадку и вариант A/B (B — короткий, «второй заход») */
+/** Маркировка рекламы и ИИ — ровно один раз, без повторов при пересборке */
+function withDisclosure(caption, disclosure) {
+  const text = String(caption || '').trim();
+  if (!disclosure) return text;
+  const hasAi = /создано с помощью ИИ/i.test(text);
+  const hasAd = /(^|\s)Реклама\./.test(text) || /\berid\s*:/i.test(text);
+  const needAi = /ИИ/.test(disclosure) && !hasAi;
+  const needAd = /Реклама/.test(disclosure) && !hasAd;
+  if (!needAi && !needAd) return text;
+  const parts = [];
+  if (needAd) parts.push(disclosure.match(/Реклама[^.]*\./)?.[0] || 'Реклама.');
+  if (needAi) parts.push('Видео создано с помощью ИИ.');
+  return `${text}\n\n${parts.join(' ')}`.trim();
+}
+
+/**
+ * Описание под площадку. Если для эпизода собран креативный пакет, берём готовый
+ * текст именно этой площадки: у TikTok ссылку в описании не кликнуть, у Reels
+ * работает кликабельная ссылка, у YouTube — короткое описание и теги.
+ * Вариант B — «второй заход» для A/B, а не копия.
+ */
 function buildCaption({ episode, project, product, platform, variant, hashtags }) {
+  const pack = parseJson(episode.creative, null);
+  if (variant !== 'B' && pack?.captions?.[platform]) {
+    return String(pack.captions[platform]).slice(0, PLATFORM_API_LIMITS[platform]?.description || 2200);
+  }
   if (variant !== 'B') {
     return platformCaption({ caption: episode.description, hashtags }, platform, product);
   }
@@ -604,8 +690,13 @@ function buildCaption({ episode, project, product, platform, variant, hashtags }
 }
 
 function pickPlatforms(project) {
-  // площадка участвует, только если есть аккаунт, который реально может публиковать
-  const accounts = db.prepare("SELECT DISTINCT platform FROM accounts WHERE status IN ('healthy','warmup')").all().map((r) => r.platform);
+  // Площадка участвует, только если есть аккаунт, который реально может
+  // публиковать И ведёт этот бренд. Иначе ролик FitFlow бесконечно ждал бы
+  // свободный TikTok-аккаунт, который принадлежит другому бренду.
+  const rows = db.prepare(`SELECT DISTINCT platform FROM accounts
+      WHERE status IN ('healthy','warmup') AND (project_id IS NULL OR project_id = ?)`)
+    .all(project?.id || null);
+  const accounts = rows.map((r) => r.platform);
   if (!accounts.length) return PLATFORMS;
   return accounts;
 }

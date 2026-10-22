@@ -289,8 +289,8 @@ const asTagList = (value) => {
 // помогают индексации: у Shorts хватает 3–5, у TikTok — ниша + 2 общих.
 const PLATFORM_HASHTAG_BASE = {
   tiktok: ['рек', 'врек', 'fyp', 'тикток', 'рекомендации', 'тренд'],
-  reels: ['reels', 'рилс', 'reelsinstagram', 'тренды'],
-  youtube: ['shorts', 'шортс', 'shortsvideo', 'youtubeshorts'],
+  reels: ['reels', 'рилс', 'тренды'],
+  youtube: ['shorts', 'шортс', 'youtubeshorts'],
 };
 
 export function hashtagsFor(project, platform = 'reels', idea = {}, limit = 8) {

@@ -91,6 +91,12 @@ export const api = {
   growthAudit: () => request('/growth/audit'),
   episodeGate: (id) => request(`/episodes/${id}/gate`),
 
+  // Студия: собрать пакет ролика, поставить в очередь, пересобрать креатив
+  studioOptions: () => request('/studio/options'),
+  studioBuild: (payload) => request('/studio', { method: 'POST', body: payload }),
+  studioQueue: (payload) => request('/studio/queue', { method: 'POST', body: payload }),
+  regeneratePackage: (id, payload = {}) => request(`/episodes/${id}/package/regenerate`, { method: 'POST', body: payload }),
+
   adsOverview: () => request('/ads/overview'),
   brands: () => request('/brands'),
   createBrand: (payload) => request('/brands', { method: 'POST', body: payload }),

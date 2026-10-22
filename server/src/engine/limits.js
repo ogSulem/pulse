@@ -21,9 +21,21 @@ export const platformLabel = (platform) => PLATFORM_LABELS[platform] || platform
  * опирается расчёт. Порядок величин проверен по документации площадок на 2026 год.
  */
 export const PLATFORM_API_LIMITS = {
-  tiktok: { per24h: 15, initPerMin: 6, note: 'Content Posting API: ~15 постов/24 ч на креатора, 6 init/мин' },
-  reels: { per24h: 50, initPerMin: 25, note: 'Instagram Graph API: 50 публикаций в скользящие 24 ч' },
-  youtube: { per24h: 100, initPerMin: 6, note: 'YouTube Data API: 100 videos.insert в сутки (квота проекта, сброс в полночь PT)' },
+  tiktok: {
+    per24h: 15, initPerMin: 6,
+    description: 2200, comment: 150, hashtags: 8,
+    note: 'Content Posting API: ~15 постов/24 ч на креатора, 6 init/мин; ссылки в описании не кликабельны',
+  },
+  reels: {
+    per24h: 50, initPerMin: 25,
+    description: 2200, comment: 2200, hashtags: 30,
+    note: 'Instagram Graph API: 50 публикаций в скользящие 24 ч, ссылка в описании кликабельна',
+  },
+  youtube: {
+    per24h: 100, initPerMin: 6,
+    description: 5000, title: 100, tags: 4600, hashtags: 15,
+    note: 'YouTube Data API: 100 videos.insert в сутки (квота проекта, сброс в полночь PT); заголовок ≤100, описание ≤5000 байт',
+  },
 };
 
 /**

@@ -8,12 +8,14 @@ import { fmt, full, money, bytes, pct, relative, platformLabel } from '../lib/fo
 
 const STATE = {
   ok: { tone: 'success', icon: 'check', label: 'ок' },
+  // info — не проблема, а пояснение: например, роликов ещё не рендерили
+  info: { tone: 'muted', icon: 'info', label: 'инфо' },
   warn: { tone: 'warn', icon: 'alert', label: 'внимание' },
   fail: { tone: 'danger', icon: 'x', label: 'блок' },
 };
 
 function Check({ item }) {
-  const s = STATE[item.state] || STATE.warn;
+  const s = STATE[item.state] || STATE.info;
   return (
     <div className={`check-row ${item.state}`}>
       <div className={`check-icon ${s.tone}`}><Icon name={s.icon} size={14} /></div>

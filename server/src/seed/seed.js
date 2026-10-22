@@ -54,11 +54,14 @@ function demoChecks(seedIndex) {
   const viral = 38 + ((seedIndex * 17) % 46);
   const warn = seedIndex % 5 === 0;
   const low = viral < 45;
+  // Демо-данные должны быть непротиворечивы: опубликованный ролик не может
+  // быть заблокирован комплаенсом. Правило «лёгких денег» — предупреждение,
+  // а не блок, поэтому в блокировки оно не попадает.
   const compliance = {
-    ok: !low,
-    score: low ? 64 : 92,
+    ok: true,
+    score: warn ? 88 : 96,
     platform: seedIndex % 2 ? 'tiktok' : 'reels',
-    blocking: low ? [{ id: 'fin-getrich', severity: 'block', reason: 'Формулировка «лёгких денег»: площадки понижают охват и могут ограничить аккаунт', match: 'заработа' }] : [],
+    blocking: [],
     warnings: warn ? [{ id: 'headline-claim', severity: 'warn', reason: 'Есть признаки рекламы, но нет пометки — Pulse добавит её сам', match: 'скидк' }] : [],
     findings: [],
     limits: { captionMax: 2200, hashtagsRecommended: 6, publishPer24h: seedIndex % 2 ? 15 : 50 },
@@ -211,7 +214,11 @@ export function seedBase() {
       const postsToday = Math.max(1, Math.round(postsPerDay * (0.7 + rnd() * 0.7)));
       for (let k = 0; k < postsToday; k++) {
         const idea = ideaRows[Math.floor(rnd() * ideaRows.length)];
-        const script = buildScript(project, idea, { product, platform: 'reels', duration: project.duration_sec });
+        // 80/20: продаём не в каждом ролике, иначе падает досмотр и охват.
+        // Детерминированно: каждый 4-й выпуск — прямой CTA, остальные — польза.
+        const promoDirect = (d + k) % 4 === 0;
+        const episodeProduct = promoDirect ? product : null;
+        const script = buildScript(project, idea, { product: episodeProduct, platform: 'reels', duration: project.duration_sec });
         // публикуем в локальные часы (11:00 и 19:00 — пики ленты), а не «сейчас + 9 часов»
         const dayParts = localParts(addDays(ts, -d), process.env.PULSE_TZ || 'Europe/Moscow');
         const hourSlot = [11, 19, 15][k % 3];
@@ -225,7 +232,7 @@ export function seedBase() {
         const risk = riskScore(`${idea.title} ${script.caption}`);
         db.prepare(`INSERT INTO episodes (id, project_id, idea_id, script_id, product_id, account_id, title, description, hashtags, scenes, cover_seed, topic, format, status, stage, progress, risk, error, attempts, autopilot, ab_test, scheduled_at, published_at, cost_cents, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'published', 'published', 100, ?, NULL, 1, 1, 1, ?, ?, ?, ?, ?)`)
-          .run(episodeId, project.id, idea.id, scriptId, product.id, idea.title, script.caption,
+          .run(episodeId, project.id, idea.id, scriptId, episodeProduct?.id || null, idea.title, script.caption,
             JSON.stringify(script.hashtags), JSON.stringify(script.scenes), `${episodeId}-${idea.title}`,
             idea.title, idea.format, risk, publishedAt, publishedAt, EPISODE_COST_CENTS, publishedAt, publishedAt);
 

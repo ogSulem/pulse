@@ -231,6 +231,17 @@ const publish = {
   },
 };
 
+/**
+ * Закреплённый комментарий — так продукт попадает к зрителю там, где ссылка
+ * в описании не кликабельна (TikTok). В demo-режиме просто фиксируем факт.
+ */
+publish.comment = async ({ platform, account, externalId, text }) => {
+  if (platform !== 'tiktok') return { skipped: true };
+  const token = tokenOf(account);
+  if (MODE() !== 'live' || !token) return { demo: true, commentId: `cm_demo_${Math.random().toString(36).slice(2, 8)}` };
+  return tiktok.comment({ token, videoId: externalId, text });
+};
+
 /** Счётчики опубликованных роликов из API площадок (live-режим). */
 const stats = {
   async fetch({ platform, account, externalIds = [] }) {

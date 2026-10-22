@@ -710,3 +710,37 @@ curl -s "http://localhost:8080/api/growth/hooks?topic=привычки&platform=
 
 Все числа берутся из `engine/limits.js` и `engine/compliance.js` — база знаний не может противоречить
 проверкам публикации.
+
+## 14. Студия: креатив под ключ (v7)
+
+### `GET /api/studio/options`
+
+Что можно собрать: проекты, активные продукты, площадки с лимитами и текущая доля продающих
+роликов (`promoShare`).
+
+### `POST /api/studio`
+
+Собирает пакет под площадку. Тело: `{ projectId, ideaId?, platform, durationSec, promo, productId?, count? }`,
+где `promo` — `auto` (решает правило 80/20) | `direct` | `soft` | `none`.
+
+Ответ: `{ project, platform, durationSec, promo, best, candidates, guidance }`.
+Каждый кандидат содержит `scenes` (текст титра + роль + секунды), `captions` для всех трёх площадок,
+`title`, `coverText`, `pinnedComment`, `hashtags`, `scores { total, hook, viral, retention, retentionTarget, compliance }`,
+`warnings[]` и `alternativeHooks[]`.
+
+### `POST /api/studio/queue`
+
+Ставит готовый пакет в очередь. Тело: `{ projectId, platform, durationSec, promo, productId?, package? }`.
+Если `package` не передан, пакет собирается заново. Возвращает созданный эпизод со статусом `queued`;
+сцены, описание под площадку, `promo` и паспорт креатива уже записаны.
+
+### `POST /api/episodes/{id}/package/regenerate`
+
+Пересобирает креатив существующего ролика (`{ platform?, promo? }`) и возвращает
+`{ episode, candidates, guidance }`. Старые сцены и описание заменяются, продукт и промо-режим
+остаются, если не переданы явно.
+
+### `POST /api/pipeline/drain`
+
+Прогоняет очередь. По умолчанию отвечает сразу: `{ started: true, limit, queue }` — рендер
+продолжается в фоне. Для сценариев и CI: `{ "wait": true }` → `{ processed, queue, waited: true }`.
