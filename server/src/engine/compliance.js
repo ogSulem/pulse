@@ -44,7 +44,7 @@ export const PLATFORM_RULES = {
     hashtagsMax: 30,
     videoMaxSec: 900,
     videoMaxBytes: 300 * 1024 * 1024,
-    publishPer24h: 100,          // лимит API, фактически в UI держим меньший
+    publishPer24h: 50,           // Instagram: 50 API-публикаций в скользящие 24 ч
     apiCallsPerUser: '4800 × показы / 24 ч',
     notes: [
       'Один API-пост = 1 единица лимита на публикацию (Reels, фото, карусель).',

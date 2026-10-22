@@ -16,6 +16,7 @@
 import { db, getSettings, nowIso } from '../core/db.js';
 import { uid, num, clamp, addDays, parseJson } from '../core/utils.js';
 import { log } from '../core/logger.js';
+import { PLATFORMS, PLATFORM_LABELS, PLATFORM_API_LIMITS, platformCap } from './limits.js';
 
 const DAY = 86400000;
 const iso = (ms) => new Date(ms).toISOString();
@@ -25,7 +26,8 @@ const hashish = (str) => {
   return Math.abs(h);
 };
 
-export const PLATFORM_LABELS = { reels: 'Instagram Reels', tiktok: 'TikTok', youtube: 'YouTube Shorts' };
+// метки площадок приходят из engine/limits.js — один источник правды
+export { PLATFORM_LABELS };
 
 export const rpmFor = (platform, settings = getSettings()) => {
   if (platform === 'tiktok') return num(settings.rpm_tiktok, 60);
@@ -319,11 +321,14 @@ export function transparency() {
     WHERE viral > 0 AND viral < ? ORDER BY viral ASC LIMIT 6`).all(num(settings.min_viral_score, 45));
   const failed = db.prepare("SELECT id, title, error, stage FROM episodes WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 5").all();
   const media = db.prepare("SELECT COUNT(*) n, SUM(video_bytes) bytes, SUM(render_ms) ms FROM episodes WHERE video_bytes > 0").get();
-  const quotas = ['reels', 'tiktok', 'youtube'].map((platform) => {
+  const quotas = PLATFORMS.map((platform) => {
     const since = addDays(nowIso(), -1);
     const used = db.prepare("SELECT COUNT(*) n FROM publications WHERE platform = ? AND published_at > ? AND status = 'published'").get(platform, since).n;
-    const cap = platform === 'tiktok' ? 15 : platform === 'youtube' ? 20 : 50;
-    return { platform, label: PLATFORM_LABELS[platform], used, cap, left: Math.max(0, cap - used), window: 'скользящие 24 ч' };
+    const cap = platformCap(platform, settings);
+    return {
+      platform, label: PLATFORM_LABELS[platform], used, cap, left: Math.max(0, cap - used),
+      window: 'скользящие 24 ч', apiLimit: PLATFORM_API_LIMITS[platform].per24h, apiNote: PLATFORM_API_LIMITS[platform].note,
+    };
   });
 
   const checks = [

@@ -16,9 +16,13 @@ import { db, getSettings, nowIso } from '../core/db.js';
 import { addDays, clamp, num, parseJson } from '../core/utils.js';
 import { scoreViral } from './viral.js';
 import { forecastEpisode, baselineViews } from './forecast.js';
-import { checkCompliance } from './compliance.js';
+import { checkCompliance, PLATFORM_RULES } from './compliance.js';
 import { adsOverview } from './ads.js';
-import { moneySummary } from './money.js';
+import { moneySummary, rpmFor } from './money.js';
+import { platformQuota } from './pipeline.js';
+import { PLATFORMS, PLATFORM_LABELS, PLATFORM_API_LIMITS } from './limits.js';
+import { bestHours } from './schedule.js';
+import { generateIdeas } from './brain.js';
 
 const DAY = 86400000;
 
@@ -107,6 +111,15 @@ export function portfolio() {
     const usedToday = db.prepare('SELECT used FROM accounts_daily WHERE account_id = ? AND day = ?').get(a.id, today)?.used || 0;
     const playbook = PLATFORM_PLAYBOOK[a.platform] || PLATFORM_PLAYBOOK.reels;
     const followers = num(a.followers, 0);
+    // деньги аккаунта за 30 дней: показы по RPM + продажи по его публикациям + спонсорские выходы
+    const conv = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(v.value_cents),0) s FROM conversions v
+        JOIN publications pb ON pb.id = v.publication_id
+        WHERE pb.account_id = ? AND v.ts >= ?`).get(a.id, since30);
+    const sponsor = db.prepare(`SELECT COALESCE(SUM(cp.revenue_cents),0) s FROM campaign_posts cp
+        JOIN publications pb ON pb.id = cp.publication_id
+        WHERE pb.account_id = ? AND pb.published_at >= ?`).get(a.id, since30).s || 0;
+    const revenueAds = (num(agg.views, 0) / 1000) * rpmFor(a.platform, settings);
+    const revenue = Math.round((revenueAds + conv.s / 100 + sponsor / 100) * 100) / 100;
     const retention = round1(agg.retention || 0);
     const consistency = clamp(Math.round((week.posts / Math.max(1, playbook.postsPerWeek[0])) * 100), 0, 100);
 
@@ -133,6 +146,10 @@ export function portfolio() {
       dailyLimit: num(a.daily_limit, 3), usedToday, leftToday: Math.max(0, num(a.daily_limit, 3) - usedToday),
       minGapMin: num(a.min_gap_min, 90), window: `${a.window_start}–${a.window_end}`,
       lastAt: agg.last_at, health, consistency, nextAction,
+      revenue, revenueAds: Math.round(revenueAds * 100) / 100, revenueSales: Math.round((conv.s / 100) * 100) / 100,
+      revenueSponsor: Math.round((sponsor / 100) * 100) / 100, conversions: conv.n,
+      rpm: num(agg.views, 0) > 0 ? Math.round((revenueAds / (num(agg.views, 0) / 1000)) * 100) / 100 : 0,
+      profitPerPost: num(agg.posts, 0) > 0 ? Math.round((revenue / num(agg.posts, 0)) * 100) / 100 : 0,
       connected: Boolean(a.access_token),
       externalId: a.external_id || null,
       projectId: a.project_id || null,
@@ -155,6 +172,14 @@ export function portfolio() {
       retention: round1(median(list.map((r) => r.retention).filter(Boolean))),
       retentionTarget: Math.round(playbook.completionTarget * 100),
       idealSec: playbook.idealSec,
+      revenue: Math.round(list.reduce((s, r) => s + r.revenue, 0) * 100) / 100,
+      revenueAds: Math.round(list.reduce((s, r) => s + r.revenueAds, 0) * 100) / 100,
+      revenueSales: Math.round(list.reduce((s, r) => s + r.revenueSales, 0) * 100) / 100,
+      revenueSponsor: Math.round(list.reduce((s, r) => s + r.revenueSponsor, 0) * 100) / 100,
+      profitPerPost: (() => {
+        const posts = list.reduce((s, r) => s + r.posts30, 0);
+        return posts ? Math.round((list.reduce((s, r) => s + r.revenue, 0) / posts) * 100) / 100 : 0;
+      })(),
     };
   }).filter(Boolean);
 
@@ -176,6 +201,12 @@ export function portfolio() {
       followers: totalFollowers,
       views30, views7, posts7,
       avgRetention: round1(median(rows.map((r) => r.retention).filter(Boolean))),
+      revenue: Math.round(rows.reduce((s, r) => s + r.revenue, 0) * 100) / 100,
+      revenueAds: Math.round(rows.reduce((s, r) => s + r.revenueAds, 0) * 100) / 100,
+      revenueSales: Math.round(rows.reduce((s, r) => s + r.revenueSales, 0) * 100) / 100,
+      revenueSponsor: Math.round(rows.reduce((s, r) => s + r.revenueSponsor, 0) * 100) / 100,
+      bestAccount: rows.slice().sort((x, y) => y.revenue - x.revenue)[0]?.handle || null,
+      bestPlatform: byPlatform.slice().sort((x, y) => y.revenue - x.revenue)[0]?.label || null,
       capacityPerDay,
       demandPerDay: num(demandPerDay, 0),
       // сколько роликов ещё можно выпустить сегодня, не выходя за квоты
@@ -725,9 +756,9 @@ export function publishGate(episodeId) {
   const duration = scenes.reduce((s, x) => s + num(x.seconds, 0), 0);
   const retention = retentionPlan({ scenes, title: episode.title, description: episode.description, platform, durationSec: duration });
   const forecast = forecastEpisode({ episode, project, account, platform });
-  const quota = db.prepare(`SELECT COALESCE(SUM(published_at > ?),0) n FROM publications WHERE platform = ? AND status = 'published'`)
-    .get(addDays(nowIso(), -1), platform);
-  const cap = platform === 'tiktok' ? 15 : platform === 'youtube' ? 20 : 50;
+  // квоту считаем тем же кодом, что и публикация, — иначе вердикт и реальность расходятся
+  const quota = platformQuota(platform);
+  const cap = quota.cap;
 
   const blockers = [];
   const warnings = [];
@@ -736,13 +767,13 @@ export function publishGate(episodeId) {
   if (retention.verdict === 'rewrite') warnings.push({ id: 'retention', text: `Удержание под вопросом: ${retention.checks.filter((c) => !c.ok).length} замечаний`, fix: retention.checks.find((c) => !c.ok)?.fix });
   else if (retention.verdict === 'tune') warnings.push({ id: 'retention-tune', text: `Удержание ${retention.predictedCompletion}% — можно лучше`, fix: retention.checks.find((c) => !c.ok)?.fix });
   if (viral.score < num(settings.min_viral_score, 45)) warnings.push({ id: 'viral-low', text: `Вирусный скор ${viral.score} ниже порога ${num(settings.min_viral_score, 45)}`, fix: viral.advice?.[0] || 'Сменить хук' });
-  if (quota.n >= cap) warnings.push({ id: 'quota', text: `Квота ${platform} на сутки исчерпана (${quota.n}/${cap})`, fix: 'Перенести публикацию на завтра' });
+  if (quota.left <= 0) warnings.push({ id: 'quota', text: `Квота ${PLATFORM_LABELS[platform] || platform} на сутки исчерпана (${quota.used}/${cap})`, fix: 'Перенести публикацию на завтра' });
 
   const score = Math.round(
     clamp(compliance.score, 0, 100) * 0.34
     + clamp(viral.score, 0, 100) * 0.26
     + (retention.predictedCompletion / retention.targetCompletion) * 100 * 0.2
-    + clamp(80 - (quota.n / Math.max(1, cap)) * 40, 0, 100) * 0.1
+    + clamp(80 - (quota.used / Math.max(1, cap)) * 40, 0, 100) * 0.1
     + (forecast.expectedViews > 0 ? 100 : 0) * 0.1,
   );
 
@@ -752,7 +783,7 @@ export function publishGate(episodeId) {
     score: clamp(score, 0, 100),
     blockers, warnings,
     compliance, viral, retention, forecast,
-    quota: { used: quota.n, cap, left: Math.max(0, cap - quota.n) },
+    quota: { used: quota.used, cap, left: quota.left },
     campaign: campaign ? { id: campaign.id, name: campaign.name, erid: campaign.erid || '', marking: campaign.marking } : null,
     checkedAt: nowIso(),
   };
@@ -761,3 +792,405 @@ export function publishGate(episodeId) {
 export const GROWTH_PLATFORM_LABELS = Object.fromEntries(
   Object.entries(PLATFORM_PLAYBOOK).map(([k, v]) => [k, v.label]),
 );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Контент-план: что, когда и на какой площадке выйдет на этой неделе.
+// Это не «идеи в вакууме»: формат, время и хук берутся из фактических данных —
+// лучших часов, работающих форматов и лаборатории хуков.
+// ─────────────────────────────────────────────────────────────────────────────
+const WEEKDAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+
+// Расписание площадок: TikTok и Reels — ежедневно, Shorts — 3–5 в неделю
+// (алгоритм Shorts любит регулярность, но не поток).
+const PLATFORM_DAYS = {
+  tiktok: [0, 1, 2, 3, 4, 5, 6],
+  reels: [0, 1, 2, 3, 4, 5, 6],
+  youtube: [1, 3, 5, 6],
+};
+
+/** Короткая тема для хука: 2–3 слова, не обрезая посреди фразы */
+function shortenTopic(title, fallback = '') {
+  const LEAD = /^(почему|как|что|зачем|когда|сколько|разбор|коротко|почему|итог)[:\s]+/i;
+  let text = String(title || '').replace(/[«»"]/g, '').trim();
+  // шаблон хука сам задаёт вопрос — не дублируем «почему почему»
+  while (LEAD.test(text)) text = text.replace(LEAD, '');
+  const words = text.split(/\s+/).filter(Boolean);
+  const out = [];
+  for (const w of words) {
+    if (out.length >= 4) break;
+    if (out.length && `${out.join(' ')} ${w}`.length > 34) break;
+    out.push(w);
+  }
+  const clean = out.join(' ').replace(/[,:;—–-]+$/, '').trim();
+  return clean.length >= 4 ? clean : String(fallback || '').slice(0, 34);
+}
+
+export function contentPlan({ days = 7, projectId = null } = {}) {
+  const settings = getSettings();
+  const span = clamp(num(days, 7), 1, 28);
+  const projects = projectId
+    ? db.prepare('SELECT * FROM projects WHERE id = ?').all(projectId)
+    : db.prepare('SELECT * FROM projects WHERE archived = 0 ORDER BY created_at').all();
+
+  const radar = trendRadar({ days: 30 });
+  const hotFormats = (radar.own?.formats || []).filter((f) => (f.lift || 0) >= 1).map((f) => f.key);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  // один день — одна запись: бренды складываются в общий календарь,
+  // иначе «план на неделю» превращался в три отдельных недели
+  const byDate = new Map();
+  for (let d = 0; d < span; d++) {
+    const date = new Date(today.getTime() + d * DAY);
+    byDate.set(date.toISOString().slice(0, 10), { date: date.toISOString().slice(0, 10), weekday: WEEKDAYS[date.getDay()], slots: [] });
+  }
+  const perPlatform = { reels: 0, tiktok: 0, youtube: 0 };
+  let expectedViews = 0;
+  let expectedRevenue = 0;
+
+  for (const [brandIndex, project] of projects.entries()) {
+    // темы: сначала неиспользованная библиотека проекта, потом добор из мозга
+    const ideaRows = db.prepare(`SELECT title, hook, format FROM ideas
+        WHERE project_id = ? ORDER BY (status = 'new') DESC, score DESC LIMIT 60`).all(project.id);
+    const ideas = ideaRows.length ? ideaRows : generateIdeas(project, { count: 21 })
+      .map((i) => ({ title: i.title, hook: i.hook, format: i.format }));
+    let cursor = 0;
+    const formats = [project.format, ...hotFormats].filter(Boolean);
+
+    for (let d = 0; d < span; d++) {
+      const date = new Date(today.getTime() + d * DAY);
+      const dow = date.getDay();
+      const day = byDate.get(date.toISOString().slice(0, 10));
+      for (const platform of ['tiktok', 'reels', 'youtube']) {
+        if (!PLATFORM_DAYS[platform].includes(dow)) continue;
+        // аккаунт площадки этого бренда должен существовать — иначе слот фантомный
+        const acc = db.prepare(`SELECT * FROM accounts WHERE platform = ? AND status IN ('healthy','warmup')
+            AND (project_id IS NULL OR project_id = ?) ORDER BY quality DESC LIMIT 1`).get(platform, project.id);
+        if (!acc) continue;
+        // не больше постов в день, чем разрешает квота аккаунта
+        const perDay = platform === 'youtube' ? 1 : Math.min(2, num(acc.daily_limit, 2));
+        for (let k = 0; k < perDay; k++) {
+          const hours = bestHours(platform, 4);
+          const hour = hours[(d + k + brandIndex) % Math.max(1, hours.length)]?.hour ?? 12;
+          const idea = ideas[cursor % Math.max(1, ideas.length)] || { title: project.niche, hook: '', format: project.format };
+          cursor += 1;
+          const format = formats[(cursor + k) % Math.max(1, formats.length)] || project.format;
+          // в хук идёт короткая тема (2–4 значимых слова), а не весь заголовок ролика:
+          // «Почему «Нейросети, которые реально делают работу за тебя» не даёт…» — это не хук
+          const shortTopic = shortenTopic(idea.title, project.niche);
+          const lab = hookLab({ topic: shortTopic || project.niche, platform, niche: project.niche });
+          // берём не только победителя: план должен показывать разные ходы,
+          // иначе все ролики недели начинаются одинаково
+          const hookPick = lab.hooks[(d + k + brandIndex) % Math.min(3, lab.hooks.length)] || lab.best;
+          const base = baselineViews(project.id, platform);
+          const view = Math.round(base.views * (0.9 + (hookPick.score - 60) / 300));
+          const revenue = (view / 1000) * rpmFor(platform, settings);
+          expectedViews += view;
+          expectedRevenue += revenue;
+          perPlatform[platform] += 1;
+          day.slots.push({
+            platform,
+            platformLabel: PLATFORM_PLAYBOOK[platform].label,
+            project: project.name,
+            account: { id: acc.id, handle: acc.handle },
+            time: `${String(hour).padStart(2, '0')}:07`,
+            topic: idea.title,
+            format,
+            hook: hookPick.text,
+            hookScore: hookPick.score,
+            fitsWindow: hookPick.fitsWindow,
+            expectedViews: view,
+            expectedRevenue: Math.round(revenue * 100) / 100,
+            targetSec: PLATFORM_PLAYBOOK[platform].idealSec.join('–'),
+            why: `${PLATFORM_PLAYBOOK[platform].hookWindowSec} с на хук · досмотр ${Math.round(PLATFORM_PLAYBOOK[platform].completionTarget * 100)}% · ${idea.hook ? 'тема из библиотеки' : 'новая тема по нише'}`,
+          });
+        }
+      }
+    }
+  }
+
+  const out = [...byDate.values()].map((day) => ({
+    ...day,
+    // внутри дня — по времени: это календарь, а не список
+    slots: day.slots.sort((x, y) => x.time.localeCompare(y.time)),
+  }));
+
+  const totalPosts = out.reduce((s, day) => s + day.slots.length, 0);
+  return {
+    updatedAt: nowIso(),
+    days: span,
+    plan: out,
+    totals: {
+      posts: totalPosts,
+      perWeek: Math.round((totalPosts / span) * 7),
+      expectedViews,
+      expectedRevenue: Math.round(expectedRevenue * 100) / 100,
+      byPlatform: perPlatform,
+    },
+    rules: [
+      'Один ролик — один аккаунт внутри площадки; на разные площадки публикуем один и тот же ролик.',
+      'Shorts — 3–5 в неделю: чаще не значит лучше, алгоритм проверяет каждый ролик на новой аудитории.',
+      'Первые 60 минут после выхода — отвечаем на комментарии: это сильный сигнал обсуждения.',
+      'Формат ротируется: если «POV» просел по охвату, следующий слот берёт «до / после» или «кейс».',
+    ],
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// База знаний: всё, что нужно знать про площадки, в одном месте и с числами.
+// ─────────────────────────────────────────────────────────────────────────────
+export function platformKnowledge() {
+  const rules = PLATFORM_RULES;
+  const demotions = {
+    tiktok: [
+      'Водяные знаки и логотипы других площадок — прямая демотивация.',
+      'Репосты чужого контента без переработки: дубликаты алгоритм находит по хешу.',
+      'Кликбейт без развязки и «подпишись, чтобы узнать» — снижение показов.',
+      'Видео короче 1 секунды или без звука-смысла — не попадает в рекомендации.',
+    ],
+    reels: [
+      'Видимые водяные знаки и низкое разрешение (< 720p) — охват падает.',
+      'Репосты из TikTok с логотипом: Instagram определяет и срезает показы.',
+      'Больше 8–10 тегов — размытие темы, хуже распределение.',
+      'Слишком длинное вступление: до 40% уходят в первые 3 секунды.',
+    ],
+    youtube: [
+      'Водяные знаки и репосты: Shorts демотивирует чужой контент.',
+      'Вводящий в заблуждение заголовок — ограничение показов.',
+      'Свайп в первые 2 секунды выше 40% — ролик не получает следующую волну.',
+      'Нерегулярность: 3–5 Shorts в неделю стабильно лучше «20 за день и месяц тишины».',
+    ],
+  };
+  const official = {
+    tiktok: 'https://developers.tiktok.com/doc/content-posting-api-get-started',
+    reels: 'https://developers.facebook.com/docs/instagram-platform/content-publishing',
+    youtube: 'https://developers.google.com/youtube/v3/docs/videos/insert',
+  };
+
+  const platforms = ['tiktok', 'reels', 'youtube'].map((platform) => {
+    const pb = PLATFORM_PLAYBOOK[platform];
+    const api = PLATFORM_API_LIMITS[platform];
+    const r = rules[platform];
+    return {
+      platform,
+      label: pb.label,
+      api: { per24h: api.per24h, initPerMin: api.initPerMin, note: api.note, official: official[platform] },
+      fields: {
+        captionMax: r.captionMax,
+        captionMaxBytes: r.captionMaxBytes || null,
+        titleMax: r.titleMax || null,
+        hashtagsRecommended: r.hashtagsRecommended,
+        hashtagsMax: r.hashtagsMax,
+        // рабочее окно тегов: у Shorts 3–5 (лишние режут ключевые слова), у Reels/TikTok 5–8
+        tagRange: platform === 'youtube' ? [3, 5] : [5, 8],
+        videoMaxSec: r.videoMaxSec,
+        videoMaxBytes: r.videoMaxBytes,
+      },
+      algorithm: {
+        hookWindowSec: pb.hookWindowSec,
+        idealSec: pb.idealSec,
+        completionTarget: Math.round(pb.completionTarget * 100),
+        retentionBench: pb.retentionBench,
+        postsPerWeek: pb.postsPerWeek,
+        signals: pb.signals,
+        caption: pb.caption,
+      },
+      demotions: demotions[platform],
+      notes: pb.notes,
+    };
+  });
+
+  const monetization = [
+    {
+      id: 'youtube-ypp', platform: 'youtube', label: 'YouTube Partner Program',
+      tiers: [
+        { name: 'Ранний доступ', followers: 500, uploads90d: 3, shortsViews90d: 3_000_000, hours: 3000, gives: 'фанаты, Shopping, заявка в программу' },
+        { name: 'Полная монетизация', followers: 1000, uploads90d: 3, shortsViews90d: 10_000_000, hours: 4000, gives: 'реклама Shorts (45% создателю), watch page 55%' },
+      ],
+      changes: 'С 01.02.2027 требования удваиваются: 20 млн просмотров Shorts или 8 000 часов за 90 дней',
+      region: 'зависит от страны аудитории',
+    },
+    {
+      id: 'tiktok-rewards', platform: 'tiktok', label: 'TikTok Creator Rewards',
+      tiers: [{ name: 'Порог', followers: 10_000, views30d: 100_000, videoSec: 61, qualifiedViews: 1000 }],
+      changes: 'Платят только за оригинальные видео > 1 минуты; дуэты, stitch, фото-режим и реклама вне программы',
+      region: 'только US, UK, DE, FR, JP, KR, MX, BR — в РФ недоступна',
+    },
+    {
+      id: 'ig-bonus', platform: 'reels', label: 'Instagram (бонусы Reels)',
+      tiers: [], changes: 'Бонусы Reels — только по приглашению, зависят от страны аккаунта',
+      region: 'по приглашению, РФ не входит',
+    },
+  ];
+
+  return {
+    updatedAt: nowIso(),
+    platforms,
+    monetization,
+    general: {
+      quotas: PLATFORMS.map((p) => ({
+        platform: p, label: PLATFORM_LABELS[p],
+        api: PLATFORM_API_LIMITS[p], pulseCapRule: 'min(темп × 5–17, лимит API)',
+      })),
+      marking: {
+        ru: 'Реклама у блогеров в РФ маркируется: пометка «Реклама», данные рекламодателя и erid в описании. Pulse вставляет это автоматически и блокирует публикацию без маркировки.',
+        ai: 'Синтетический контент помечается как AI-generated: и по правилам площадок, и по здравому смыслу.',
+      },
+      truth: [
+        'Просмотры Shorts не конвертируются в 4000 часов YPP — у Shorts отдельный порог.',
+        'RPM Shorts обычно ниже, чем у длинных видео: там работает watch page.',
+        'Регион аккаунта решает, какие программы доступны. Pulse не обещает выплат, которых в регионе нет.',
+      ],
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Аудит: что прямо сейчас мешает охвату и деньгам. Каждый пункт — с ценой
+// вопроса и конкретным действием, а не «рекомендация».
+// ─────────────────────────────────────────────────────────────────────────────
+export function platformAudit() {
+  const settings = getSettings();
+  const issues = [];
+  const since30 = addDays(nowIso(), -30);
+  const accounts = db.prepare(`SELECT a.*, p.name AS project_name FROM accounts a
+      LEFT JOIN projects p ON p.id = a.project_id`).all();
+  const active = accounts.filter((a) => a.status === 'healthy' || a.status === 'warmup');
+
+  // 1. Приватные публикации = нулевой охват. Это самая дорогая ошибка.
+  if (Number(settings.youtube_audited) !== 1) {
+    const n = active.filter((a) => a.platform === 'youtube').length;
+    if (n) issues.push({
+      id: 'youtube-private', severity: 'block', title: 'Shorts уходят приватно',
+      impact: `${n} YouTube-аккаунт(а) публикуют без охвата: до аудита Google видео доступно только вам`,
+      fix: 'Пройти аудит проекта Google и включить «Проект Google прошёл аудит» в настройках',
+      action: { label: 'Открыть настройки', to: '#/settings' },
+    });
+  }
+  if (Number(settings.tiktok_audited) !== 1 && active.some((a) => a.platform === 'tiktok')) {
+    issues.push({
+      id: 'tiktok-private', severity: 'warn', title: 'TikTok публикует SELF_ONLY',
+      impact: 'Ролики в TikTok видны только вам — просмотров и подписчиков не будет',
+      fix: 'Подать клиент TikTok Content Posting на аудит; после одобрения переключить тумблер',
+      action: { label: 'Открыть настройки', to: '#/settings' },
+    });
+  }
+
+  // 2. Аккаунты без токена: конвейер работает, но публикует в демо-режиме.
+  const noToken = active.filter((a) => !a.access_token);
+  if (noToken.length) {
+    issues.push({
+      id: 'no-token', severity: 'warn', title: `Аккаунты без API: ${noToken.length}`,
+      impact: `@${noToken.slice(0, 3).map((a) => a.handle).join(', @')}${noToken.length > 3 ? '…' : ''} не публикуют в реальные каналы`,
+      fix: 'Подключить токен у аккаунта: OAuth-приложение площадки + access token',
+      action: { label: 'Открыть аккаунты', to: '#/accounts' },
+    });
+  }
+
+  // 3. Бренд без аккаунта на площадке — половина охвата теряется молча.
+  const projects = db.prepare('SELECT * FROM projects WHERE archived = 0').all();
+  for (const project of projects) {
+    const own = accounts.filter((a) => a.project_id === project.id);
+    const usable = own.filter((a) => a.status === 'healthy' || a.status === 'warmup');
+    const missing = PLATFORMS.filter((p) => !own.some((a) => a.platform === p));
+    const resting = PLATFORMS.filter((p) => !usable.some((a) => a.platform === p) && !missing.includes(p));
+    if (missing.length) {
+      issues.push({
+        id: `brand-gap-${project.id}`, severity: 'info', title: `${project.name}: нет аккаунта на ${missing.map((p) => PLATFORM_LABELS[p]).join(', ')}`,
+        impact: 'Ролики проекта не выходят на этих площадках — теряется бесплатный охват',
+        fix: 'Добавить аккаунт и привязать его к проекту',
+        action: { label: 'Добавить аккаунт', to: '#/accounts' },
+      });
+    }
+    if (resting.length) {
+      issues.push({
+        id: `brand-rest-${project.id}`, severity: 'warn', title: `${project.name}: аккаунт на ${resting.map((p) => PLATFORM_LABELS[p]).join(', ')} не публикует`,
+        impact: 'Аккаунт в кулдауне или прогреве: площадка не получает контент вовсе',
+        fix: 'Проверить ограничения аккаунта и вернуть в работу по плану восстановления',
+        action: { label: 'Открыть аккаунты', to: '#/accounts' },
+      });
+    }
+  }
+
+  // 4. Удержание ниже нормы площадки = алгоритм не даёт следующую волну.
+  for (const a of active) {
+    const pb = PLATFORM_PLAYBOOK[a.platform];
+    const row = db.prepare(`SELECT COUNT(*) n, AVG(watch_avg) r FROM publications
+        WHERE account_id = ? AND status = 'published' AND published_at >= ?`).get(a.id, since30);
+    if (row.n >= 3 && row.r > 0 && row.r < pb.completionTarget * 100 * 0.85) {
+      issues.push({
+        id: `retention-${a.id}`, severity: 'warn', title: `@${a.handle}: удержание ${Math.round(row.r)}% при норме ${Math.round(pb.completionTarget * 100)}%`,
+        impact: `Площадка ${pb.label} не даёт роликам следующую волну показов`,
+        fix: `Сократить хук до ${pb.hookWindowSec} с и держать длину ${pb.idealSec[0]}–${pb.idealSec[1]} с`,
+        action: { label: 'Открыть хуки', to: '#/growth', tab: 'creative' },
+      });
+    }
+  }
+
+  // 5. Реклама без erid — блок публикации и риск штрафа.
+  const badCampaigns = db.prepare(`SELECT id, name FROM campaigns
+      WHERE status = 'active' AND marking = 'erid' AND (erid IS NULL OR erid = '')`).all();
+  for (const c of badCampaigns) {
+    issues.push({
+      id: `campaign-${c.id}`, severity: 'block', title: `Кампания «${c.name}» без erid`,
+      impact: 'Публикация с этой кампанией блокируется: реклама без маркировки — штраф',
+      fix: 'Внести erid из ОРД или сменить тип маркировки на «бренд»',
+      action: { label: 'Открыть рекламу', to: '#/ads' },
+    });
+  }
+
+  // 6. Экономика: RPM не задан — прогноз дохода врёт в меньшую сторону.
+  const rpms = { tiktok: num(settings.rpm_tiktok, 0), reels: num(settings.rpm_reels, 0), youtube: num(settings.rpm_youtube, 0) };
+  const zeroRpm = Object.entries(rpms).filter(([, v]) => v <= 0).map(([k]) => PLATFORM_LABELS[k]);
+  if (zeroRpm.length) {
+    issues.push({
+      id: 'rpm-zero', severity: 'info', title: `RPM не задан: ${zeroRpm.join(', ')}`,
+      impact: 'Доход от показов считается нулевым — прогноз прибыли занижен',
+      fix: 'Поставить фактический RPM после первых выплат',
+      action: { label: 'Открыть настройки', to: '#/settings' },
+    });
+  }
+
+  // 7. Длина ролика против порога монетизации: TikTok Rewards платит только за видео > 60 с.
+  const maxSec = Number(process.env.PULSE_RENDER_MAX_SEC || 42);
+  if (active.some((a) => a.platform === 'tiktok') && maxSec < 61) {
+    // длительность ролика хранится в сценарии (episodes.scenes), отдельной колонки нет
+    const sceneRows = db.prepare(`SELECT e.scenes FROM episodes e
+        WHERE e.status = 'published' AND e.published_at >= ? LIMIT 200`).all(since30);
+    const durs = sceneRows.map((r) => parseJson(r.scenes, []).reduce((a, sc) => a + num(sc?.seconds, 0), 0)).filter((x) => x > 0);
+    const avgSec = durs.length ? Math.round(durs.reduce((a, b) => a + b, 0) / durs.length) : 32;
+    issues.push({
+      id: 'tiktok-length', severity: 'info', title: `Ролики ${Math.round(avgSec)} с — Creator Rewards платит только с 61 с`,
+      impact: 'Программа считается пройденной, но выплат не будет: TikTok платит за квалифицированные просмотры видео длиннее минуты',
+      fix: `Поднять PULSE_RENDER_MAX_SEC до 65 и длину проекта до 62–70 с (сейчас потолок ${maxSec} с); короткие ролики оставить для Reels и Shorts`,
+      action: { label: 'Открыть проекты', to: '#/projects' },
+    });
+  }
+
+  // 8. Простой аккаунтов: есть квота, но нет публикаций неделю.
+  const idle = active.filter((a) => {
+    const last = db.prepare('SELECT MAX(published_at) t FROM publications WHERE account_id = ?').get(a.id)?.t;
+    return last && (Date.now() - new Date(last).getTime()) / DAY > 7;
+  });
+  if (idle.length) {
+    issues.push({
+      id: 'idle', severity: 'warn', title: `Простой: ${idle.length} аккаунт(ов) без публикаций неделю`,
+      impact: 'Регулярность важнее количества: алгоритм перестаёт показывать аккаунт новой аудитории',
+      fix: 'Вернуть 1 пост в день и держать окно публикаций',
+      action: { label: 'Смотреть портфель', to: '#/growth' },
+    });
+  }
+
+  const weights = { block: 34, warn: 12, info: 4 };
+  const penalty = issues.reduce((s, i) => s + (weights[i.severity] || 0), 0);
+  return {
+    updatedAt: nowIso(),
+    score: clamp(100 - penalty, 0, 100),
+    counts: {
+      block: issues.filter((i) => i.severity === 'block').length,
+      warn: issues.filter((i) => i.severity === 'warn').length,
+      info: issues.filter((i) => i.severity === 'info').length,
+    },
+    issues,
+  };
+}

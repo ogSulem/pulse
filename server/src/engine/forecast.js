@@ -15,6 +15,7 @@ import { db, getSettings, nowIso } from '../core/db.js';
 import { log } from '../core/logger.js';
 import { num, clamp, addDays, parseJson } from '../core/utils.js';
 import { hourScores, platformForProject, localParts } from './schedule.js';
+import { rpmFor } from './money.js';
 
 const DAY = 86400000;
 
@@ -67,7 +68,7 @@ export function forecastEpisode({ episode, project = null, account = null, platf
   const accFactor = accountFactor(account);
   const expectedViews = Math.max(50, Math.round(base.views * viralFactor * hourFactor * accFactor));
 
-  const rpm = plat === 'tiktok' ? num(settings.rpm_tiktok, 10) : num(settings.rpm_reels, 25);
+  const rpm = rpmFor(plat, settings);
   const ctr = num(settings.ctr_estimate, 1.2) / 100;
   const convRate = num(settings.conv_rate, 1.6) / 100;
   const price = num(settings.product_price, 2490);
@@ -122,7 +123,7 @@ export function projectHealth(projectId, { days = 14 } = {}) {
       WHERE project_id = ? AND status = 'published' AND published_at > ? GROUP BY platform`).all(projectId, since);
   let adCents = 0;
   for (const p of platforms) {
-    const rpm = p.platform === 'tiktok' ? num(settings.rpm_tiktok, 10) : num(settings.rpm_reels, 25);
+    const rpm = rpmFor(p.platform, settings);
     adCents += Math.round((p.v / 1000) * rpm * 100);
   }
   const revenue = adCents + conv.v;

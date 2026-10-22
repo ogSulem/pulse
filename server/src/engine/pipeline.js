@@ -23,8 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const STAGE_PROGRESS = { idea: 6, script: 26, voice: 46, footage: 66, edit: 84, ready: 100, published: 100 };
-const PLATFORMS = ['reels', 'tiktok', 'youtube'];
-const PLATFORM_LABELS = { reels: 'Instagram Reels', tiktok: 'TikTok', youtube: 'YouTube Shorts' };
+import { PLATFORMS, PLATFORM_LABELS, platformCap } from './limits.js';
 
 const getProject = (id) => db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
 const getEpisode = (id) => db.prepare('SELECT * FROM episodes WHERE id = ?').get(id);
@@ -346,11 +345,7 @@ export function platformQuota(platform, accountId = null) {
   // TikTok — ~15 постов/сутки на креатора; Reels — 50 API-постов в окне 24 ч;
   // YouTube — 100 загрузок в сутки на проект, но алгоритму нужен ровный темп,
   // поэтому держим собственный потолок заметно ниже лимита API.
-  const cap = platform === 'tiktok'
-    ? Math.min(num(settings.max_daily_per_account, 3) * 5, 15)
-    : platform === 'youtube'
-      ? Math.min(num(settings.max_daily_per_account, 3) * 5, 20)
-      : Math.min(num(settings.max_daily_per_account, 3) * 17, 50);
+  const cap = platformCap(platform, settings);
   return { platform, used: row.n, cap, left: Math.max(0, cap - row.n) };
 }
 
@@ -449,6 +444,19 @@ registerHandler('episode.publish', async ({ episodeId }) => {
   const already = new Map(db.prepare(
     "SELECT platform, COUNT(*) n FROM publications WHERE episode_id = ? AND status = 'published' GROUP BY platform"
   ).all(episodeId).map((r) => [r.platform, r.n]));
+
+  // Аккаунты именно этого бренда (или универсальные). Если их нет вовсе —
+  // переносить публикацию бессмысленно: ролик будет висеть в очереди вечно.
+  const brandAccounts = db.prepare(`SELECT platform FROM accounts
+      WHERE status IN ('healthy','warmup') AND (project_id IS NULL OR project_id = ?)`).all(project?.id || null);
+  if (!brandAccounts.length) {
+    touchEpisode(episodeId, { status: 'review', error: 'У проекта нет аккаунтов — добавьте аккаунт и привяжите к бренду' });
+    log({
+      level: 'warn', actor: 'guard', action: 'publish.no_account', entityType: 'episode', entityId: episodeId,
+      message: `Публикация остановлена: у проекта «${project?.name || '—'}» нет активных аккаунтов`,
+    });
+    return;
+  }
 
   const pending = pickPlatforms(project).filter((p) => !already.has(p));
   // A/B гоняем только когда публикуем на одну площадку: иначе это удвоение

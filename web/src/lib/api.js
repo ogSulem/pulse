@@ -86,6 +86,9 @@ export const api = {
   growthRetention: (payload) => request('/growth/retention', { method: 'POST', body: payload }),
   growthMonetization: () => request('/growth/monetization'),
   growthPlaybook: (accountId) => request(`/growth/playbook/${accountId}`),
+  growthPlan: (params = {}) => request(`/growth/plan?${new URLSearchParams(params)}`),
+  growthKnowledge: () => request('/growth/knowledge'),
+  growthAudit: () => request('/growth/audit'),
   episodeGate: (id) => request(`/episodes/${id}/gate`),
 
   adsOverview: () => request('/ads/overview'),

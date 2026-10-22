@@ -442,6 +442,104 @@ try {
   ok('бренд-привязка аккаунтов', `${owned.length} брендов, по ${Math.round(owned.reduce((a, x) => a + x.n, 0) / owned.length)} аккаунта на бренд`);
 } catch (err) { fail('бренд-привязка аккаунтов', err); }
 
+// ── контент-план строится из данных ─────────────────────────────────────────
+try {
+  const { contentPlan } = await import('../src/engine/growth.js');
+  const plan = contentPlan({ days: 7 });
+  if (plan.plan.length !== 7) throw new Error(`дней в плане: ${plan.plan.length}`);
+  const slots = plan.plan.flatMap((d) => d.slots);
+  if (!slots.length) throw new Error('план пустой');
+  if (slots.some((x) => !x.hook || x.hook.includes('{topic}'))) throw new Error('в слоте нет готового хука');
+  if (slots.some((x) => !/^\d{2}:\d{2}$/.test(x.time))) throw new Error('некорректное время слота');
+  if (slots.some((x) => x.expectedViews <= 0)) throw new Error('нет прогноза охвата у слота');
+  // Shorts нельзя ставить чаще, чем раз в день на бренд: алгоритм не любит поток
+  const ytPerDay = Object.fromEntries(plan.plan.map((d) => [d.date, d.slots.filter((s) => s.platform === 'youtube').length]));
+  if (Object.values(ytPerDay).some((n) => n > 3)) throw new Error('Shorts поставлены слишком часто');
+  const hooks = new Set(slots.map((x) => x.hook));
+  if (hooks.size < 5) throw new Error(`хуки не разнообразятся: ${hooks.size} уникальных`);
+  if (!(plan.totals.expectedRevenue > 0)) throw new Error('план не считает доход');
+  ok('контент-план', `${plan.totals.posts} слотов на 7 дней, охват ${plan.totals.expectedViews}, доход ${plan.totals.expectedRevenue} ₽`);
+} catch (err) { fail('контент-план', err); }
+
+// ── база знаний: числа совпадают с правилами площадок ───────────────────────
+try {
+  const { platformKnowledge } = await import('../src/engine/growth.js');
+  const { PLATFORM_RULES } = await import('../src/engine/compliance.js');
+  const k = platformKnowledge();
+  if (k.platforms.length !== 3) throw new Error('не все площадки описаны');
+  for (const pl of k.platforms) {
+    if (pl.api.per24h !== PLATFORM_RULES[pl.platform].publishPer24h) {
+      throw new Error(`${pl.platform}: лимит в базе ${pl.api.per24h} против правила ${PLATFORM_RULES[pl.platform].publishPer24h}`);
+    }
+    if (!pl.demotions.length) throw new Error(`${pl.platform}: нет списка демотиваций`);
+    if (!pl.algorithm.hookWindowSec) throw new Error(`${pl.platform}: нет окна хука`);
+  }
+  const rewards = k.monetization.find((m) => m.id === 'tiktok-rewards');
+  if (!/РФ|US/.test(rewards.region)) throw new Error('региональное ограничение не описано');
+  if (!k.general.truth.length) throw new Error('нет честных границ');
+  ok('база знаний', `${k.platforms.length} площадки, лимиты сверены с комплаенсом, ${k.monetization.length} программ монетизации`);
+} catch (err) { fail('база знаний', err); }
+
+// ── аудит платформы ─────────────────────────────────────────────────────────
+try {
+  const { platformAudit } = await import('../src/engine/growth.js');
+  const a = platformAudit();
+  if (!(a.score >= 0 && a.score <= 100)) throw new Error('скор вне диапазона');
+  if (a.issues.some((i) => !i.title || !i.impact || !i.fix)) throw new Error('пункт без причины или действия');
+  if (a.issues.some((i) => !['block', 'warn', 'info'].includes(i.severity))) throw new Error('неизвестная важность');
+  const counts = ['block', 'warn', 'info'].reduce((acc, s) => acc + a.issues.filter((i) => i.severity === s).length, 0);
+  if (counts !== a.issues.length) throw new Error('счётчики не сходятся');
+  ok('аудит платформы', `${a.score}/100, ${a.counts.block} блок · ${a.counts.warn} внимание · ${a.counts.info} инфо`);
+} catch (err) { fail('аудит платформы', err); }
+
+// ── лимиты площадок считаются в одном месте ─────────────────────────────────
+try {
+  const { platformQuota } = await import('../src/engine/pipeline.js');
+  const { platformCap, PLATFORM_API_LIMITS } = await import('../src/engine/limits.js');
+  const { transparency } = await import('../src/engine/money.js');
+  const { getSettings } = await import('../src/core/db.js');
+  const settings = getSettings();
+  const t = transparency();
+  for (const platform of ['reels', 'tiktok', 'youtube']) {
+    const q = platformQuota(platform);
+    const cap = platformCap(platform, settings);
+    if (q.cap !== cap) throw new Error(`${platform}: квота ${q.cap} ≠ расчёт ${cap}`);
+    const row = t.quotas.find((x) => x.platform === platform);
+    if (!row || row.cap !== cap) throw new Error(`${platform}: прозрачность показывает ${row?.cap}, движок — ${cap}`);
+    if (cap > PLATFORM_API_LIMITS[platform].per24h) throw new Error(`${platform}: рабочий потолок выше лимита API`);
+  }
+  ok('лимиты в одном месте', 'пайплайн, прозрачность и гейт используют platformCap()');
+} catch (err) { fail('лимиты в одном месте', err); }
+
+// ── проект без аккаунтов не крутится в вечном переносе ─────────────────────
+try {
+  const { db, nowIso } = await import('../src/core/db.js');
+  const { createEpisode } = await import('../src/engine/pipeline.js');
+  const { enqueue, drain } = await import('../src/core/queue.js');
+  const fsx = await import('node:fs');
+  // берём реальный файл ролика из проверки рендера
+  const videoFile = fsx.readdirSync(process.env.PULSE_MEDIA_DIR || '.', { recursive: true })
+    .map(String).find((f) => f.endsWith('.mp4'));
+  if (!videoFile) throw new Error('нет файла ролика для проверки');
+  const pid = 'pr_smoke_noacc';
+  db.prepare(`INSERT INTO projects (id, name, niche, autopilot, posts_per_day, created_at, updated_at)
+    VALUES (?, 'SmokeNoAcc', 'тест', 1, 1, ?, ?)`).run(pid, nowIso(), nowIso());
+  const ep = createEpisode({ projectId: pid, autopilot: 1 }).id;
+  db.prepare("UPDATE episodes SET status = 'scheduled', video_path = ?, scheduled_at = ? WHERE id = ?")
+    .run(videoFile, nowIso(), ep);
+  const jobsBefore = db.prepare("SELECT COUNT(*) n FROM jobs WHERE payload LIKE ?").get(`%${ep}%`).n;
+  enqueue('episode.publish', { episodeId: ep });
+  await drain(3);
+  const row = db.prepare('SELECT status, error FROM episodes WHERE id = ?').get(ep);
+  if (row.status !== 'review') throw new Error(`статус после публикации без аккаунтов: ${row.status}`);
+  if (!/аккаунт/i.test(row.error || '')) throw new Error(`непонятная ошибка: ${row.error}`);
+  const jobsAfter = db.prepare("SELECT COUNT(*) n FROM jobs WHERE payload LIKE ? AND status = 'pending'").get(`%${ep}%`).n;
+  if (jobsAfter > jobsBefore) throw new Error('создан повторный перенос — ролик будет висеть вечно');
+  db.prepare('DELETE FROM episodes WHERE id = ?').run(ep);
+  db.prepare('DELETE FROM projects WHERE id = ?').run(pid);
+  ok('проект без аккаунтов', 'ролик ушёл в проверку с понятной причиной, цикл переносов не создан');
+} catch (err) { fail('проект без аккаунтов', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

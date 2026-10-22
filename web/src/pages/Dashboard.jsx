@@ -4,7 +4,7 @@ import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, Kpi, Progress, AreaChart, BarList, Segmented, Sparkline, Empty } from '../components/ui.jsx';
 import EpisodeDrawer from '../components/EpisodeDrawer.jsx';
-import { fmt, dateShort, time, relative, STATUS_META, FORMAT_LABELS, plural, ACCOUNT_STATUS, money, pct, bytes } from '../lib/format.js';
+import { fmt, dateShort, time, relative, STATUS_META, FORMAT_LABELS, plural, ACCOUNT_STATUS, money, pct, bytes, platformLabel } from '../lib/format.js';
 
 const STAGE_ORDER = [
   { key: 'idea', label: 'Идея', icon: 'sparkles' },
@@ -352,7 +352,7 @@ export default function Dashboard({ onLaunch }) {
                 onClick={() => p.episode_id && setSelected(p.episode_id)}>
                 <div className="cover">
                   <img src={api.coverUrl(p.cover_seed, p.title, p.format, `&i=${i}`)} alt="" />
-                  <span className="cover-badge"><PlatformIcon platform={p.platform} size={9} />{p.platform === 'tiktok' ? 'TikTok' : 'Reels'}</span>
+                  <span className="cover-badge"><PlatformIcon platform={p.platform} size={9} />{platformLabel(p.platform)}</span>
                   <span className="cover-metric">
                     <span><Icon name="eye" size={10} />{fmt(p.views)}</span>
                     <span>{p.ctr}%</span>

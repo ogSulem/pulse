@@ -651,3 +651,62 @@ curl -s "http://localhost:8080/api/growth/hooks?topic=привычки&platform=
   "rules": [ "…" ], "issues": [ "…" ],
   "benchmarks": { "hookWindowSec": 1.3, "idealSec": [20, 45], "completionTarget": 0.6 } }
 ```
+
+
+---
+
+## 13. План, аудит и база знаний (v6.1)
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/growth/plan?days=7&projectId=` | календарь: что, когда и на какой аккаунт выйдет |
+| GET | `/growth/audit` | что мешает охвату и деньгам, с действиями |
+| GET | `/growth/knowledge` | лимиты, алгоритмы, монетизация и границы |
+
+### `GET /api/growth/plan`
+
+```json
+{ "days": 7,
+  "plan": [ { "date": "2026-10-22", "weekday": "чт", "slots": [
+      { "platform": "tiktok", "platformLabel": "TikTok", "project": "Pulse Studio",
+        "account": { "id": "ac_…", "handle": "pulse.studio" }, "time": "12:07",
+        "topic": "Нейросети, которые реально делают работу за тебя",
+        "format": "before-after",
+        "hook": "Почему «Нейросети, которые реально делают» не даёт результата?",
+        "hookScore": 70, "fitsWindow": true, "expectedViews": 2900, "expectedRevenue": 29.5,
+        "targetSec": "45–90", "why": "1.3 с на хук · досмотр 55% · тема из библиотеки" } ] } ],
+  "totals": { "posts": 68, "perWeek": 68, "expectedViews": 184775, "expectedRevenue": 4147.94,
+              "byPlatform": { "reels": 42, "tiktok": 14, "youtube": 12 } },
+  "rules": [ "Один ролик — один аккаунт внутри площадки…" ] }
+```
+
+Слоты создаются только для активных аккаунтов бренда и в пределах `daily_limit`; у Shorts — не больше
+одного выхода в день и 4 дней в неделю.
+
+### `GET /api/growth/audit`
+
+```json
+{ "score": 56, "counts": { "block": 0, "warn": 3, "info": 2 },
+  "issues": [ { "id": "tiktok-private", "severity": "warn",
+                "title": "TikTok публикует SELF_ONLY",
+                "impact": "Ролики в TikTok видны только вам — просмотров и подписчиков не будет",
+                "fix": "Подать клиент TikTok Content Posting на аудит…",
+                "action": { "label": "Открыть настройки", "to": "#/settings" } } ] }
+```
+
+`severity`: `block` — публикация или охват невозможны, `warn` — теряются охват/деньги, `info` — улучшение.
+
+### `GET /api/growth/knowledge`
+
+```json
+{ "platforms": [ { "platform": "youtube", "label": "YouTube Shorts",
+    "api": { "per24h": 100, "initPerMin": 6, "note": "…", "official": "https://…" },
+    "fields": { "captionMax": 5000, "titleMax": 100, "tagRange": [3, 5], "hashtagsMax": 15, "videoMaxSec": 180 },
+    "algorithm": { "hookWindowSec": 2.1, "idealSec": [22, 45], "completionTarget": 65 },
+    "demotions": [ "…" ], "notes": [ "…" ] } ],
+  "monetization": [ { "id": "tiktok-rewards", "region": "только US, UK, DE, FR, JP, KR, MX, BR — в РФ недоступна" } ],
+  "general": { "quotas": [ "…" ], "marking": { "ru": "…", "ai": "…" }, "truth": [ "…" ] } }
+```
+
+Все числа берутся из `engine/limits.js` и `engine/compliance.js` — база знаний не может противоречить
+проверкам публикации.

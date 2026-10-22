@@ -3,7 +3,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, Field, Modal, Progress, Segmented, Empty, ScoreRing, useToast } from '../components/ui.jsx';
-import { fmt, money, pct, platformLabel } from '../lib/format.js';
+import { fmt, money, pct, plural, platformLabel } from '../lib/format.js';
 
 const STATUS = {
   healthy: { label: 'активен', tone: 'success' },
@@ -40,10 +40,17 @@ export default function Growth() {
   const [gate, setGate] = useState(null);
   const [gateBusy, setGateBusy] = useState(false);
   const [episodeId, setEpisodeId] = useState('');
+  const [tab, setTab] = useState('portfolio');
+  const [weekPlan, setWeekPlan] = useState(null);
+  const [planDays, setPlanDays] = useState(7);
+  const [knowledge, setKnowledge] = useState(null);
+  const [audit, setAudit] = useState(null);
 
   const load = async () => {
     try {
-      setOverview(await api.growthOverview({ days: 30 }));
+      const res = await api.growthOverview({ days: 30 });
+      setOverview(res);
+      setAudit(res.audit || null);
     } catch (err) {
       toast.push({ tone: 'error', title: 'Не удалось загрузить рост', text: err.message });
     } finally {
@@ -52,6 +59,17 @@ export default function Growth() {
   };
 
   useEffect(() => { load(); }, []);
+
+  // План и база знаний грузятся лениво: не тормозим первый экран лишними расчётами
+  useEffect(() => {
+    if (tab !== 'plan' || weekPlan) return;
+    api.growthPlan({ days: planDays }).then(setWeekPlan).catch((err) => toast.push({ tone: 'error', title: 'План не загрузился', text: err.message }));
+  }, [tab, planDays, weekPlan]);
+
+  useEffect(() => {
+    if (tab !== 'knowledge' || knowledge) return;
+    api.growthKnowledge().then(setKnowledge).catch((err) => toast.push({ tone: 'error', title: 'База знаний не загрузилась', text: err.message }));
+  }, [tab, knowledge]);
 
   useEffect(() => {
     if (!overview || topic) return;
@@ -111,6 +129,17 @@ export default function Growth() {
 
   const platformCards = useMemo(() => portfolio?.platforms || [], [portfolio]);
 
+  const TABS = [
+    { id: 'portfolio', label: 'Портфель', icon: 'at', badge: audit?.counts?.block || 0 },
+    { id: 'plan', label: 'План на неделю', icon: 'calendar' },
+    { id: 'creative', label: 'Тренды и хуки', icon: 'zap' },
+    { id: 'money', label: 'Деньги', icon: 'coins' },
+    { id: 'knowledge', label: 'База знаний', icon: 'info' },
+  ];
+
+  // переход из аудита: сразу открываем нужную вкладку
+  const goTab = (id) => { setTab(id); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+
   return (
     <div className="page">
       {/* ── Hero ─────────────────────────────────────────────────────────── */}
@@ -135,6 +164,7 @@ export default function Growth() {
             <div className="hr-stat"><span className="v">{fmt(totals.followers || 0)}</span><span className="l">подписчиков</span></div>
             <div className="hr-stat"><span className="v">{fmt(totals.views30 || 0)}</span><span className="l">охват за 30 дней</span></div>
             <div className="hr-stat"><span className="v">{totals.avgRetention || 0}%</span><span className="l">среднее удержание</span></div>
+            <div className="hr-stat"><span className="v">{money(totals.revenue || 0)}</span><span className="l">доход за 30 дней</span></div>
           </div>
         </div>
       </div>
@@ -167,6 +197,63 @@ export default function Growth() {
         </div>
       </div>
 
+      {/* ── Навигация по разделам роста ───────────────────────────────────── */}
+      <div className="row wrap" style={{ gap: 6, padding: 5, borderRadius: 13, border: '1px solid var(--line)', background: 'rgba(255,255,255,.02)', alignSelf: 'flex-start' }}>
+        {TABS.map((t) => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className={tab === t.id ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}
+            style={{ gap: 6 }}>
+            <Icon name={t.icon} size={13} />{t.label}
+            {t.badge ? <span className="badge danger" style={{ fontSize: 9.5, padding: '1px 5px' }}>{t.badge}</span> : null}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Аудит: что мешает охвату и деньгам ───────────────────────────── */}
+      {tab === 'portfolio' && audit && (
+        <div className="card pad-lg">
+          <div className="card-head">
+            <div>
+              <h2>Аудит платформы</h2>
+              <p>Что прямо сейчас мешает охвату и деньгам — с ценой вопроса и действием</p>
+            </div>
+            <div className="row" style={{ gap: 10 }}>
+              <Badge tone={audit.score >= 80 ? 'success' : audit.score >= 55 ? 'warn' : 'danger'}>
+                {audit.score}/100
+              </Badge>
+              {audit.counts.block > 0 && <Badge tone="danger">{audit.counts.block} блок</Badge>}
+            </div>
+          </div>
+          {!audit.issues.length && (
+            <div className="row" style={{ gap: 8, fontSize: 12, color: 'var(--green)' }}>
+              <Icon name="check" size={14} />Всё в порядке: аккаунты подключены, аудит площадок пройден, удержание в норме
+            </div>
+          )}
+          <div className="col" style={{ gap: 7 }}>
+            {audit.issues.map((i) => {
+              const tone = i.severity === 'block' ? 'danger' : i.severity === 'warn' ? 'warn' : 'muted';
+              return (
+                <div key={i.id} className="row-between wrap" style={{ gap: 10, padding: '9px 11px', borderRadius: 10, border: `1px solid ${i.severity === 'block' ? 'rgba(244,63,94,.3)' : 'var(--line)'}`, background: i.severity === 'block' ? 'rgba(244,63,94,.05)' : 'transparent' }}>
+                  <div className="row" style={{ gap: 9, minWidth: 0, flex: '1 1 320px' }}>
+                    <Icon name={i.severity === 'block' ? 'alert' : i.severity === 'warn' ? 'info' : 'check'} size={14}
+                      style={{ color: TONE_COLOR[tone], marginTop: 2, flex: 'none' }} />
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 650 }}>{i.title}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 2, lineHeight: 1.5 }}>{i.impact}</div>
+                      <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 2 }}>→ {i.fix}</div>
+                    </div>
+                  </div>
+                  {i.action && (i.action.tab
+                    ? <button className="btn btn-ghost btn-sm" onClick={() => goTab(i.action.tab)}>{i.action.label}<Icon name="arrowUpRight" size={11} /></button>
+                    : <a className="btn btn-ghost btn-sm" href={i.action.to}>{i.action.label}<Icon name="arrowUpRight" size={11} /></a>)}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {tab === 'portfolio' && (<>
       {/* ── Портфель по площадкам ────────────────────────────────────────── */}
       <div className="card pad-lg">
         <div className="card-head">
@@ -200,6 +287,8 @@ export default function Growth() {
                 <div><div style={{ fontSize: 15, fontWeight: 740 }}>{fmt(pl.views30)}</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>охват 30 дн.</div></div>
                 <div><div style={{ fontSize: 15, fontWeight: 740 }}>{pl.idealSec[0]}–{pl.idealSec[1]} с</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>оптимальная длина</div></div>
                 <div><div style={{ fontSize: 15, fontWeight: 740 }}>{pl.capacity}</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>слотов сегодня</div></div>
+                <div><div style={{ fontSize: 15, fontWeight: 740 }}>{money(pl.revenue || 0)}</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>доход 30 дн.</div></div>
+                <div><div style={{ fontSize: 15, fontWeight: 740 }}>{money(pl.profitPerPost || 0)}</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>на ролик</div></div>
               </div>
             </div>
           ))}
@@ -246,6 +335,10 @@ export default function Growth() {
                       </div>
                       <div style={{ fontSize: 10, color: 'var(--muted)' }}>удержание / {a.retentionTarget}%</div>
                     </div>
+                    <div style={{ textAlign: 'right', minWidth: 78 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{money(a.revenue || 0)}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)' }}>доход 30 дн.</div>
+                    </div>
                     <div style={{ textAlign: 'right', minWidth: 70 }}>
                       <div style={{ fontSize: 13, fontWeight: 700 }}>{a.usedToday}/{a.dailyLimit}</div>
                       <div style={{ fontSize: 10, color: 'var(--muted)' }}>квота</div>
@@ -264,6 +357,9 @@ export default function Growth() {
         </div>
       </div>
 
+      </>)}
+
+      {tab === 'creative' && (<>
       {/* ── Радар трендов ─────────────────────────────────────────────────── */}
       <div className="page-grid grid-2">
         <div className="card pad-lg">
@@ -450,6 +546,9 @@ export default function Growth() {
         )}
       </div>
 
+      </>)}
+
+      {tab === 'money' && (<>
       {/* ── Монетизация ──────────────────────────────────────────────────── */}
       <div className="card pad-lg">
         <div className="card-head">
@@ -514,6 +613,14 @@ export default function Growth() {
         </p>
       </div>
 
+      </>)}
+
+      {tab === 'plan' && (
+        <PlanTab plan={weekPlan} days={planDays} setDays={(d) => { setPlanDays(d); setWeekPlan(null); }} copy={copy} />
+      )}
+
+      {tab === 'knowledge' && <KnowledgeTab knowledge={knowledge} playbook={overview?.platforms} />}
+
       {/* ── Модалка плана аккаунта ───────────────────────────────────────── */}
       <Modal
         open={Boolean(plan)}
@@ -577,5 +684,185 @@ export default function Growth() {
         )}
       </Modal>
     </div>
+  );
+}
+
+// ── План на неделю: что, когда и на какой аккаунт выйдет ─────────────────────
+function PlanTab({ plan, days, setDays, copy }) {
+  if (!plan) return <div className="skeleton" style={{ height: 220 }} />;
+  const t = plan.totals || {};
+  return (
+    <>
+      <div className="card pad-lg">
+        <div className="card-head">
+          <div>
+            <h2>План на {days} дня</h2>
+            <p>Формат, время и хук — из ваших данных: лучшие часы, работающие форматы, лаборатория хуков</p>
+          </div>
+          <div className="row wrap" style={{ gap: 8 }}>
+            <Segmented size="sm" options={[7, 14].map((d) => ({ value: d, label: `${d} дн.` }))} value={days} onChange={setDays} />
+            <Badge tone="accent">{t.posts} постов</Badge>
+          </div>
+        </div>
+
+        <div className="row wrap" style={{ gap: 22, marginBottom: 14 }}>
+          <div className="hr-stat"><span className="v">{t.posts}</span><span className="l">слотов в плане</span></div>
+          <div className="hr-stat"><span className="v">{fmt(t.expectedViews || 0)}</span><span className="l">прогноз охвата</span></div>
+          <div className="hr-stat"><span className="v">{money(t.expectedRevenue || 0)}</span><span className="l">доход с показов</span></div>
+          <div className="hr-stat"><span className="v">{t.byPlatform?.youtube || 0}</span><span className="l">Shorts за период</span></div>
+        </div>
+
+        <div className="col" style={{ gap: 10 }}>
+          {(plan.plan || []).map((day) => (
+            <div key={day.date} className="card flat" style={{ padding: 12 }}>
+              <div className="row-between" style={{ marginBottom: day.slots.length ? 8 : 0 }}>
+                <div className="row" style={{ gap: 8 }}>
+                  <b style={{ fontSize: 12.5 }}>{new Date(`${day.date}T12:00:00`).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}</b>
+                  <Badge tone="muted">{day.weekday}</Badge>
+                </div>
+                <span style={{ fontSize: 10.5, color: 'var(--muted)' }}>{day.slots.length ? `${day.slots.length} ${plural(day.slots.length, 'выход', 'выхода', 'выходов')}` : 'день отдыха — Shorts не любит поток'}</span>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                {day.slots.map((slot, i) => (
+                  <div key={`${slot.platform}-${i}`} className="row-between wrap" style={{ gap: 10, padding: '7px 9px', border: '1px solid var(--line)', borderRadius: 9 }}>
+                    <div className="row" style={{ gap: 9, minWidth: 0, flex: '1 1 340px' }}>
+                      <span className="mono" style={{ fontSize: 11.5, color: 'var(--violet-2)', flex: 'none' }}>{slot.time}</span>
+                      <span style={{ flex: 'none' }}><PlatformIcon platform={slot.platform} size={13} /></span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 11.5, fontWeight: 650 }} className="truncate">{slot.topic}</div>
+                        <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 1 }} className="truncate">
+                          {slot.project ? `${slot.project} · ` : ''}@{slot.account.handle} · «{slot.hook}»
+                        </div>
+                      </div>
+                    </div>
+                    <div className="row wrap" style={{ gap: 8, flex: 'none' }}>
+                      <Badge tone="muted">{slot.format}</Badge>
+                      <span style={{ fontSize: 10.5, color: 'var(--muted)' }}>{slot.targetSec} с · хук {slot.hookScore}</span>
+                      <span style={{ fontSize: 11, fontWeight: 650 }}>≈{fmt(slot.expectedViews)}</span>
+                      <button className="link-btn" style={{ fontSize: 10 }} onClick={() => copy(slot.hook)}><Icon name="copy" size={10} /></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="card pad-lg">
+        <div className="card-head"><div><h2>Правила плана</h2><p>Почему именно так — коротко и по делу</p></div></div>
+        <div className="col" style={{ gap: 6 }}>
+          {(plan.rules || []).map((r) => (
+            <div key={r} className="row" style={{ gap: 7, fontSize: 11.5, color: 'var(--text-2)', lineHeight: 1.55 }}>
+              <Icon name="check" size={12} style={{ color: 'var(--green)', marginTop: 2, flex: 'none' }} />{r}
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── База знаний: лимиты, алгоритмы, монетизация и честные границы ───────────
+function KnowledgeTab({ knowledge, playbook }) {
+  if (!knowledge) return <div className="skeleton" style={{ height: 220 }} />;
+  return (
+    <>
+      <div className="card pad-lg">
+        <div className="card-head">
+          <div>
+            <h2>Что нужно знать про площадки</h2>
+            <p>Лимиты API, поля, алгоритм, что демотивируется и где деньги — с числами</p>
+          </div>
+          <Badge tone="muted">{knowledge.platforms.length} площадки</Badge>
+        </div>
+
+        <div className="page-grid grid-2">
+          {knowledge.platforms.map((pl) => (
+            <div key={pl.platform} className="card" style={{ background: 'rgba(255,255,255,.02)' }}>
+              <div className="row" style={{ gap: 8, marginBottom: 8 }}>
+                <PlatformIcon platform={pl.platform} size={15} />
+                <b style={{ fontSize: 13 }}>{pl.label}</b>
+              </div>
+              <div className="row wrap" style={{ gap: 14, marginBottom: 8 }}>
+                <div><div style={{ fontSize: 13, fontWeight: 700 }}>{pl.api.per24h}/сутки</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>лимит API</div></div>
+                <div><div style={{ fontSize: 13, fontWeight: 700 }}>{pl.algorithm.hookWindowSec} с</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>окно хука</div></div>
+                <div><div style={{ fontSize: 13, fontWeight: 700 }}>{pl.algorithm.idealSec[0]}–{pl.algorithm.idealSec[1]} с</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>длина</div></div>
+                <div><div style={{ fontSize: 13, fontWeight: 700 }}>{pl.algorithm.completionTarget}%</div><div style={{ fontSize: 10, color: 'var(--muted)' }}>цель досмотра</div></div>
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--muted)', lineHeight: 1.55 }}>
+                {pl.api.note}. Поля: описание ≤ {pl.fields.captionMax}{pl.fields.captionMaxBytes ? ' байт' : ''}{pl.fields.titleMax ? `, заголовок ≤ ${pl.fields.titleMax}` : ''}, тегов {pl.fields.tagRange[0]}–{pl.fields.tagRange[1]} (потолок площадки — {pl.fields.hashtagsMax}). Видео ≤ {Math.round(pl.fields.videoMaxSec / 60)} мин.
+              </div>
+              <div className="card-sub" style={{ margin: '9px 0 5px' }}>Демотивируется</div>
+              <div className="col" style={{ gap: 4 }}>
+                {pl.demotions.map((d) => (
+                  <div key={d} className="row" style={{ gap: 6, fontSize: 10.5, color: 'var(--text-2)', lineHeight: 1.5 }}>
+                    <Icon name="alert" size={11} style={{ color: 'var(--amber)', marginTop: 2, flex: 'none' }} />{d}
+                  </div>
+                ))}
+              </div>
+              <a className="link-btn" style={{ fontSize: 10.5, marginTop: 9 }} href={pl.api.official} target="_blank" rel="noreferrer">
+                документация площадки <Icon name="arrowUpRight" size={10} />
+              </a>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="card pad-lg">
+        <div className="card-head"><div><h2>Где деньги</h2><p>Пороги программ и их реальные ограничения</p></div></div>
+        <div className="col" style={{ gap: 9 }}>
+          {knowledge.monetization.map((m) => (
+            <div key={m.id} style={{ padding: '10px 12px', border: '1px solid var(--line)', borderRadius: 10 }}>
+              <div className="row" style={{ gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                <b style={{ fontSize: 12.5 }}>{m.label}</b>
+                {m.platform && <Badge tone="accent">{platformLabel(m.platform)}</Badge>}
+                <Badge tone={/РФ/.test(m.region) ? 'danger' : 'muted'}>{m.region}</Badge>
+              </div>
+              <div className="row wrap" style={{ gap: 12 }}>
+                {(m.tiers || []).map((tier) => (
+                  <span key={tier.name} style={{ fontSize: 10.5, color: 'var(--text-2)' }}>
+                    <b style={{ color: 'var(--text)' }}>{tier.name}:</b>{' '}
+                    {[tier.followers ? `${fmt(tier.followers)} подписчиков` : null,
+                      tier.views30d ? `${fmt(tier.views30d)} просмотров/30 дн.` : null,
+                      tier.shortsViews90d ? `${fmt(tier.shortsViews90d)} Shorts/90 дн.` : null,
+                      tier.hours ? `${fmt(tier.hours)} часов` : null,
+                      tier.videoSec ? `видео > ${tier.videoSec} с` : null].filter(Boolean).join(' · ')}
+                  </span>
+                ))}
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 4, lineHeight: 1.5 }}>{m.changes}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="page-grid grid-2">
+        <div className="card pad-lg">
+          <div className="card-head"><div><h2>Лимиты Pulse против лимитов API</h2><p>Мы всегда ниже технического потолка — это часть стратегии роста</p></div></div>
+          <div className="col" style={{ gap: 8 }}>
+            {(knowledge.general.quotas || []).map((q) => (
+              <div key={q.platform} className="row-between" style={{ gap: 10, fontSize: 11.5 }}>
+                <span className="row" style={{ gap: 7 }}><PlatformIcon platform={q.platform} size={13} />{q.label}</span>
+                <span style={{ color: 'var(--muted)' }}>API {q.api.per24h}/24 ч → Pulse {q.pulseCapRule}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="card pad-lg">
+          <div className="card-head"><div><h2>Честные границы</h2><p>То, что обещать нельзя — и почему</p></div></div>
+          <div className="col" style={{ gap: 7 }}>
+            {(knowledge.general.truth || []).map((t) => (
+              <div key={t} className="row" style={{ gap: 7, fontSize: 11, color: 'var(--text-2)', lineHeight: 1.55 }}>
+                <Icon name="info" size={12} style={{ marginTop: 2, flex: 'none' }} />{t}
+              </div>
+            ))}
+            <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 4, lineHeight: 1.55 }}>{knowledge.general.marking.ru}</div>
+            <div style={{ fontSize: 10.5, color: 'var(--muted)', lineHeight: 1.55 }}>{knowledge.general.marking.ai}</div>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }

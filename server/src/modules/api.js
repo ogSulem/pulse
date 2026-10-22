@@ -4,7 +4,7 @@ import { enqueue, jobStats, drain, requeueDead, recoverStale } from '../core/que
 import { log, recentLogs } from '../core/logger.js';
 import { uid, parseJson, clamp, num, slugify, addDays, addMinutes, fmtNum } from '../core/utils.js';
 import { FORMAT_LABELS, FORMATS, generateIdeas, hashtagsFor, coverSvg, nicheFor, riskScore, NICHES_LIST } from '../engine/brain.js';
-import { createEpisode, nextSlot, nextSlotPlan, pickAccount, collectAnalytics, sweepDueEpisodes, recoverEpisodeStates, touchEpisode } from '../engine/pipeline.js';
+import { createEpisode, nextSlot, nextSlotPlan, pickAccount, platformQuota, collectAnalytics, sweepDueEpisodes, recoverEpisodeStates, touchEpisode } from '../engine/pipeline.js';
 import { scheduleInsights, bestHours, planSlot, upcomingSlots, localParts } from '../engine/schedule.js';
 import { forecastEpisode, projectHealth, autopilotPolicy, rankEpisodes, recalculateAccountQuality } from '../engine/forecast.js';
 import { evaluateAB, abSummary, preferredVariant } from '../engine/abtest.js';
@@ -14,8 +14,12 @@ import {
 } from '../engine/ads.js';
 import { providers } from '../providers/index.js';
 import { moneySummary, transparency, recordClick, recordConversion, simulateTraffic, rpmFor } from '../engine/money.js';
-import { portfolio, accountPlaybook, trendRadar, hookLab, retentionPlan, monetizationPlan, publishGate, PLATFORM_PLAYBOOK } from '../engine/growth.js';
+import {
+  portfolio, accountPlaybook, trendRadar, hookLab, retentionPlan, monetizationPlan, publishGate,
+  contentPlan, platformKnowledge, platformAudit, PLATFORM_PLAYBOOK,
+} from '../engine/growth.js';
 import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
+import { PLATFORM_LABELS, PLATFORM_API_LIMITS } from '../engine/limits.js';
 import { encryptSecret, decryptSecret, maskSecret } from '../core/secrets.js';
 import { scoreViral, saveViral, recalibrate } from '../engine/viral.js';
 import { renderInfo, renderAvailable, MEDIA_DIR } from '../engine/render.js';
@@ -621,8 +625,26 @@ api.get('/growth/overview', (req, res) => {
     trends: trendRadar({ days }),
     monetization: monetizationPlan(),
     ads: ads ? { totals: ads.totals, campaigns: ads.campaigns.length } : null,
+    audit: platformAudit(),
     platforms: PLATFORM_PLAYBOOK,
   });
+});
+
+// План на неделю: что, во сколько и на какой аккаунт выйдет
+api.get('/growth/plan', (req, res) => {
+  const days = clamp(num(req.query.days, 7), 1, 28);
+  const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
+  res.json(contentPlan({ days, projectId }));
+});
+
+// База знаний: лимиты, алгоритмы, монетизация — с числами и ссылками на доки площадок
+api.get('/growth/knowledge', (_req, res) => {
+  res.json(platformKnowledge());
+});
+
+// Аудит: что мешает охвату и деньгам прямо сейчас, с действиями
+api.get('/growth/audit', (_req, res) => {
+  res.json(platformAudit());
 });
 
 api.get('/growth/trends', (req, res) => {
@@ -999,16 +1021,20 @@ api.get('/accounts/:id/limit', async (req, res) => {
   if (!account) return res.status(404).json({ error: 'not_found' });
   const limit = await providers.stats.limit({ platform: account.platform, account });
   if (!limit) {
+    // Локальный ответ должен быть таким же, как у движка: считаем фактические
+    // публикации за 24 ч и рабочий потолок Pulse, а не абстрактный лимит API.
+    const pq = platformQuota(account.platform);
     return res.json({
       platform: account.platform,
+      label: PLATFORM_LABELS[account.platform] || account.platform,
       connected: Boolean(account.access_token),
-      limit: account.platform === 'tiktok' ? { total: 15, used: null, left: null } : { total: 50, used: null, left: null },
-      source: 'локальные настройки',
+      limit: { total: pq.cap, used: pq.used, left: pq.left, window_sec: 86400, apiLimit: PLATFORM_API_LIMITS[account.platform].per24h },
+      source: 'локальный расчёт',
       note: !account.access_token
         ? 'Подключите токен, чтобы видеть точный остаток из API площадки'
         : account.platform === 'tiktok'
           ? 'TikTok не отдаёт остаток лимита через API: считаем по фактическим публикациям за 24 ч'
-          : 'Площадка не ответила (нет сети или истёк токен) — показываем локальный лимит',
+          : PLATFORM_API_LIMITS[account.platform].note,
     });
   }
   res.json({ platform: account.platform, connected: true, limit, source: 'api' });
