@@ -74,8 +74,8 @@ export default function Money() {
           <div className="eyebrow">юнит-экономика</div>
           <h1 className="page-h1">Деньги</h1>
           <p className="page-sub">
-            Доход из двух каналов — реклама площадок и продажи по ссылкам. Расход — себестоимость роликов.
-            Ничего не «нарисовано»: каждая цифра складывается из записей в базе.
+            Три канала дохода — реклама площадок, спонсорские интеграции и продажи по ссылкам.
+            Расход — себестоимость роликов. Ничего не «нарисовано»: каждая цифра складывается из записей в базе.
           </p>
         </div>
         <div className="row wrap" style={{ gap: 10 }}>
@@ -107,6 +107,10 @@ export default function Money() {
             <div className="money-bar">
               <div className="money-bar-label"><span>Реклама площадок</span><b>{t ? money(t.revenueAds, currency) : '—'}</b></div>
               <div className="bar-track"><div className="bar-fill" style={{ width: `${t && t.revenue ? Math.round((t.revenueAds / t.revenue) * 100) : 0}%`, background: 'linear-gradient(90deg,#a78bfa,#c4b5fd)' }} /></div>
+            </div>
+            <div className="money-bar">
+              <div className="money-bar-label"><span>Спонсорские интеграции</span><b>{t ? money(t.revenueSponsor, currency) : '—'}</b></div>
+              <div className="bar-track"><div className="bar-fill" style={{ width: `${t && t.revenue ? Math.round((t.revenueSponsor / t.revenue) * 100) : 0}%`, background: 'linear-gradient(90deg,#22d3ee,#67e8f9)' }} /></div>
             </div>
             <div className="money-bar">
               <div className="money-bar-label"><span>Продажи по ссылкам</span><b>{t ? money(t.revenueConv, currency) : '—'}</b></div>
@@ -332,6 +336,46 @@ export default function Money() {
           </div>
         )}
       </div>
+
+      {/* ── Спонсорские кампании ─────────────────────────────────────────── */}
+      {(money_?.sponsor || []).length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Спонсорские кампании</div>
+              <div className="card-sub">начисления по выходам внутри периода · оплаты — накопительно</div>
+            </div>
+            <a className="btn btn-ghost btn-sm" href="#/ads"><Icon name="megaphone" size={14} /> Реклама</a>
+          </div>
+          <div className="col" style={{ gap: 8 }}>
+            {money_.sponsor.map((c) => {
+              const recv = Math.max(0, c.revenue - c.paid);
+              const share = c.budget > 0 ? Math.min(100, Math.round((c.revenue / c.budget) * 100)) : 0;
+              return (
+                <div key={c.id} className="row-between wrap" style={{ gap: 10, padding: '9px 11px', border: '1px solid var(--line)', borderRadius: 10 }}>
+                  <div style={{ flex: '1 1 200px', minWidth: 160 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 650 }}>{c.name}</div>
+                    <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>
+                      {c.brand} · {c.posts} выходов · бюджет {money(c.budget, currency)}
+                      {share ? ` · использовано ${share}%` : ''}
+                    </div>
+                  </div>
+                  <div className="row wrap" style={{ gap: 18 }}>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700 }}>{money(c.revenue, currency)}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)' }}>начислено</div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700 }} className={recv > 0 ? 'tone-amber' : 'tone-green'}>{money(recv, currency)}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)' }}>к оплате</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── Допущения ───────────────────────────────────────────────────── */}
       <div className="card assumptions">

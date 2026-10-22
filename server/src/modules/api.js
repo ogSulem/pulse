@@ -8,6 +8,10 @@ import { createEpisode, nextSlot, nextSlotPlan, pickAccount, collectAnalytics, s
 import { scheduleInsights, bestHours, planSlot, upcomingSlots, localParts } from '../engine/schedule.js';
 import { forecastEpisode, projectHealth, autopilotPolicy, rankEpisodes, recalculateAccountQuality } from '../engine/forecast.js';
 import { evaluateAB, abSummary, preferredVariant } from '../engine/abtest.js';
+import {
+  adsOverview, campaignRow, campaignStats, createBrand, createCampaign, updateCampaign,
+  payCampaign, attachCampaign, pickCampaign, autofillCampaigns, disclosureFor, decorateCaption,
+} from '../engine/ads.js';
 import { providers } from '../providers/index.js';
 import { moneySummary, transparency, recordClick, recordConversion, simulateTraffic, rpmFor } from '../engine/money.js';
 import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
@@ -334,7 +338,9 @@ api.get('/episodes', (req, res) => {
   }
   if (projectId) { where.push('e.project_id = ?'); params.push(projectId); }
   const rows = db.prepare(`SELECT e.*, p.name project_name, p.color project_color,
-      (SELECT COUNT(*) FROM publications pb WHERE pb.episode_id = e.id) pubs
+      (SELECT COUNT(*) FROM publications pb WHERE pb.episode_id = e.id) pubs,
+      (SELECT c.name FROM campaigns c WHERE c.id = e.campaign_id) campaign_name,
+      (SELECT b.name FROM campaigns c JOIN brands b ON b.id = c.brand_id WHERE c.id = e.campaign_id) campaign_brand
     FROM episodes e LEFT JOIN projects p ON p.id = e.project_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY COALESCE(e.scheduled_at, e.updated_at) DESC LIMIT ?`).all(...params, clamp(num(limit, 60), 1, 200));
@@ -590,6 +596,113 @@ api.patch('/products/:id', (req, res) => {
 api.delete('/products/:id', (req, res) => {
   db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
+});
+
+// ─── Реклама: бренды, кампании, маркировка и деньги ─────────────────────────
+api.get('/ads/overview', (_req, res) => {
+  res.json(adsOverview());
+});
+
+api.get('/brands', (_req, res) => res.json(db.prepare('SELECT * FROM brands ORDER BY created_at DESC').all()));
+
+api.post('/brands', (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'validation', message: 'Нужно название бренда' });
+  const brand = createBrand({
+    name: b.name, legalName: b.legalName || b.legal_name || '', inn: b.inn || '',
+    contact: b.contact || '', notes: b.notes || '',
+  });
+  res.status(201).json(brand);
+});
+
+api.get('/campaigns', (_req, res) => {
+  const rows = db.prepare(`SELECT c.*, b.name brand_name, b.legal_name, b.inn, p.name project_name
+    FROM campaigns c JOIN brands b ON b.id = c.brand_id LEFT JOIN projects p ON p.id = c.project_id
+    ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 WHEN 'draft' THEN 2 ELSE 3 END, c.ends_at IS NULL, c.ends_at ASC`).all();
+  res.json(rows.map((c) => ({ ...campaignRow(c), stats: campaignStats(c.id) })));
+});
+
+api.get('/campaigns/:id', (req, res) => {
+  const c = db.prepare(`SELECT c.*, b.name brand_name, b.legal_name, b.inn FROM campaigns c
+    JOIN brands b ON b.id = c.brand_id WHERE c.id = ?`).get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'not_found', message: 'Кампания не найдена' });
+  const posts = db.prepare(`SELECT cp.*, e.title, e.status episode_status, pb.url, pb.platform
+    FROM campaign_posts cp LEFT JOIN episodes e ON e.id = cp.episode_id
+    LEFT JOIN publications pb ON pb.id = cp.publication_id
+    WHERE cp.campaign_id = ? ORDER BY cp.created_at DESC`).all(c.id);
+  const episodes = db.prepare(`SELECT id, title, status, scheduled_at FROM episodes
+    WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 20`).all(c.id);
+  res.json({ ...campaignRow(c), stats: campaignStats(c.id), posts, episodes, disclosure: disclosureFor(c) });
+});
+
+api.post('/campaigns', (req, res) => {
+  try {
+    const campaign = createCampaign(req.body || {});
+    res.status(201).json({ ...campaignRow(campaign), stats: campaignStats(campaign.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'validation', message: String(err.message || err) });
+  }
+});
+
+api.patch('/campaigns/:id', (req, res) => {
+  try {
+    const campaign = updateCampaign(req.params.id, req.body || {});
+    res.json({ ...campaignRow(campaign), stats: campaignStats(campaign.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'validation', message: String(err.message || err) });
+  }
+});
+
+api.delete('/campaigns/:id', (req, res) => {
+  // сначала снимаем спонсора с роликов, иначе останутся висящие ссылки и старая маркировка
+  db.prepare("UPDATE episodes SET campaign_id = NULL, ad_disclosure = '' WHERE campaign_id = ?").run(req.params.id);
+  db.prepare('DELETE FROM campaigns WHERE id = ?').run(req.params.id);
+  log({ level: 'info', actor: 'user', action: 'campaign.deleted', entityType: 'campaign', entityId: req.params.id, message: 'Кампания удалена' });
+  res.json({ ok: true });
+});
+
+api.post('/campaigns/:id/pay', (req, res) => {
+  try {
+    const amount = req.body?.amount;
+    if (!amount) return res.status(400).json({ error: 'validation', message: 'Нужна сумма оплаты' });
+    const campaign = payCampaign(req.params.id, amount);
+    res.json({ ok: true, ...campaignRow(campaign), stats: campaignStats(campaign.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'validation', message: String(err.message || err) });
+  }
+});
+
+api.post('/campaigns/:id/attach', (req, res) => {
+  try {
+    const episodeId = req.body?.episodeId || req.body?.episode_id;
+    if (!episodeId) return res.status(400).json({ error: 'validation', message: 'Нужен episodeId' });
+    const result = attachCampaign(episodeId, req.params.id, { force: Boolean(req.body?.force) });
+    res.json({ ok: true, ...result, stats: campaignStats(req.params.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'validation', message: String(err.message || err) });
+  }
+});
+
+api.delete('/episodes/:id/campaign', (req, res) => {
+  attachCampaign(req.params.id, null);
+  res.json({ ok: true });
+});
+
+api.post('/ads/autofill', (req, res) => {
+  const filled = autofillCampaigns({ limit: clamp(num(req.body?.limit, 5), 1, 20) });
+  res.json({ ok: true, filled, pick: pickCampaign({})?.campaign?.name || null });
+});
+
+api.get('/episodes/:id/campaign', (req, res) => {
+  const episode = db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.params.id);
+  if (!episode) return res.status(404).json({ error: 'not_found' });
+  const campaign = episode.campaign_id ? db.prepare(`SELECT c.*, b.name brand_name, b.legal_name, b.inn
+    FROM campaigns c JOIN brands b ON b.id = c.brand_id WHERE c.id = ?`).get(episode.campaign_id) : null;
+  res.json({
+    campaign: campaign ? { ...campaignRow(campaign), stats: campaignStats(campaign.id) } : null,
+    disclosure: campaign ? disclosureFor(campaign) : '',
+    preview: campaign ? decorateCaption(episode.description || '', campaign) : (episode.description || ''),
+  });
 });
 
 // ─── Интеллект: когда публиковать, сколько это принесёт, что выиграл A/B ────
@@ -889,7 +1002,7 @@ api.patch('/settings', (req, res) => {
   const allowed = [
     'autopilot_global', 'manual_review', 'risk_threshold', 'max_daily_per_account', 'timezone',
     // площадки
-    'tiktok_audited', 'tiktok_privacy', 'ai_label', 'ad_label', 'min_viral_score',
+    'tiktok_audited', 'tiktok_privacy', 'ai_label', 'ad_label', 'min_viral_score', 'ads_enabled',
     // деньги и себестоимость
     'currency', 'rpm_reels', 'rpm_tiktok', 'conv_rate', 'ctr_estimate', 'product_price', 'product_margin',
     'cost_video', 'cost_tts', 'cost_llm', 'cost_render', 'postback_key',

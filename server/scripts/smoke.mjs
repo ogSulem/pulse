@@ -26,6 +26,7 @@ const { moneySummary, transparency } = await import('../src/engine/money.js');
 const { encryptSecret, decryptSecret } = await import('../src/core/secrets.js');
 const { providers } = await import('../src/providers/index.js');
 const { seedBase } = await import('../src/seed/seed.js');
+const { disclosureFor, decorateCaption, revenueFor, adsOverview, campaignStats, pickCampaign } = await import('../src/engine/ads.js');
 
 try {
   migrate();
@@ -97,6 +98,65 @@ try {
   if (!m.byPlatform.length) throw new Error('нет разреза по площадкам — демо-данные неполные');
   ok('деньги', `${m.totals.profit} ${m.currency} прибыли, ROI ${m.totals.roi ?? '—'}%`);
 } catch (err) { fail('деньги', err); }
+
+// ── реклама: маркировка, модели оплаты, раздача ──────────────────────────────
+try {
+  const brand = { legal_name: 'ООО «Нордвинд».', inn: '7701234567' };
+  const campaign = { brand_id: 'br_smoke', erid: '2VtzqxP9dKf', marking: 'erid', mention: '@nordwind',
+    hashtags: ['#nordwind'], posts_target: 4, rate_cents: 4500000, model: 'fixed' };
+  // бренд в демо-базе не тот, поэтому проверяем на реальной кампании из сида
+  const real = adsOverview().campaigns.find((c) => c.erid);
+  if (!real) throw new Error('в демо-данных нет кампании с erid');
+  const disclosure = disclosureFor(real);
+  if (!/^Реклама\./.test(disclosure)) throw new Error(`нет пометки «Реклама»: ${disclosure}`);
+  if (!/erid:/.test(disclosure)) throw new Error(`нет erid в маркировке: ${disclosure}`);
+  if (/\.\./.test(disclosure)) throw new Error(`двойная точка в маркировке: ${disclosure}`);
+  const decorated = decorateCaption('Три вещи из капсулы', real);
+  if (!decorated.includes(real.mention)) throw new Error('@бренд не добавлен');
+  if (!/#реклама/.test(decorated) || !/erid:/.test(decorated)) throw new Error('маркировка не попала в описание');
+  if (decorateCaption(decorated, real) !== decorated) throw new Error('описание дублирует маркировку при повторной обработке');
+  ok('маркировка рекламы', disclosure.slice(0, 64));
+} catch (err) { fail('маркировка рекламы', err); }
+
+try {
+  const fixed = revenueFor({ model: 'fixed', rate_cents: 4500000, posts_target: 4 }, { views: 5000 });
+  const cpm = revenueFor({ model: 'cpm', rate_cents: 32000 }, { views: 10000 });
+  const cpa = revenueFor({ model: 'cpa', rate_cents: 120000 }, { conversions: 3 });
+  const barter = revenueFor({ model: 'barter', rate_cents: 0 }, { views: 99999 });
+  if (fixed !== 1125000) throw new Error(`фикс за выход: ${fixed}`);
+  if (cpm !== 320000) throw new Error(`CPM: ${cpm}`);
+  if (cpa !== 360000) throw new Error(`CPA: ${cpa}`);
+  if (barter !== 0) throw new Error(`бартер должен быть 0: ${barter}`);
+  ok('модели оплаты', 'фикс / CPM / CPA / бартер');
+} catch (err) { fail('модели оплаты', err); }
+
+try {
+  const o = adsOverview();
+  if (!o.campaigns.length) throw new Error('демо-кампании не созданы');
+  if (!(o.totals.revenue > 0)) throw new Error('нет начислений по кампаниям');
+  if (!(o.totals.posts > 0)) throw new Error('нет выходов по кампаниям');
+  const cpa = o.campaigns.find((c) => c.model === 'cpa');
+  if (!cpa || !(cpa.stats.revenue > 0)) throw new Error('CPA-кампания без начислений: конверсии не учтены');
+  const over = o.campaigns.find((c) => c.budget > 0 && c.stats.revenue > c.budget + 0.01);
+  if (over) throw new Error(`${over.name}: начисления ${over.stats.revenue} больше бюджета ${over.budget}`);
+  const pick = pickCampaign({});
+  if (!pick?.stats?.canPost) {
+    const why = o.campaigns.map((c) => `${c.name}:${c.status}/canPost=${c.stats.canPost}/today=${c.stats.todayPosts}/${c.stats.dailyCap}/left=${c.stats.postsLeft}/budget=${c.stats.budgetLeft}/expired=${c.stats.expired}`).join('; ');
+    throw new Error(`автораздача не находит кампанию с доступным выходом (${why})`);
+  }
+  ok('реклама в экономике', `${o.totals.active} активных, ${o.totals.revenue} ₽ начислено, ${o.totals.posts} выходов`);
+} catch (err) { fail('реклама в экономике', err); }
+
+try {
+  const campaign = { marking: 'erid', erid: '', brand_id: 'x' };
+  const missing = checkCompliance({ title: 'Как я собрал капсулу', scenes: [{ text: 'Три вещи' }], description: 'Три вещи из капсулы без пометки', platform: 'tiktok', campaign });
+  if (missing.ok) throw new Error('кампания без erid прошла проверку');
+  const withErid = checkCompliance({ title: 'Как я собрал капсулу', scenes: [{ text: 'Три вещи' }], platform: 'tiktok',
+    campaign: { marking: 'erid', erid: '2VtzqxP9dKf', brand_id: 'x' },
+    description: 'Текст #реклама erid: 2VtzqxP9dKf' });
+  if (!withErid.ok) throw new Error(`корректная маркировка заблокирована: ${withErid.blocking.map((b) => b.id).join(',')}`);
+  ok('маркировка в комплаенсе', 'без erid — блок, с erid и пометкой — пропуск');
+} catch (err) { fail('маркировка в комплаенсе', err); }
 
 try {
   const t = transparency();

@@ -191,6 +191,12 @@ export default function Settings({ refresh }) {
             label="Маркировать рекламу"
             hint="Пометка «Реклама: <продукт>» в описании, если у ролика есть продукт."
           />
+          <Toggle
+            checked={String(settings.ads_enabled ?? '1') === '1'}
+            onChange={(v) => patch({ ads_enabled: v ? '1' : '0' })}
+            label="Автораздача бренд-кампаний"
+            hint="Pulse сам привязывает активные кампании к свободным роликам с учётом бюджета, дневного кэпа и дедлайна. Выключите, если размещаете интеграции только вручную."
+          />
           <div className="hr" />
           <NumberField label="Минимальный вирусный скор" suffix="/100" value={settings.min_viral_score} busy={busy}
             hint="Ниже порога ролик не публикуется автоматически, а уходит на проверку с рекомендациями"

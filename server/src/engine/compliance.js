@@ -75,7 +75,7 @@ const strip = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ');
  * Проверяет текст ролика и возвращает отчёт.
  * severity: 'block' — нельзя планировать автоматически, 'warn' — можно, но с предупреждением.
  */
-export function checkCompliance({ title = '', description = '', scenes = [], platform = 'reels', hashtags = [], adLabel = true, aiLabel = true }) {
+export function checkCompliance({ title = '', description = '', scenes = [], platform = 'reels', hashtags = [], adLabel = true, aiLabel = true, campaign = null }) {
   const haystack = strip([title, description, ...(scenes || []).map((s) => s.text || s)].join(' '));
   const findings = RULES.filter((r) => r.re.test(haystack)).map((r) => ({
     id: r.id,
@@ -94,6 +94,23 @@ export function checkCompliance({ title = '', description = '', scenes = [], pla
   }
   if (adLabel && /(промокод|скидк|купи|закажи)/i.test(haystack) && !/реклама|ad\b|партнёрск|партнерск/i.test(haystack)) {
     findings.push({ id: 'ad-disclosure', severity: 'warn', reason: 'Есть признаки рекламы, но нет пометки — Pulse добавит её в описание', match: 'ad' });
+  }
+
+  // ── реклама и маркировка ──────────────────────────────────────────────────
+  // Ролик в бренд-кампании обязан иметь erid (для РФ-рынка) и явную пометку.
+  // Это блокирующая проверка: непромаркированная реклама — штраф, а не «стиль».
+  if (campaign) {
+    const text = strip(description);
+    const marked = /реклама|#реклама|\bad\b/i.test(text);
+    if (campaign.marking !== 'none' && !marked) {
+      findings.push({ id: 'ad-marking-missing', severity: 'block', reason: 'Ролик в бренд-кампании без пометки «Реклама» — публикация остановлена', match: '#реклама' });
+    }
+    if (campaign.marking === 'erid' && !campaign.erid) {
+      findings.push({ id: 'ad-erid-missing', severity: 'block', reason: 'У кампании нет erid-токена ОРД — реклама без маркировки публиковаться не может', match: 'erid' });
+    }
+    if (campaign.erid && !text.includes(String(campaign.erid).toLowerCase())) {
+      findings.push({ id: 'ad-erid-not-in-caption', severity: 'warn', reason: `erid ${campaign.erid} не найден в описании — Pulse добавит его при публикации`, match: campaign.erid });
+    }
   }
 
   const blocking = findings.filter((f) => f.severity === 'block');

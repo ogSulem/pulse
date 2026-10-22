@@ -7,6 +7,8 @@ import { uid, seededRandom, addDays, addMinutes } from '../core/utils.js';
 import { zonedToUtc, localParts } from '../engine/schedule.js';
 import { buildScript, hashtagsFor, generateIdeas, riskScore, COVER_PALETTES } from '../engine/brain.js';
 import { growthCurve } from '../engine/pipeline.js';
+import { revenueFor, disclosureFor, syncCampaignMetrics } from '../engine/ads.js';
+import { simulateTraffic } from '../engine/money.js';
 import { log } from '../core/logger.js';
 
 const PROJECTS = [
@@ -93,7 +95,7 @@ const LOG_SEED = [
 ];
 
 function truncateAll() {
-  const tables = ['metrics_daily', 'publications', 'episodes', 'scripts', 'ideas', 'products', 'accounts', 'projects', 'jobs', 'logs', 'accounts_daily'];
+  const tables = ['campaign_posts', 'campaigns', 'brands', 'metrics_daily', 'conversions', 'clicks', 'publications', 'episodes', 'scripts', 'ideas', 'products', 'accounts', 'projects', 'jobs', 'logs', 'accounts_daily'];
   for (const t of tables) db.prepare(`DELETE FROM ${t}`).run();
 }
 
@@ -288,6 +290,115 @@ export function seedBase() {
         plan.risk || riskScore(script.caption), plan.error || null, scheduledAt, EPISODE_COST_CENTS,
         new Date(now - (plan.status === 'scheduled' ? 60000 : 300000)).toISOString(),
         new Date(now - (plan.status === 'scheduled' ? 60000 : 300000)).toISOString());
+  }
+
+  // ── реклама: бренды и живые кампании ────────────────────────────────────
+  // Нужны, чтобы экран «Реклама» сразу показывал реальные деньги: кто платит,
+  // сколько выходов сделано, что уже оплачено и где не хватает маркировки.
+  const CAMPAIGNS = [
+    {
+      brand: { name: 'Nordwind', legal_name: 'ООО «Нордвинд»', inn: '7701234567', contact: 'ads@nordwind.ru' },
+      name: 'Nordwind — зимняя капсула', model: 'fixed', budget: 180000, rate: 45000, posts_target: 4, deliver: 4,
+      status: 'active', erid: '2VtzqxP9dKf', mention: '@nordwind', hashtags: ['#nordwind', '#зима'],
+      brief: 'Показать 3 вещи из капсулы, без «купите» — сценарий через личный опыт. Обязательно erid и @nordwind.',
+      days: [-6, 12], daily_cap: 1,
+    },
+    {
+      brand: { name: 'FitFlow', legal_name: 'ИП Соколова А. В.', inn: '770987654321', contact: 'brand@fitflow.ru' },
+      name: 'FitFlow — приложение тренировок', model: 'cpm', budget: 90000, rate: 320, posts_target: 24, deliver: 14,
+      status: 'active', erid: '2VtzqwR4mNp', mention: '@fitflow.app', hashtags: ['#fitflow', '#тренировки'],
+      brief: 'Сторителлинг «как я бросил зал и вернулся», CTA в описании, ссылка в шапке.',
+      days: [-14, 20], daily_cap: 2,
+    },
+    {
+      brand: { name: 'Skillkit', legal_name: 'ООО «Скилкит»', inn: '7811223344', contact: 'partners@skillkit.io' },
+      name: 'Skillkit — курсы по аналитике', model: 'cpa', budget: 150000, rate: 1200, posts_target: 26, deliver: 16,
+      status: 'active', erid: '2VtzqxT7bLz', mention: '@skillkit', hashtags: ['#skillkit', '#аналитика'],
+      brief: 'Разбор кейса + промокод PULSE20. Оплата за оплативших курс, постбэк приходит автоматически.',
+      days: [-3, 30], daily_cap: 2,
+    },
+    {
+      brand: { name: 'Nordwind', legal_name: 'ООО «Нордвинд»', inn: '7701234567', contact: 'ads@nordwind.ru' },
+      name: 'Nordwind — бартер, осенняя съёмка', model: 'barter', budget: 0, rate: 0, posts_target: 2, deliver: 2,
+      status: 'done', erid: '', marking: 'none', mention: '@nordwind', hashtags: ['#nordwind'],
+      brief: 'Бартер: вещи за ролик. Деньги не начисляются, но выходы учитываются.',
+      days: [-40, -12], daily_cap: 1,
+    },
+  ];
+
+  const brandIds = new Map();
+  const campaignRows = [];
+  for (const c of CAMPAIGNS) {
+    let brandId = brandIds.get(c.brand.name);
+    if (!brandId) {
+      brandId = uid('br_');
+      db.prepare('INSERT INTO brands (id, name, legal_name, inn, contact, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(brandId, c.brand.name, c.brand.legal_name, c.brand.inn, c.brand.contact, '', addDays(ts, -60));
+      brandIds.set(c.brand.name, brandId);
+    }
+    const id = uid('cm_');
+    const startsAt = addDays(ts, c.days[0]);
+    const endsAt = addDays(ts, c.days[1]);
+    db.prepare(`INSERT INTO campaigns (id, brand_id, project_id, name, model, budget_cents, rate_cents, posts_target,
+        starts_at, ends_at, status, brief, mention, link_url, hashtags, erid, marking, paid_cents, daily_cap, created_at, updated_at)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, 0, ?, ?, ?)`)
+      .run(id, brandId, c.name, c.model, Math.round(c.budget * 100), Math.round(c.rate * 100), c.posts_target,
+        startsAt, endsAt, c.status, c.brief, c.mention, JSON.stringify(c.hashtags), c.erid, c.marking || 'erid', c.daily_cap,
+        addDays(ts, c.days[0]), addDays(ts, c.days[0]));
+    campaignRows.push({ ...c, id, brandId, startsAt, endsAt });
+  }
+
+  // демо-трафик до раздачи кампаний: у CPA-модели уже есть конверсии для начислений
+  if ((process.env.PULSE_MODE || 'demo') !== 'live') simulateTraffic({ budget: 60000 });
+
+  // раздаём кампании части уже вышедших роликов и считаем деньги по факту просмотров
+  // каждый выход = одна публикация (A/B на одном аккаунте — это два выхода)
+  const pubPool = db.prepare(`SELECT pb.id pub_id, pb.views, pb.clicks, pb.published_at, e.id ep_id, e.description
+    FROM publications pb JOIN episodes e ON e.id = pb.episode_id
+    WHERE pb.status = 'published'
+      AND EXISTS (SELECT 1 FROM clicks c WHERE c.publication_id = pb.id)
+    ORDER BY pb.published_at DESC`).all();
+  const convByPub = new Map(db.prepare('SELECT publication_id pid, COUNT(*) n FROM conversions WHERE publication_id IS NOT NULL GROUP BY publication_id')
+    .all().map((r) => [r.pid, r.n]));
+  let cursor = 0;
+  let campaignPosts = 0;
+  for (const campaign of campaignRows) {
+    const disclosure = disclosureFor({ brand_id: campaign.brandId, erid: campaign.erid, marking: 'erid' });
+    const touched = new Set();
+    const quota = Math.min(campaign.posts_target, campaign.deliver ?? campaign.posts_target);
+    for (let taken = 0; taken < quota && cursor < pubPool.length; taken++) {
+      const pub = pubPool[cursor++];
+      if (!touched.has(pub.ep_id)) {
+        touched.add(pub.ep_id);
+        db.prepare('UPDATE episodes SET campaign_id = ?, ad_disclosure = ? WHERE id = ?')
+          .run(campaign.id, disclosure, pub.ep_id);
+      }
+      const revenue = revenueFor(
+        { model: campaign.model, rate_cents: Math.round(campaign.rate * 100), posts_target: campaign.posts_target },
+        { views: pub.views, clicks: pub.clicks, conversions: convByPub.get(pub.pub_id) || 0 },
+      );
+      db.prepare('INSERT INTO campaign_posts (id, campaign_id, episode_id, publication_id, revenue_cents, views, clicks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(uid('cp_'), campaign.id, pub.ep_id, pub.pub_id, revenue, pub.views, pub.clicks, pub.published_at);
+      campaignPosts++;
+    }
+  }
+
+  // метрики досинхронизируются так же, как в проде после сбора аналитики
+  syncCampaignMetrics();
+
+  // кампании, где все выходы сделаны, закрываются автоматически
+  for (const campaign of campaignRows) {
+    const done = db.prepare('SELECT COUNT(*) n FROM campaign_posts WHERE campaign_id = ?').get(campaign.id).n;
+    if (done >= campaign.posts_target) db.prepare("UPDATE campaigns SET status = 'done' WHERE id = ?").run(campaign.id);
+  }
+
+  // оплаты: часть счетов уже закрыта, часть — в дебиторке (видно на экране «Реклама»)
+  for (const c of campaignRows) {
+    const earned = db.prepare('SELECT COALESCE(SUM(revenue_cents),0) v FROM campaign_posts WHERE campaign_id = ?').get(c.id).v;
+    const status = db.prepare('SELECT status FROM campaigns WHERE id = ?').get(c.id).status;
+    // закрытая кампания закрыта и по деньгам, активная — частично оплачена (дебиторка видна на экране)
+    const paid = status === 'done' ? earned : Math.round(earned * 0.6);
+    db.prepare('UPDATE campaigns SET paid_cents = ? WHERE id = ?').run(paid, c.id);
   }
 
   // ── журнал ────────────────────────────────────────────────────────────────

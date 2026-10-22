@@ -150,6 +150,8 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState({ title: '', description: '', hashtags: '', scenes: [] });
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [sponsor, setSponsor] = useState(null);
+  const [campaigns, setCampaigns] = useState([]);
 
   useEffect(() => {
     if (!episodeId) { setForecast(null); return; }
@@ -157,6 +159,15 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
     api.forecast(episodeId).then((res) => { if (alive) setForecast(res); }).catch(() => {});
     return () => { alive = false; };
   }, [episodeId]);
+
+  const loadSponsor = async () => {
+    if (!episodeId) return;
+    try {
+      const [sp, list] = await Promise.all([api.episodeCampaign(episodeId), api.campaigns()]);
+      setSponsor(sp);
+      setCampaigns(list || []);
+    } catch { /* экран работает и без рекламного блока */ }
+  };
 
   const load = async () => {
     if (!episodeId) return;
@@ -174,7 +185,7 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
     }
   };
 
-  useEffect(() => { setData(null); setTab('content'); setConfirmDelete(false); load(); }, [episodeId]);
+  useEffect(() => { setData(null); setTab('content'); setConfirmDelete(false); setSponsor(null); load(); loadSponsor(); }, [episodeId]);
 
   const action = async (name, extra) => {
     setBusy(true);
@@ -406,6 +417,61 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                 <Field label="Хештеги" hint="Через пробел. Для Reels и TikTok наборы разные — Pulse подставит площадочные при публикации.">
                   <input className="input" value={draft.hashtags} onChange={(e) => setDraft({ ...draft, hashtags: e.target.value })} />
                 </Field>
+
+                <div className="card flat" style={{ padding: 13, borderColor: sponsor?.campaign ? 'rgba(167,139,250,.3)' : 'var(--line)' }}>
+                  <div className="row-between" style={{ marginBottom: 8, gap: 10 }}>
+                    <div className="row" style={{ gap: 7 }}>
+                      <Icon name="megaphone" size={14} style={{ color: 'var(--violet-2)' }} />
+                      <b style={{ fontSize: 12.5 }}>Спонсор ролика</b>
+                      {sponsor?.campaign && (
+                        <Badge tone={sponsor.campaign.erid ? 'success' : 'warn'}>
+                          {sponsor.campaign.erid ? 'erid есть' : 'без erid'}
+                        </Badge>
+                      )}
+                    </div>
+                    {sponsor?.campaign && (
+                      <button className="link-btn" style={{ fontSize: 11 }}
+                        onClick={async () => { await api.detachCampaign(episodeId); loadSponsor(); load(); refreshLight(); }}>
+                        Отвязать
+                      </button>
+                    )}
+                  </div>
+
+                  {sponsor?.campaign ? (
+                    <div className="col" style={{ gap: 6 }}>
+                      <div style={{ fontSize: 12 }}>{sponsor.campaign.name} · {sponsor.campaign.brand_name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5 }}>
+                        {sponsor.disclosure || 'Маркировка не требуется — добавьте erid, если бренд требует ОРД.'}
+                      </div>
+                      {sponsor.campaign.brief && (
+                        <div style={{ fontSize: 11, color: 'var(--text-2)' }}>Бриф: {sponsor.campaign.brief}</div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="col" style={{ gap: 8 }}>
+                      <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5 }}>
+                        Pulse сам привяжет активную кампанию, если у ролика будет свободный слот. Можно выбрать вручную —
+                        описание, @бренд и маркировка подставятся при публикации.
+                      </div>
+                      <select className="select" style={{ fontSize: 12 }} value=""
+                        onChange={async (e) => {
+                          if (!e.target.value) return;
+                          try {
+                            await api.attachCampaign(e.target.value, episodeId);
+                            await loadSponsor(); await load(); refreshLight();
+                            toast.push({ tone: 'success', title: 'Кампания привязана', text: 'Маркировка добавится в описание автоматически' });
+                          } catch (err) {
+                            toast.push({ tone: 'error', title: 'Ошибка', text: err.message });
+                          }
+                        }}>
+                        <option value="">Привязать кампанию…</option>
+                        {campaigns.filter((c) => c.status === 'active' || c.status === 'paused').map((c) => (
+                          <option key={c.id} value={c.id}>{c.brand_name} — {c.name} ({c.modelLabel})</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
 
                 <div className="form-grid">
                   <Field label="Публикация">

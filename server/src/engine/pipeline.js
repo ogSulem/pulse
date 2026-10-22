@@ -12,6 +12,10 @@ import { providers } from '../providers/index.js';
 import { renderEpisode, renderCover, renderAvailable, renderInfo, MEDIA_DIR } from './render.js';
 import { planSlot, nextSlotIso } from './schedule.js';
 import { forecastEpisode, autopilotPolicy, recalculateAccountQuality } from './forecast.js';
+import {
+  attachCampaign, decorateCaption, disclosureFor, recordDelivery, syncCampaignMetrics,
+  autofillCampaigns, campaignStats, pickCampaign,
+} from './ads.js';
 import { preferredVariant, evaluateAB } from './abtest.js';
 import { checkCompliance, disclosureText, saveCompliance, PLATFORM_RULES } from './compliance.js';
 import { scoreViral, saveViral, recalibrate } from './viral.js';
@@ -184,6 +188,29 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
       finalDescription = `${finalDescription}\n\n${disclosure}`.trim();
     }
 
+    // ── реклама: если ролик ещё без спонсора, пробуем взять кампанию ────────
+    // Это происходит до рендера, чтобы маркировка попала в описание и проверку.
+    let campaign = episode.campaign_id ? db.prepare('SELECT * FROM campaigns WHERE id = ?').get(episode.campaign_id) : null;
+    if (!campaign) {
+      const picked = pickCampaign({ projectId: episode.project_id });
+      if (picked) {
+        try {
+          attachCampaign(episodeId, picked.campaign.id);
+          campaign = picked.campaign;
+          log({
+            level: 'info', actor: 'ads', action: 'campaign.auto_attach', entityType: 'episode', entityId: episodeId,
+            message: `Автопилот взял кампанию «${campaign.name}» (${campaign.model})`,
+            meta: { campaignId: campaign.id, postsLeft: picked.stats.postsLeft },
+          });
+        } catch (err) {
+          log({ level: 'warn', actor: 'ads', action: 'campaign.attach_failed', message: String(err.message || err) });
+        }
+      }
+    }
+    if (campaign) {
+      finalDescription = decorateCaption(finalDescription, campaign);
+    }
+
     let video = null;
     if (renderAvailable()) {
       try {
@@ -216,6 +243,7 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
       hashtags: parseJson(episode.hashtags, []),
       adLabel: adOn,
       aiLabel: aiOn,
+      campaign,
     });
     const viral = scoreViral({
       title: episode.title,
@@ -428,7 +456,10 @@ registerHandler('episode.publish', async ({ episodeId }) => {
     const variants = Number(episode.ab_test) === 1 && targets.length === 1 ? ['A', 'B'] : [preferred.variant];
 
     for (const variant of variants) {
-      const caption = buildCaption({ episode, project, product, platform, variant, hashtags });
+      const campaign = episode.campaign_id ? db.prepare('SELECT * FROM campaigns WHERE id = ?').get(episode.campaign_id) : null;
+      const caption = campaign
+        ? decorateCaption(buildCaption({ episode, project, product, platform, variant, hashtags }), campaign)
+        : buildCaption({ episode, project, product, platform, variant, hashtags });
       const result = await providers.publish.send({
         platform,
         account,
@@ -472,6 +503,10 @@ registerHandler('episode.publish', async ({ episodeId }) => {
           Math.round(num(episode.cost_cents, 0) / Math.max(1, variants.length * targets.length)), ts);
       created.push(pid);
       consumeQuota(account.id);
+      // ── спонсорский учёт: каждый выход фиксируется отдельно (A/B — тоже) ──
+      if (campaign) {
+        recordDelivery({ campaignId: campaign.id, episodeId, publicationId: pid, views: 0, clicks: 0 });
+      }
       log({
         level: 'info', actor: 'publisher', action: 'publication.created', entityType: 'publication', entityId: pid,
         message: `Публикация ${platform === 'tiktok' ? 'TikTok' : 'Reels'}${privacy !== 'public' ? ' (приватно — клиент не аудирован)' : ''}: ${episode.title}`,
@@ -569,6 +604,19 @@ registerHandler('autopilot.tick', async () => {
   }
 
   if (Number(settings.autopilot_global) !== 1) return;
+
+  // реклама: раздаём активные кампании по роликам, у которых ещё нет спонсора
+  try {
+    const filled = autofillCampaigns({ limit: 4 });
+    if (filled.length) {
+      log({
+        level: 'info', actor: 'ads', action: 'campaign.autofill', entityType: 'system',
+        message: `Кампании разложены по роликам: ${filled.map((f) => f.name).join(', ')}`, meta: { filled },
+      });
+    }
+  } catch (err) {
+    log({ level: 'warn', actor: 'ads', action: 'campaign.autofill_failed', message: String(err.message || err) });
+  }
   const projects = db.prepare('SELECT * FROM projects WHERE autopilot = 1 AND archived = 0').all();
   for (const project of projects) {
     const pending = db.prepare("SELECT COUNT(*) n FROM episodes WHERE project_id = ? AND status IN ('queued','generating','review','scheduled')").get(project.id).n;
@@ -695,6 +743,11 @@ export async function collectAnalytics() {
     if (dViews > 0) upsertDay.run(`${p.id}:${day}`, p.id, day, dViews, dLikes, dComments, dShares, dClicks, dFollowers);
     updated++;
   }
+  // спонсорские деньги считаются из тех же фактических просмотров
+  try {
+    syncCampaignMetrics();
+  } catch { /* метрики рекламы не должны ломать сбор аналитики */ }
+
   return updated;
 }
 

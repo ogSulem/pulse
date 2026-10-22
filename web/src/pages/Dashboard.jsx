@@ -175,6 +175,7 @@ export default function Dashboard({ onLaunch }) {
             <div className="money-band-sub">
               доход {money(moneyData.totals.revenue, moneyData.currency)} · расход {money(moneyData.totals.cost, moneyData.currency)}
               {moneyData.totals.roi != null && <> · ROI {Math.round(moneyData.totals.roi)}%</>}
+              {moneyData.totals.revenueSponsor > 0 && <> · в т.ч. <a href="#/ads" style={{ textDecoration: 'underline', textUnderlineOffset: 2 }}>спонсоры {money(moneyData.totals.revenueSponsor, moneyData.currency)}</a></>}
             </div>
           </div>
           <div className="money-band-stats">

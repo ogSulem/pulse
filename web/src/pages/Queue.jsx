@@ -108,6 +108,7 @@ export default function Queue({ onLaunch }) {
                     <span className="hide-md" style={{ opacity: 0.5 }}>·</span>
                     <span className="hide-md">{FORMAT_LABELS[e.format] || e.format}</span>
                     {e.viral > 0 && <Badge tone={e.viral >= 65 ? 'success' : e.viral >= 45 ? 'warn' : 'danger'}>скор {e.viral}</Badge>}
+                    {e.campaign_name && <Badge tone="accent"><Icon name="megaphone" size={10} /> {e.campaign_brand || 'реклама'}</Badge>}
                     {e.compliance && !e.compliance.ok && <Badge tone="danger"><Icon name="shield" size={10} /> правила</Badge>}
                     {e.risk >= 55 && <Badge tone={e.risk >= 70 ? 'danger' : 'warn'}>риск {e.risk}</Badge>}
                   </span>
