@@ -560,7 +560,8 @@ try {
     for (const c of res.candidates) {
       const total = c.scores.total;
       if (!(total >= 0 && total <= 100)) throw new Error(`${platform}: скор вне 0..100 — ${total}`);
-      if (c.scenes.some((sc) => sc.seconds > 6 || sc.seconds < 1)) throw new Error(`${platform}: сцена длиннее 6 с`);
+      // 34-секундный ролик: сцена 3–6 с (длинные ролики допускают до 9 с)
+      if (c.scenes.some((sc) => sc.seconds > 6 || sc.seconds < 1)) throw new Error(`${platform}: сцена вне 1–6 с`);
       const dur = c.scenes.reduce((a, sc) => a + sc.seconds, 0);
       if (dur > 42 || dur < 16) throw new Error(`${platform}: длительность ${dur} с вне 16–42`);
       // описание каждой площадки укладывается в её лимит символов

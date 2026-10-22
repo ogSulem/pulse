@@ -8,7 +8,7 @@
 // хук ограничен окном свайпа площадки, описание собирается по правилам площадки,
 // а продажа продукта включается по расписанию (80/20), а не в каждом ролике.
 // ─────────────────────────────────────────────────────────────────────────────
-import { clamp, num, seededRandom, pick } from '../core/utils.js';
+import { clamp, num, seededRandom, pick, parseJson } from '../core/utils.js';
 import { db } from '../core/db.js';
 import { PLATFORM_API_LIMITS } from './limits.js';
 import { nicheFor, hashtagsFor, buildUtmUrl, FORMAT_LABELS } from './brain.js';
@@ -69,10 +69,32 @@ function sceneTexts(role, ctx) {
   // «3 шага» согласовано всегда: случайное число давало «5 шага»
   const steps = 3;
   switch (role) {
-    case 'pain': return `${pain[0].toUpperCase()}${pain.slice(1)} — и это не лень`;
-    case 'why': return 'Совет «просто делай больше» растит не результат, а усталость';
-    case 'fix': return `${steps} шага: собрать → проверить → отпустить в работу`;
-    case 'proof': return `Через ${2 + Math.floor(rnd() * 3)} недели видно, работает ли система на самом деле`;
+    // у каждой роли — несколько формулировок: одинаковый текст во всех роликах
+    // бренда убивает и охват, и доверие («я это уже видел»)
+    case 'pain': return pick([
+      `${pain[0].toUpperCase()}${pain.slice(1)} — и это не лень`,
+      `Дело не в мотивации: ${pain}`,
+      `${pain[0].toUpperCase()}${pain.slice(1)}. Знакомо?`,
+      `Ты не ленивый — просто ${pain}`,
+    ], rnd);
+    case 'why': return pick([
+      'Совет «просто делай больше» растит не результат, а усталость',
+      'Мозг выбирает простое действие, а не важное — это не характер',
+      'Проблема не в дисциплине, а в отсутствии системы',
+      'Чем сильнее давишь на себя, тем быстрее откат',
+    ], rnd);
+    case 'fix': return pick([
+      `${steps} шага: собрать → проверить → отпустить в работу`,
+      'Сначала ритм: 3 выхода в неделю в одно и то же окно',
+      'Один ролик — одна мысль, остальное уходит в следующий',
+      'Заменить мотивацию на чек-лист из трёх пунктов',
+    ], rnd);
+    case 'proof': return pick([
+      `Через ${2 + Math.floor(rnd() * 3)} недели видно, работает ли система`,
+      'Первые 7 дней — самые сложные, дальше идёт по инерции',
+      'Через месяц ты не вспомнишь, что было тяжело',
+      'Стабильность видна на третьей неделе, а не на второй день',
+    ], rnd);
     case 'before': return `До: ${pain}. Каждый день одно и то же`;
     case 'turn': return `Изменил одну вещь — не объём, а порядок: ${fix2}`;
     case 'after': return 'После: то же время, но без ежедневного героизма';
@@ -104,14 +126,76 @@ function sceneTexts(role, ctx) {
   }
 }
 
+/**
+ * Сколько сцен нужно, чтобы честно набрать длину. Короткий ролик — 5–6 сцен,
+ * длинный (Creator Rewards, > 60 с) — до 9 сцен: растягивать одну мысль на 12 с
+ * нельзя, зритель уйдёт, а добавлять новые — можно.
+ */
+// Резервные роли для длинных роликов: добавляем только то, чего ещё нет в
+// структуре, иначе «fix» и «how» скажут одно и то же двумя сценами подряд.
+const EXTRA_ROLES = ['item1', 'item2', 'item3', 'minus', 'plus', 'verdict', 'how'];
+
+function planShape(shape, total, hookSec) {
+  const maxScene = total > 44 ? 9 : 6;
+  const body = shape.filter((r) => r !== 'close');
+  const tail = shape.includes('close') ? ['close'] : [];
+  const roles = [...body];
+  const redundant = roles.includes('fix') || roles.includes('how') ? ['how'] : [];
+  const pool = EXTRA_ROLES.filter((r) => !roles.includes(r) && !redundant.includes(r));
+  const needBody = Math.max(roles.length - 1 + tail.length, Math.ceil((total - hookSec) / maxScene));
+  while (roles.length - 1 + tail.length < needBody && pool.length) roles.push(pool.shift());
+  return { roles: [...roles, ...tail], maxScene };
+}
+
+
+/**
+ * Тема для хука: сначала голова заголовка («Белок», «5 минут растяжки»),
+ * потому что она про конкретный ролик; тег и ниша — запасной вариант.
+ */
+function hookSubject(tags, title, niche, fallback) {
+  const META = new Set(['разбор', 'коротко', 'итог', 'вывод', 'миф', 'правда', 'ошибка', 'ошибки', 'до', 'после', 'плюсы', 'минусы']);
+  let head = String(title || '').split(':')[0].replace(/[«»"]/g, '').trim();
+  // «Коротко: одна фраза…» — после split(':') остаётся служебное слово: снимаем
+  for (let i = 0; i < 3 && LEAD.test(head); i++) head = head.replace(LEAD, '').trim();
+  const words = head.split(/\s+/).filter(Boolean);
+  const first = (words[0] || '').toLowerCase();
+  // глагол («перестать», «разрушаем»), ярлык формата («до/после»), цифра в начале
+  // и служебные слова — не тема: «Почему перестать не работает?» звучит как баг
+  const verbish = /(ть|ться|тся|лся|лась|лись|ишь|ешь|ем|им|ут|ют|ат|ят)$/i.test(first);
+  const label = /[/|]/.test(head);
+  const numeric = /^\d/.test(head);
+  const meta = META.has(first);
+  const short = words.length <= 3 && head.length <= 26 && !verbish && !label && !numeric && !meta;
+  // тег вида «искусственныйинтеллект» в хуке читается как опечатка
+  const tag = (tags || []).find((t) => String(t).length >= 3 && String(t).length <= 14);
+  return (short && head) ? head : (tag || niche || fallback);
+}
+
 /** Тайминг: хук укладывается в окно свайпа, остальное — примерно равными сценами */
-function timing(shape, total, platform) {
+function timing(count, total, platform) {
   const pb = PLATFORM_PLAYBOOK[platform] || PLATFORM_PLAYBOOK.reels;
-  const hookSec = Math.min(pb.hookWindowSec + 1.2, 3.2);
-  const rest = Math.max(shape.length - 1, 1);
-  // титр читается 2–3 с: сцену длиннее 6 с зритель воспринимает как «зависло»
-  const perScene = clamp((total - hookSec) / rest, 3, 6);
-  return shape.map((_, i) => (i === 0 ? Math.round(hookSec * 10) / 10 : Math.round(perScene * 10) / 10));
+  const hookSec = Math.round(Math.min(pb.hookWindowSec + 1.2, 3.2) * 10) / 10;
+  const maxScene = total > 44 ? 9 : 6;
+  // финальный CTA не держим на экране дольше 4.5 с: это призыв, а не сцена
+  const closeCap = 4.5;
+  const rest = Math.max(count - 1, 1);
+  const perScene = clamp((total - hookSec) / rest, 3, maxScene);
+  const scenes = Array.from({ length: rest }, () => Math.round(perScene * 10) / 10);
+  if (count > 2) {
+    const last = scenes.pop();
+    const capped = Math.min(last, closeCap);
+    // остаток от CTA раздаём остальным сценам, чтобы длина осталась честной
+    let leftover = Math.round((last - capped) * 10) / 10;
+    for (let i = 0; i < scenes.length && leftover > 0; i++) {
+      const room = maxScene - scenes[i];
+      if (room <= 0) continue;
+      const add = Math.min(room, leftover);
+      scenes[i] = Math.round((scenes[i] + add) * 10) / 10;
+      leftover = Math.round((leftover - add) * 10) / 10;
+    }
+    scenes.push(Math.round(capped * 10) / 10);
+  }
+  return [hookSec, ...scenes];
 }
 
 // ── Описание под площадку ────────────────────────────────────────────────────
@@ -189,20 +273,36 @@ export function buildPackage({
   const niche = nicheFor(project);
   const topic = topicOf(idea.title || idea.topic || project.niche || project.name, project.name);
   const pb = PLATFORM_PLAYBOOK[platform] || PLATFORM_PLAYBOOK.reels;
-  const total = clamp(num(durationSec, project.duration_sec || 32), 16, 42);
+  // Потолок длины — тот, что реально может отрендерить платформа. Иначе
+  // просьба «сделай 65 с для Creator Rewards» молча превращалась в 42 с.
+  const cap = clamp(num(process.env.PULSE_RENDER_MAX_SEC, 42), 16, 120);
+  const requested = num(durationSec, project.duration_sec || 32);
+  const total = clamp(requested, 16, cap);
+  const cappedByRender = requested > cap;
   const rnd = seededRandom(`${topic}-${platform}-${attempt}-${project.id || project.name || ''}`);
 
-  const lab = hookLab({ topic, platform, niche: project.niche || '' });
+  // Тема для хука — короткое существительное (тег идеи или ниша), а не обрубок
+  // заголовка: из «5 минут растяжки» получалось «Почему 5 минут не работает?».
+  // tags в SQLite — это TEXT с JSON: без parseJson в хук попадал символ «[»
+  const ideaTags = Array.isArray(idea.tags) ? idea.tags : parseJson(idea.tags, []);
+  const hookSource = hookSubject(ideaTags, idea.title, project.niche, topic);
+  const lab = hookLab({ topic: hookSource, platform, niche: project.niche || '' });
   // приоритет — хук, который успевает прозвучать до свайпа; среди них уже по силе
   const fitting = lab.hooks.filter((h) => h.fitsWindow);
   const ranked = [...fitting.sort((a, b) => b.score - a.score), ...lab.hooks.filter((h) => !h.fitsWindow).sort((a, b) => b.score - a.score)];
-  const hookPick = ranked[attempt % ranked.length] || lab.best;
+  // Внутри топ-3 выбираем по «отпечатку» идеи: у каждого ролика свой угол, иначе
+  // весь аккаунт начинался бы одинаковой фразой. Качество при этом не падает.
+  const top = ranked.filter((h) => h.fitsWindow).slice(0, 3);
+  const pool = top.length ? top : ranked.slice(0, 3);
+  const print = [...String(idea.id || idea.title || topic)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 100003, 7);
+  const hookPick = pool[(print + attempt) % pool.length] || lab.best;
   const format = SHAPES[idea.format] ? idea.format : (SHAPES[project.format] ? project.format : 'problem-solution');
   const shape = SHAPES[format];
   const ctx = { topic, niche, product, rnd, platform };
 
-  const body = shape.map((role) => ({ role, text: sceneTexts(role, ctx) }));
-  const seconds = timing(shape, total, platform);
+  const planned = planShape(shape, total, Math.min(pb.hookWindowSec + 1.2, 3.2));
+  const body = planned.roles.map((role) => ({ role, text: sceneTexts(role, ctx) }));
+  const seconds = timing(planned.roles.length + 1, total, platform);
   const scenes = [{ n: 1, role: 'hook', text: hookPick.text, seconds: seconds[0], visual: pick(niche.visuals, rnd) }]
     .concat(body.map((b, i) => ({
       n: i + 2,
@@ -305,6 +405,10 @@ export function buildPackage({
     },
     checks: retention.checks,
     warnings: [
+      ...(cappedByRender ? [{
+        severity: 'warn',
+        text: `Нужно ${Math.round(requested)} с, но рендер ограничен ${cap} с — поднимите PULSE_RENDER_MAX_SEC, иначе Creator Rewards недоступен`,
+      }] : []),
       ...(compliance.blocking || []).map((b) => ({ severity: 'block', text: b.reason })),
       ...(hookPick.fitsWindow ? [] : [{ severity: 'warn', text: `Хук ${hookPick.readableSec} с — длиннее окна свайпа ${pb.hookWindowSec} с` }]),
       ...(durationSecFinal > pb.idealSec[1] ? [{ severity: 'warn', text: `Длительность ${durationSecFinal} с выше оптимума ${pb.idealSec[1]} с — досмотр упадёт` }] : []),

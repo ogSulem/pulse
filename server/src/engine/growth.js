@@ -409,7 +409,9 @@ const HOOK_PATTERNS = [
   // формулировки живут в альтернативах, а не в первой сцене.
   { id: 'contradiction', label: 'Контрадикция', template: '«{topic}» — это миф', why: 'Ломает ожидание и держит до развязки' },
   { id: 'number', label: 'Конкретное число', template: '{n} шага до результата', why: 'Цифра обещает измеримый результат' },
-  { id: 'pain-question', label: 'Вопрос-боль', template: 'Почему {topic} не работает?', why: 'Зритель узнаёт свою ситуацию в первую секунду' },
+  // у существительных бывает множественное число («привычки»), и «Почему привычки
+  // не работает?» — грамматическая ошибка. Для них отдельная формулировка.
+  { id: 'pain-question', label: 'Вопрос-боль', template: 'Почему {topic} не работает?', pluralTemplate: '{topic}: что не так', why: 'Зритель узнаёт свою ситуацию в первую секунду' },
   { id: 'mistake', label: 'Ошибка', template: '{topic}: главная ошибка', why: 'Прямое указание на ошибку — сильный паттерн-интеррапт' },
   { id: 'result-first', label: 'Результат вперёд', template: 'Результат за 7 дней', why: 'Показываем конец до начала, дальше держит любопытство' },
   { id: 'loop', label: 'Петля', template: 'Досмотри до развязки', why: 'Провоцирует пересмотр, а он усиливает охват' },
@@ -461,7 +463,10 @@ export function hookLab({ topic = '', platform = 'reels', niche = '' } = {}) {
   const cleanTopic = String(topic || '').trim() || niche || 'твой контент';
   const shortTopic = shortHookTopic(cleanTopic, niche) || cleanTopic;
   const hooks = HOOK_PATTERNS.map((p, i) => {
-    const raw = p.template.replace('{topic}', shortTopic).replace('{n}', String(3 + (i % 3)));
+    const firstWord = shortTopic.split(/\s+/)[0] || '';
+    const plural = /[иы]$/i.test(firstWord) && firstWord.length > 3;
+    const tpl = plural && p.pluralTemplate ? p.pluralTemplate : p.template;
+    const raw = tpl.replace('{topic}', shortTopic).replace('{n}', String(3 + (i % 3)));
     const text = raw.charAt(0).toUpperCase() + raw.slice(1);
     const s = scoreHook(text, { platform });
     // проверяем тот же текст вирусным скором как первую сцену — второй, независимый взгляд
@@ -476,7 +481,9 @@ export function hookLab({ topic = '', platform = 'reels', niche = '' } = {}) {
     // хук без темы звучит одинаково у всех и не цепляет именно эту аудиторию:
     // даём бонус за упоминание темы, иначе в топе всегда «Результат за 7 дней»
     const anchored = text.toLowerCase().includes(shortTopic.toLowerCase());
-    const combined = Math.round(s.score * 0.65 + viral.score * 0.35 + (anchored ? 10 : 0));
+    // Хук без темы — фраза ни о чём: подходит любому аккаунту и поэтому не
+    // цепляет именно эту аудиторию. Штрафуем, а не просто не награждаем.
+    const combined = Math.round(s.score * 0.65 + viral.score * 0.35 + (anchored ? 12 : -8));
     return {
       id: p.id, type: p.label, text,
       score: combined, hookScore: s.score, viralScore: viral.score,
@@ -837,9 +844,11 @@ function shortHookTopic(title, fallback = '') {
   }
   // одно ёмкое слово лучше, чем обрубок фразы: «фитнес», а не «фитнес и»
   const first = words[0] || '';
-  const out = words.slice(0, first.length >= 6 ? 1 : (words[1] === 'для' ? 3 : 2));
+  // 3 слова ≈ 1.2–2.0 с речи — ещё укладывается в окно свайпа, но фраза
+  // остаётся осмысленной («5 минут растяжки», а не «5 минут»)
+  const out = words.slice(0, first.length >= 9 ? 1 : (words[1] === 'для' ? 3 : 3));
   const clean = out.join(' ').replace(/[,:;—–-]+$/, '').trim();
-  return clean.length >= 4 ? clean.slice(0, 24) : String(fallback || '').slice(0, 22);
+  return clean.length >= 4 ? clean.slice(0, 26) : String(fallback || '').slice(0, 24);
 }
 
 /** Короткая тема для хука: 2–3 слова, не обрезая посреди фразы */

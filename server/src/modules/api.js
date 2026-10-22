@@ -723,7 +723,7 @@ api.post('/studio', (req, res) => {
 
   const idea = b.ideaId ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(b.ideaId) : null;
   const platform = PLATFORMS.includes(b.platform) ? b.platform : 'reels';
-  const durationSec = clamp(num(b.durationSec, project.duration_sec || 30), 12, 60);
+  const durationSec = clamp(num(b.durationSec, project.duration_sec || 30), 12, 90);
 
   // продажу решает не пользователь, а правило 80/20 — но можно переопределить
   // продажу обычно решает правило 80/20, но человек может переопределить
@@ -774,7 +774,7 @@ api.post('/studio/queue', (req, res) => {
     pack = buildPackage({
       project,
       idea: b.ideaId ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(b.ideaId) : {},
-      product, platform, durationSec: clamp(num(b.durationSec, project.duration_sec || 30), 12, 60),
+      product, platform, durationSec: clamp(num(b.durationSec, project.duration_sec || 30), 12, 90),
       promo, attempt: 0,
     });
   }

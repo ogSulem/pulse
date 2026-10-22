@@ -987,8 +987,8 @@ function StudioTab({ toast }) {
             <Segmented value={platform} onChange={setPlatform}
               options={[{ value: 'tiktok', label: 'TikTok' }, { value: 'reels', label: 'Reels' }, { value: 'youtube', label: 'Shorts' }]} />
           </Field>
-          <Field label="Длительность" hint="оптимум площадки подставится сам">
-            <input className="input" type="number" min={12} max={60} value={durationSec}
+          <Field label="Длительность" hint="61+ с — порог TikTok Creator Rewards; лимит рендера в настройках">
+            <input className="input" type="number" min={12} max={90} value={durationSec}
               onChange={(e) => setDurationSec(Number(e.target.value) || 32)} />
           </Field>
           <Field label="Продажа продукта" hint="по умолчанию решает правило 80/20">
