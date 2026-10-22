@@ -80,6 +80,14 @@ export const api = {
   updateProduct: (id, payload) => request(`/products/${id}`, { method: 'PATCH', body: payload }),
   deleteProduct: (id) => request(`/products/${id}`, { method: 'DELETE' }),
 
+  growthOverview: (params = {}) => request(`/growth/overview?${new URLSearchParams(params)}`),
+  growthTrends: (params = {}) => request(`/growth/trends?${new URLSearchParams(params)}`),
+  growthHooks: (params = {}) => request(`/growth/hooks?${new URLSearchParams(params)}`),
+  growthRetention: (payload) => request('/growth/retention', { method: 'POST', body: payload }),
+  growthMonetization: () => request('/growth/monetization'),
+  growthPlaybook: (accountId) => request(`/growth/playbook/${accountId}`),
+  episodeGate: (id) => request(`/episodes/${id}/gate`),
+
   adsOverview: () => request('/ads/overview'),
   brands: () => request('/brands'),
   createBrand: (payload) => request('/brands', { method: 'POST', body: payload }),

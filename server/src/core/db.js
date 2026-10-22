@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE TABLE IF NOT EXISTS accounts (
   id            TEXT PRIMARY KEY,
-  platform      TEXT NOT NULL,              -- reels | tiktok
+  platform      TEXT NOT NULL,              -- reels | tiktok | youtube
   handle        TEXT NOT NULL,
   display_name  TEXT NOT NULL,
   avatar_hue    INTEGER DEFAULT 270,
@@ -299,6 +299,12 @@ function ensureColumns() {
       external_id: 'TEXT',
       token_expires_at: 'TEXT',
       auth_note: 'TEXT',
+      // подписчики: вручную или из API канала. Нужны портфелю и прогрессу монетизации
+      followers: 'INTEGER DEFAULT 0',
+      followers_updated_at: 'TEXT',
+      followers_source: "TEXT DEFAULT 'manual'",
+      // бренд-привязка: аккаунт ведёт один проект. NULL — универсальный (можно всё)
+      project_id: 'TEXT',
     },
     publications: {
       cover_path: 'TEXT',
@@ -363,6 +369,7 @@ export const settingsDefaults = {
 
   // ── площадки: реальные лимиты и статус приложений ────────────────────────
   tiktok_audited: '0',            // 0 = неаудированный клиент → только приватные посты
+  youtube_audited: '0',           // 0 = проект Google без аудита → загрузки только private
   tiktok_privacy: 'SELF_ONLY',
   ai_label: '1',                  // помечать AI-контент (требование площадок)
   ad_label: '1',                  // помечать рекламу в описании
@@ -372,6 +379,7 @@ export const settingsDefaults = {
   currency: '₽',
   rpm_reels: '25',                // доход с 1000 просмотров Reels, ₽
   rpm_tiktok: '10',
+  rpm_youtube: '30',
   conv_rate: '1.6',               // % кликов, которые становятся покупкой
   ctr_estimate: '1.2',            // % просмотров, которые переходят по ссылке
   postback_key: '',               // секрет для POST /api/postback (пусто = demo без проверки)

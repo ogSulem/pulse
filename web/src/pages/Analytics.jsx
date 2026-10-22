@@ -3,7 +3,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, AreaChart, BarList, Segmented, Donut, Empty, Modal } from '../components/ui.jsx';
-import { fmt, full, dateShort, time, FORMAT_LABELS, pct } from '../lib/format.js';
+import { fmt, full, dateShort, time, FORMAT_LABELS, pct, platformLabel } from '../lib/format.js';
 
 export default function Analytics() {
   const { data } = useApp();
@@ -177,7 +177,7 @@ export default function Analytics() {
             )}
             {overview?.intelligence?.schedule?.length ? (
               <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line)', fontSize: 11, color: 'var(--text-2)' }}>
-                Лучшие часы: {overview.intelligence.schedule.map((s) => `${s.platform === 'tiktok' ? 'TikTok' : 'Reels'} ${s.best.slice(0, 2).map((b) => `${String(b.hour).padStart(2, '0')}:00`).join(', ')}`).join(' · ')}
+                Лучшие часы: {overview.intelligence.schedule.map((s) => `${platformLabel(s.platform)} ${s.best.slice(0, 2).map((b) => `${String(b.hour).padStart(2, '0')}:00`).join(', ')}`).join(' · ')}
               </div>
             ) : null}
           </div>

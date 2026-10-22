@@ -285,12 +285,19 @@ const asTagList = (value) => {
   return [];
 };
 
+// Наборы хештегов под алгоритм площадки. Не «максимум тегов», а те, что реально
+// помогают индексации: у Shorts хватает 3–5, у TikTok — ниша + 2 общих.
+const PLATFORM_HASHTAG_BASE = {
+  tiktok: ['рек', 'врек', 'fyp', 'тикток', 'рекомендации', 'тренд'],
+  reels: ['reels', 'рилс', 'reelsinstagram', 'тренды'],
+  youtube: ['shorts', 'шортс', 'shortsvideo', 'youtubeshorts'],
+};
+
 export function hashtagsFor(project, platform = 'reels', idea = {}, limit = 8) {
   const niche = nicheFor(project);
-  const base = platform === 'tiktok'
-    ? ['рек', 'врек', 'fyp', 'тикток', 'рекомендации', 'тренд']
-    : ['reels', 'рилс', 'reelsinstagram', 'shorts', 'тренды'];
-  const tags = pickMany([...niche.tags, ...asTagList(idea?.tags), ...base], Math.min(limit, 10));
+  const base = PLATFORM_HASHTAG_BASE[platform] || PLATFORM_HASHTAG_BASE.reels;
+  const cap = platform === 'youtube' ? Math.min(limit, 5) : Math.min(limit, 10);
+  const tags = pickMany([...niche.tags, ...asTagList(idea?.tags), ...base], cap);
   return [...new Set(tags)].slice(0, limit);
 }
 
@@ -397,12 +404,22 @@ export function buildUtmUrl(product, platform = 'reels', extra = {}) {
 }
 
 export function platformCaption(script, platform, product = null) {
-  const tagLine = (script.hashtags || []).map((t) => `#${t.replace(/^#/, '')}`).join(' ');
+  const tags = (script.hashtags || []).map((t) => `#${String(t).replace(/^#/, '')}`);
   const cta = platform === 'tiktok'
     ? 'Ссылка в профиле · сохрани, чтобы попробовать'
-    : 'Ссылка в описании · сохрани пост';
+    : platform === 'youtube'
+      // у Shorts ссылка в описании кликабельна, а «до конца» — главный сигнал удержания
+      ? 'Ссылка ниже · досмотри до конца, там развязка'
+      : 'Ссылка в описании · сохрани пост';
   const productLine = product?.url ? `\n\n${product.name}: ${buildUtmUrl(product, platform)}` : '';
-  return `${script.caption || ''}${productLine}\n\n${cta}\n${tagLine}`.trim();
+  // YouTube: 3–5 тегов, остальное — шум; TikTok/Reels держим до 8
+  const tagLine = (platform === 'youtube' ? tags.slice(0, 5) : tags).join(' ');
+  // YouTube обрезает описание по 5000 байт — держим запас, чтобы не потерять маркировку
+  const text = `${script.caption || ''}${productLine}\n\n${cta}\n${tagLine}`.trim();
+  if (platform === 'youtube' && Buffer.byteLength(text, 'utf8') > 4800) {
+    return `${String(script.caption || '').slice(0, 1800)}${productLine}\n\n${cta}\n${tagLine}`.trim();
+  }
+  return text;
 }
 
 export const COVER_PALETTES = [

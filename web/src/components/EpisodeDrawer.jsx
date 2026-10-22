@@ -4,7 +4,7 @@ import { useApp } from '../App.jsx';
 import { Drawer, Badge, Progress, Field, Confirm, useToast } from './ui.jsx';
 import Icon, { PlatformIcon } from './Icons.jsx';
 import {
-  STATUS_META, fmt, dateTime, durationLabel, relative, fmtDateTimeLocal, bytes, money, pct,
+  STATUS_META, fmt, dateTime, durationLabel, relative, fmtDateTimeLocal, bytes, money, pct, platformLabel,
 } from '../lib/format.js';
 
 const RISK = (risk) => (risk >= 70 ? 'danger' : risk >= 55 ? 'warn' : 'success');
@@ -121,7 +121,7 @@ function CheckPanel({ episode, onRefresh }) {
             <div className="finding ok" style={{ marginTop: 10 }}><Icon name="check" size={13} /><div>Нарушений не найдено</div></div>
           )}
           <div className="mini-kv tight" style={{ marginTop: 12 }}>
-            <div><span>Площадка</span><b>{compliance.platform === 'tiktok' ? 'TikTok' : 'Reels'}</b></div>
+            <div><span>Площадка</span><b>{platformLabel(compliance.platform)}</b></div>
             <div><span>Лимит описания</span><b>{compliance.limits?.captionMax} симв.</b></div>
             <div><span>Маркировка</span><b>{compliance.labels?.ad ? 'реклама' : '—'} / {compliance.labels?.ai ? 'AI' : '—'}</b></div>
           </div>
@@ -528,7 +528,7 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                     <div className="row-between" style={{ marginBottom: 10 }}>
                       <div className="row" style={{ gap: 8 }}>
                         <span style={{ color: 'var(--violet-2)' }}><PlatformIcon platform={p.platform} size={15} /></span>
-                        <b style={{ fontSize: 12.5 }}>{p.platform === 'tiktok' ? 'TikTok' : 'Reels'}</b>
+                        <b style={{ fontSize: 12.5 }}>{platformLabel(p.platform)}</b>
                         <span className="muted" style={{ fontSize: 11.5 }}>@{p.handle || '—'}</span>
                         <Badge tone={p.variant === 'B' ? 'accent' : 'muted'}>вариант {p.variant}</Badge>
                       </div>

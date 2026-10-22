@@ -29,12 +29,17 @@ const PROJECTS = [
   },
 ];
 
+// Портфель из трёх площадок: у каждого аккаунта своя роль и своя история роста.
+// followers — реальные подписчики на момент старта демо (дальше растут из факта).
 const ACCOUNTS = [
-  { platform: 'reels', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 3, min_gap_min: 110, quality: 92, hue: 268 },
-  { platform: 'reels', handle: 'momentum.app', display_name: 'Momentum', status: 'healthy', daily_limit: 3, min_gap_min: 95, quality: 84, hue: 250 },
-  { platform: 'reels', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'warmup', daily_limit: 2, min_gap_min: 140, quality: 71, hue: 300 },
-  { platform: 'tiktok', handle: 'pulse.studio', display_name: 'Pulse', status: 'healthy', daily_limit: 3, min_gap_min: 90, quality: 88, hue: 275 },
-  { platform: 'tiktok', handle: 'momentum.app', display_name: 'Momentum', status: 'cooldown', daily_limit: 2, min_gap_min: 120, quality: 63, hue: 240 },
+  { platform: 'reels', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 3, min_gap_min: 110, quality: 92, hue: 268, followers: 24800, project: 'pulse' },
+  { platform: 'reels', handle: 'momentum.app', display_name: 'Momentum', status: 'healthy', daily_limit: 3, min_gap_min: 95, quality: 84, hue: 250, followers: 18400, project: 'momentum' },
+  { platform: 'reels', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'warmup', daily_limit: 2, min_gap_min: 140, quality: 71, hue: 300, followers: 6100, project: 'fitflow' },
+  { platform: 'tiktok', handle: 'pulse.studio', display_name: 'Pulse', status: 'healthy', daily_limit: 3, min_gap_min: 90, quality: 88, hue: 275, followers: 41200, project: 'pulse' },
+  { platform: 'tiktok', handle: 'momentum.app', display_name: 'Momentum', status: 'cooldown', daily_limit: 2, min_gap_min: 120, quality: 63, hue: 240, followers: 12600, project: 'momentum' },
+  { platform: 'youtube', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 2, min_gap_min: 240, quality: 86, hue: 8, followers: 9800, project: 'pulse' },
+  { platform: 'youtube', handle: 'momentum.shorts', display_name: 'Momentum Shorts', status: 'warmup', daily_limit: 1, min_gap_min: 300, quality: 68, hue: 355, followers: 3200, project: 'momentum' },
+  { platform: 'youtube', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'healthy', daily_limit: 2, min_gap_min: 260, quality: 74, hue: 20, followers: 1150, project: 'fitflow' },
 ];
 
 const PRODUCTS = [
@@ -116,16 +121,23 @@ function hourBoost(publishedAt) {
 }
 
 function makePublicationsFor(episode, project, accounts, rnd, publishedAt) {
-  const platforms = rnd() > 0.45 ? ['reels', 'tiktok'] : ['reels'];
+  const platforms = ['reels'];
+  if (rnd() > 0.4) platforms.push('tiktok');
+  // Shorts — не «копия везде»: только часть роликов, иначе охват размывается
+  if (rnd() > 0.6) platforms.push('youtube');
   const out = [];
   for (const platform of platforms) {
-    const pool = accounts.filter((a) => a.platform === platform && a.status !== 'blocked');
+    // аккаунт публикует только контент своего бренда — история не смешивается
+    const pool = accounts.filter((a) => a.platform === platform && a.status !== 'blocked'
+      && (!a.project_id || !project?.id || a.project_id === project.id));
     if (!pool.length) continue;
     const account = pool[Math.floor(rnd() * pool.length)];
-    const variants = rnd() > 0.55 ? ['A', 'B'] : ['A'];
+    const variants = platform === 'youtube' || rnd() <= 0.55 ? ['A'] : ['A', 'B']; // у Shorts A/B не делаем
     const viral = rnd() < 0.14 ? 5 + rnd() * 8 : 1;
     const base = 900 + rnd() * 2200;
-    const targetA = Math.round(base * viral * (1 + account.quality / 260) * hourBoost(publishedAt));
+    // у Shorts ниже базовый охват, но выше «долгий хвост»: множитель честнее
+    const platformFactor = platform === 'youtube' ? 0.75 : 1;
+    const targetA = Math.round(base * viral * platformFactor * (1 + account.quality / 260) * hourBoost(publishedAt));
     for (const variant of variants) {
       // оба варианта A/B живут на одном аккаунте, разница только в обложке/описании
       const target = Math.round(targetA * (variant === 'B' ? 0.7 + rnd() * 0.6 : 1));
@@ -137,6 +149,9 @@ function makePublicationsFor(episode, project, accounts, rnd, publishedAt) {
 
 export function seedBase() {
   ensureSettings();
+  // демо-проект условно прошёл аудит Google: иначе вся история Shorts была бы приватной
+  // и экран роста показывал бы нули. В live это включает владелец после проверки проекта.
+  db.prepare("UPDATE settings SET value = '1' WHERE key = 'youtube_audited'").run();
   const rnd = seededRandom('pulse-demo-v1');
   const ts = nowIso();
 
@@ -153,11 +168,12 @@ export function seedBase() {
   const accountRows = [];
   for (const a of ACCOUNTS) {
     const id = uid('ac_');
-    db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '09:00', '23:00', 'Europe/Moscow', ?, '', ?, ?)`)
+    const projectId = projectIds[a.project] || null;
+    db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, followers, followers_source, followers_updated_at, project_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '09:00', '23:00', 'Europe/Moscow', ?, '', ?, 'seed', ?, ?, ?, ?)`)
       .run(id, a.platform, a.handle, a.display_name, a.hue, a.status, a.daily_limit, a.min_gap_min, a.quality,
-        addDays(ts, -(60 + Math.floor(rnd() * 240))), ts);
-    accountRows.push({ ...a, id });
+        a.followers || 0, ts, projectId, addDays(ts, -(60 + Math.floor(rnd() * 240))), ts);
+    accountRows.push({ ...a, id, project_id: projectId });
   }
 
   const productRows = [];
@@ -229,7 +245,9 @@ export function seedBase() {
             cost_cents: Math.round(EPISODE_COST_CENTS / Math.max(1, pubList.length)),
             url: pub.platform === 'tiktok'
               ? `https://www.tiktok.com/@${pub.account.handle}/video/${Math.floor(rnd() * 9e17)}`
-              : `https://www.instagram.com/reel/${Math.floor(rnd() * 9e9).toString(36)}/`,
+              : pub.platform === 'youtube'
+                ? `https://www.youtube.com/shorts/${Math.floor(rnd() * 1e12).toString(36)}`
+                : `https://www.instagram.com/reel/${Math.floor(rnd() * 9e9).toString(36)}/`,
             published_at: publishedAt, target_views: pub.target,
           });
           publishedCount++;
@@ -253,9 +271,13 @@ export function seedBase() {
           }
           // итоговые значения публикации должны совпадать с суммой дневных приростов,
           // иначе сборщик аналитики запишет в «сегодня» всю накопленную сумму
+          // удержание: база площадки × качество аккаунта + бонус за «залетевший» ролик.
+          // Диапазон честный: 45–85%, а не «красивые» 99% у всех подряд.
+          const baseRetention = pub.platform === 'youtube' ? 52 : pub.platform === 'tiktok' ? 46 : 50;
+          const retention = baseRetention + (pub.account.quality - 70) * 0.25 + (pub.target > 6000 ? 12 : 0) + rnd() * 8;
           db.prepare(`UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, clicks = ?, followers = ?, watch_avg = ? WHERE id = ?`)
             .run(prevViews, prevLikes, Math.round(prevViews * 0.006), Math.round(prevViews * 0.009), prevClicks, prevFollowers,
-              Math.round((24 + rnd() * 18) * 10) / 10, pid);
+              Math.round(Math.min(88, Math.max(38, retention)) * 10) / 10, pid);
         }
       }
     }

@@ -226,8 +226,8 @@ curl -s -X PATCH http://localhost:8080/api/accounts/ac_31bd… \
 | Метод | Путь | Назначение |
 |-------|------|-----------|
 | GET | `/accounts` | аккаунты + остаток квоты на сегодня |
-| POST | `/accounts` | добавить |
-| PATCH | `/accounts/{id}` | лимиты, окно, статус, качество |
+| POST | `/accounts` | добавить (`platform`: `reels` / `tiktok` / `youtube`, `project_id` — бренд аккаунта) |
+| PATCH | `/accounts/{id}` | лимиты, окно, статус, качество, площадка, `project_id` (`""` — универсальный) |
 | DELETE | `/accounts/{id}` | удалить |
 | POST | `/accounts/{id}/connect` | подключить реальный API: `{ token, externalId?, expiresAt? }` |
 | DELETE | `/accounts/{id}/connect` | отозвать токен (аккаунт остаётся в списке) |
@@ -536,3 +536,118 @@ Content-Type: application/json
 
 Если у кампании `marking = "erid"` нет токена, публикация блокируется проверкой комплаенса
 (`ad-erid-missing`), а отсутствие пометки «Реклама» в описании — правилом `ad-marking-missing`.
+
+---
+
+## 12. Рост (v6): портфель, хуки, удержание, монетизация
+
+Экран «Рост» опирается на шесть эндпоинтов. Все они читают те же таблицы, что и движок, поэтому
+цифры в интерфейсе и в решениях автопилота совпадают.
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/growth/overview?days=30` | всё для экрана одним запросом |
+| GET | `/growth/trends?days=30` | радар трендов и собственные форматы |
+| GET | `/growth/hooks?topic=…&platform=…` | лаборатория хуков |
+| POST | `/growth/retention` | проверка удержания по сценарию |
+| GET | `/growth/monetization` | путь к деньгам по всем каналам |
+| GET | `/growth/playbook/{accountId}` | план ведения аккаунта |
+| GET | `/episodes/{id}/gate` | вердикт перед публикацией |
+
+### `GET /api/growth/overview`
+
+```json
+{ "portfolio": { "accounts": [ { "handle": "pulse.studio", "platform": "youtube", "platformLabel": "YouTube Shorts",
+      "followers": 9800, "views30": 113000, "retention": 62.3, "retentionTarget": 65,
+      "usedToday": 0, "leftToday": 2, "health": 95,
+      "nextAction": { "tone": "success", "text": "Продолжать темп и тестировать новый хук", "action": "scale" } } ],
+    "platforms": [ { "platform": "youtube", "label": "YouTube Shorts", "accounts": 3, "followers": 14150,
+      "retention": 60.7, "retentionTarget": 65, "idealSec": [22, 45], "capacity": 5 } ],
+    "totals": { "accounts": 8, "followers": 117250, "views30": 1591761, "avgRetention": 58.6,
+      "capacityPerDay": 16, "demandPerDay": 5, "headroom": 11 } },
+  "trends": { "trends": [ { "label": "Зацикленный ролик (loop)", "status": "hot", "verdict": "снимай сейчас" } ] },
+  "monetization": { "programs": [ { "id": "youtube-ypp-1", "progress": 69, "etaText": "204 дн." } ] },
+  "ads": { "totals": { "revenue": 83286 }, "campaigns": [] },
+  "platforms": { "…": "плейбуки площадок: окно хука, длительность, темп" } }
+```
+
+`days` принимает 7/14/30; влияет на окно охвата в портфеле и на радар трендов.
+
+### `GET /api/growth/hooks`
+
+```bash
+curl -s "http://localhost:8080/api/growth/hooks?topic=привычки&platform=youtube" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{ "topic": "привычки", "platform": "youtube", "platformLabel": "YouTube Shorts",
+  "best": { "id": "pain-question", "text": "Почему «привычки» не даёт результата?",
+            "score": 70, "hookScore": 76, "viralScore": 54, "fitsWindow": true, "readableSec": 2.8 },
+  "hooks": [ "…7 вариантов с оценками…" ],
+  "guidance": [ "Решение о свайпе: 2.1 с — хук должен звучать сразу, без «привет, друзья».",
+                "Длительность: 22–45 с, досмотр целимся в 65%." ] }
+```
+
+`topic` необязателен: без него берётся тема проекта или эпизода (`projectId` / `episodeId`).
+
+### `POST /api/growth/retention`
+
+```json
+{ "platform": "youtube", "title": "Почему Shorts не залетают",
+  "scenes": [ { "text": "Первые 2 секунды решают всё", "seconds": 4 } ],
+  "hashtags": ["#shorts", "#youtube", "#контент"] }
+```
+
+```json
+{ "verdict": "tune", "predictedCompletion": 71, "targetCompletion": 65, "durationSec": 9,
+  "hook": { "text": "Первые 2 секунды решают всё", "seconds": 2, "score": 76, "windowSec": 2.1 },
+  "checks": [ { "id": "duration", "ok": false, "severity": "warn",
+                "text": "Длительность 9 с (оптимум 22–45 с)", "fix": "Добавьте смысла до 22 с" } ] }
+```
+
+`verdict`: `ready` (0–1 замечание), `tune` (2–3), `rewrite` (4+), `fix` (есть блокирующее).
+Без `hashtags` теги считаются из описания.
+
+### `GET /api/growth/monetization`
+
+Пять программ с прогрессом по каждому условию и ETA по фактической скорости:
+
+```json
+{ "totals": { "followers": 117250, "views30": 1591761, "youtubeAccounts": 3, "tiktokFollowers": 53800 },
+  "programs": [
+    { "id": "youtube-ypp-1", "name": "YouTube Partner Program — ранний доступ", "progress": 69,
+      "etaText": "204 дн.", "requirements": [ { "label": "просмотры Shorts за 90 дней", "have": 224000, "need": 3000000 } ] },
+    { "id": "youtube-ypp-2", "progress": 51, "etaText": "больше года",
+      "note": "Shorts-просмотры не конвертируются в 4000 часов: у Shorts свой порог." },
+    { "id": "tiktok-rewards", "progress": 100, "regionLimited": true,
+      "regionNote": "Только US, UK, DE, FR, JP, KR, MX, BR" },
+    { "id": "brand-deals", "progress": 84 }, { "id": "own-product", "progress": 100 } ] }
+```
+
+`regionLimited` — не украшение: TikTok Creator Rewards реально недоступна РФ-аккаунтам, и UI
+проговаривает это прямо, вместо обещания «100% готово».
+
+### `GET /api/episodes/{id}/gate`
+
+```json
+{ "verdict": "go", "score": 89, "platform": "reels", "platformLabel": "Instagram Reels",
+  "blockers": [], "warnings": [],
+  "retention": { "predictedCompletion": 60, "targetCompletion": 60 },
+  "viral": { "score": 67 }, "forecast": { "expectedViews": 1642 },
+  "quota": { "left": 7, "cap": 50 } }
+```
+
+`verdict`: `go` — можно публиковать, `fix` — есть замечания (публикация возможна, но хуже),
+`block` — блокирующее правило (комплаенс, маркировка, нет файла). `score` 0..100 — та же величина,
+которую видит автопилот при решении.
+
+### `GET /api/growth/playbook/{accountId}`
+
+```json
+{ "account": { "handle": "fitflow.daily", "platform": "reels", "status": "warmup", "followers": 6122 },
+  "phase": "warmup", "phaseLabel": "Прогрев",
+  "cadence": { "daily": 2, "weekly": 14 },
+  "ramp": [ { "week": 1, "perDay": 1 } ],
+  "rules": [ "…" ], "issues": [ "…" ],
+  "benchmarks": { "hookWindowSec": 1.3, "idealSec": [20, 45], "completionTarget": 0.6 } }
+```

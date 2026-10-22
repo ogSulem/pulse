@@ -25,8 +25,13 @@ const hashish = (str) => {
   return Math.abs(h);
 };
 
-export const rpmFor = (platform, settings = getSettings()) =>
-  platform === 'tiktok' ? num(settings.rpm_tiktok, 60) : num(settings.rpm_reels, 120);
+export const PLATFORM_LABELS = { reels: 'Instagram Reels', tiktok: 'TikTok', youtube: 'YouTube Shorts' };
+
+export const rpmFor = (platform, settings = getSettings()) => {
+  if (platform === 'tiktok') return num(settings.rpm_tiktok, 60);
+  if (platform === 'youtube') return num(settings.rpm_youtube, 30);
+  return num(settings.rpm_reels, 120);
+};
 
 /**
  * Демо-симулятор трафика: превращает счётчики площадок в реальные записи
@@ -180,7 +185,7 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
       map.set(key, cur);
     };
     bucket(perProject, p.project_id, p.project_name || 'Проект');
-    bucket(perPlatform, p.platform, p.platform === 'tiktok' ? 'TikTok' : 'Instagram Reels');
+    bucket(perPlatform, p.platform, PLATFORM_LABELS[p.platform] || p.platform);
 
     if (v > 0) {
       perPub.push({
@@ -269,6 +274,7 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
     assumptions: {
       rpmReels: num(settings.rpm_reels, 120),
       rpmTiktok: num(settings.rpm_tiktok, 60),
+      rpmYoutube: num(settings.rpm_youtube, 30),
       convRate: num(settings.conv_rate, 1.6),
       price: num(settings.product_price, 2490),
       margin: num(settings.product_margin, 0.55),
@@ -313,11 +319,11 @@ export function transparency() {
     WHERE viral > 0 AND viral < ? ORDER BY viral ASC LIMIT 6`).all(num(settings.min_viral_score, 45));
   const failed = db.prepare("SELECT id, title, error, stage FROM episodes WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 5").all();
   const media = db.prepare("SELECT COUNT(*) n, SUM(video_bytes) bytes, SUM(render_ms) ms FROM episodes WHERE video_bytes > 0").get();
-  const quotas = ['reels', 'tiktok'].map((platform) => {
+  const quotas = ['reels', 'tiktok', 'youtube'].map((platform) => {
     const since = addDays(nowIso(), -1);
     const used = db.prepare("SELECT COUNT(*) n FROM publications WHERE platform = ? AND published_at > ? AND status = 'published'").get(platform, since).n;
-    const cap = platform === 'tiktok' ? 15 : 50;
-    return { platform, used, cap, left: Math.max(0, cap - used), window: 'скользящие 24 ч' };
+    const cap = platform === 'tiktok' ? 15 : platform === 'youtube' ? 20 : 50;
+    return { platform, label: PLATFORM_LABELS[platform], used, cap, left: Math.max(0, cap - used), window: 'скользящие 24 ч' };
   });
 
   const checks = [
@@ -330,6 +336,13 @@ export function transparency() {
       detail: Number(settings.tiktok_audited) === 1
         ? 'Клиент аудирован: публичный постинг разрешён'
         : 'Неаудированный клиент: публикуем только приватно (SELF_ONLY), максимум 5 аккаунтов/24 ч',
+    },
+    {
+      id: 'youtube-audit', label: 'Публичность YouTube',
+      state: Number(settings.youtube_audited) === 1 ? 'ok' : 'warn',
+      detail: Number(settings.youtube_audited) === 1
+        ? 'Проект Google прошёл аудит: Shorts публикуются публично'
+        : 'Без аудита Google загрузки только приватные — включите после проверки проекта',
     },
     {
       id: 'labels', label: 'Маркировка AI и рекламы', state: Number(settings.ai_label) === 1 && Number(settings.ad_label) === 1 ? 'ok' : 'warn',

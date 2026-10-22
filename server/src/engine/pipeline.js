@@ -23,7 +23,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const STAGE_PROGRESS = { idea: 6, script: 26, voice: 46, footage: 66, edit: 84, ready: 100, published: 100 };
-const PLATFORMS = ['reels', 'tiktok'];
+const PLATFORMS = ['reels', 'tiktok', 'youtube'];
+const PLATFORM_LABELS = { reels: 'Instagram Reels', tiktok: 'TikTok', youtube: 'YouTube Shorts' };
 
 const getProject = (id) => db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
 const getEpisode = (id) => db.prepare('SELECT * FROM episodes WHERE id = ?').get(id);
@@ -321,7 +322,8 @@ export function nextSlotPlan(projectId, after = nowIso()) {
   return planSlot(projectId, { after });
 }
 
-function accountQuota(account) {
+/** Остаток дневной квоты аккаунта: used/cap/left с учётом прогрева. */
+export function accountQuota(account) {
   const settings = getSettings();
   const day = nowIso().slice(0, 10);
   const used = db.prepare('SELECT used FROM accounts_daily WHERE account_id = ? AND day = ?').get(account.id, day)?.used || 0;
@@ -341,33 +343,58 @@ export function platformQuota(platform, accountId = null) {
   const row = accountId
     ? db.prepare("SELECT COUNT(*) n FROM publications WHERE platform = ? AND account_id = ? AND published_at > ? AND status = 'published'").get(platform, accountId, since)
     : db.prepare("SELECT COUNT(*) n FROM publications WHERE platform = ? AND published_at > ? AND status = 'published'").get(platform, since);
+  // TikTok — ~15 постов/сутки на креатора; Reels — 50 API-постов в окне 24 ч;
+  // YouTube — 100 загрузок в сутки на проект, но алгоритму нужен ровный темп,
+  // поэтому держим собственный потолок заметно ниже лимита API.
   const cap = platform === 'tiktok'
     ? Math.min(num(settings.max_daily_per_account, 3) * 5, 15)
-    : Math.min(num(settings.max_daily_per_account, 3) * 17, 50);
+    : platform === 'youtube'
+      ? Math.min(num(settings.max_daily_per_account, 3) * 5, 20)
+      : Math.min(num(settings.max_daily_per_account, 3) * 17, 50);
   return { platform, used: row.n, cap, left: Math.max(0, cap - row.n) };
 }
 
 /** Приватность публикации: неаудированный TikTok-клиент = SELF_ONLY */
 export function privacyFor(platform) {
   const settings = getSettings();
-  if (platform !== 'tiktok') return 'public';
-  const audited = Number(settings.tiktok_audited) === 1;
-  return audited ? 'public' : String(settings.tiktok_privacy || 'SELF_ONLY');
+  if (platform === 'tiktok') {
+    const audited = Number(settings.tiktok_audited) === 1;
+    return audited ? 'public' : String(settings.tiktok_privacy || 'SELF_ONLY');
+  }
+  // Неаудированный проект Google загружает только приватно — это правило площадки,
+  // а не осторожность Pulse. Публично включается осознанно, в настройках.
+  if (platform === 'youtube') {
+    return Number(settings.youtube_audited) === 1 ? 'public' : 'private';
+  }
+  return 'public';
 }
 
 function lastPublishAt(accountId) {
   return db.prepare('SELECT MAX(published_at) t FROM publications WHERE account_id = ?').get(accountId)?.t || null;
 }
 
-export function pickAccount(platform, projectId) {
+/**
+ * `need` — сколько выходов (постов) уйдёт на этом аккаунте прямо сейчас.
+ * A/B-тест публикует два варианта, значит и квоты нужно два слота: иначе
+ * аккаунт с остатком «1» молча превышал собственный дневной лимит.
+ */
+export function pickAccount(platform, projectId, need = 1) {
   const pq = platformQuota(platform);
-  if (pq.left <= 0) return null;
-  const accounts = db.prepare("SELECT * FROM accounts WHERE platform = ? AND status IN ('healthy','warmup') ORDER BY quality DESC, created_at ASC").all(platform);
+  if (pq.left < need) return null;
+  // Бренд-привязка: аккаунт ведёт один проект. Контент FitFlow не должен уходить
+  // в аккаунт Momentum — это разные бренды и разные подписчики. Универсальные
+  // аккаунты (project_id IS NULL) подходят любому проекту.
+  // Без проекта (диагностика, ручной выбор) ограничений нет — фильтруем только когда
+  // известно, чей это контент.
+  const accounts = db.prepare(`SELECT * FROM accounts
+      WHERE platform = ? AND status IN ('healthy','warmup')
+        ${projectId ? 'AND (project_id IS NULL OR project_id = ?)' : ''}
+      ORDER BY quality DESC, created_at ASC`).all(...(projectId ? [platform, projectId] : [platform]));
   const candidates = [];
   for (const a of accounts) {
     if (a.blocked_until && new Date(a.blocked_until) > new Date()) continue;
     const q = accountQuota(a);
-    if (q.left <= 0) continue;
+    if (q.left < need) continue;
     const last = lastPublishAt(a.id);
     const gapOk = !last || (Date.now() - new Date(last).getTime()) / 60000 >= a.min_gap_min;
     if (!gapOk) continue;
@@ -423,12 +450,15 @@ registerHandler('episode.publish', async ({ episodeId }) => {
     "SELECT platform, COUNT(*) n FROM publications WHERE episode_id = ? AND status = 'published' GROUP BY platform"
   ).all(episodeId).map((r) => [r.platform, r.n]));
 
-  const wanted = pickPlatforms(project);
+  const pending = pickPlatforms(project).filter((p) => !already.has(p));
+  // A/B гоняем только когда публикуем на одну площадку: иначе это удвоение
+  // квоты, а не эксперимент. На второй площадке сразу выходит лучший стиль.
+  const abTwo = Number(episode.ab_test) === 1 && pending.length === 1;
+  const need = abTwo ? 2 : 1;
   const targets = [];
   const missing = [];
-  for (const platform of wanted) {
-    if (already.has(platform)) continue;
-    const acc = pickAccount(platform, project?.id);
+  for (const platform of pending) {
+    const acc = pickAccount(platform, project?.id, need);
     if (acc) targets.push({ platform, account: acc });
     else missing.push(platform);
   }
@@ -453,7 +483,7 @@ registerHandler('episode.publish', async ({ episodeId }) => {
     const { platform, account } = target;
     // A/B гоняем только когда публикуем на одну площадку: иначе это удвоение
     // квоты, а не эксперимент. На второй площадке сразу выходит лучший стиль.
-    const variants = Number(episode.ab_test) === 1 && targets.length === 1 ? ['A', 'B'] : [preferred.variant];
+    const variants = abTwo && targets.length === 1 ? ['A', 'B'] : [preferred.variant];
 
     for (const variant of variants) {
       const campaign = episode.campaign_id ? db.prepare('SELECT * FROM campaigns WHERE id = ?').get(episode.campaign_id) : null;
@@ -464,6 +494,8 @@ registerHandler('episode.publish', async ({ episodeId }) => {
         platform,
         account,
         description: caption,
+        title: episode.title,
+        hashtags,
         videoRef: episode.video_path || episodesVideoRef(episode),
         videoPath: episode.video_path ? path.join(MEDIA_DIR, path.basename(episode.video_path)) : null,
         coverPath: parseJson(episode.cover_paths, {})[variant] || null,
@@ -509,7 +541,7 @@ registerHandler('episode.publish', async ({ episodeId }) => {
       }
       log({
         level: 'info', actor: 'publisher', action: 'publication.created', entityType: 'publication', entityId: pid,
-        message: `Публикация ${platform === 'tiktok' ? 'TikTok' : 'Reels'}${privacy !== 'public' ? ' (приватно — клиент не аудирован)' : ''}: ${episode.title}`,
+        message: `Публикация ${PLATFORM_LABELS[platform] || platform}${privacy !== 'public' ? ' (приватно — клиент не аудирован)' : ''}: ${episode.title}`,
         meta: { privacy, click: `/t/${clickToken}`, cover: coverPath, video: episode.video_path, forecast: forecast.expectedViews },
       });
     }
@@ -702,6 +734,18 @@ export async function collectAnalytics() {
     }
   }
 
+  // Подписчики на аккаунтах: в live — из API канала, в demo — накопленный прирост
+  const followerDelta = new Map();
+  if (isLive) {
+    for (const a of db.prepare('SELECT * FROM accounts').all()) {
+      const audience = await providers.stats.audience({ platform: a.platform, account: a }).catch(() => null);
+      if (audience && Number.isFinite(audience.followers)) {
+        db.prepare("UPDATE accounts SET followers = ?, followers_source = 'api', followers_updated_at = ? WHERE id = ?")
+          .run(audience.followers, nowIso(), a.id);
+      }
+    }
+  }
+
   for (const p of pubs) {
     // реальные счётчики площадки перекрывают модель
     if (liveRows.has(p.id)) {
@@ -730,9 +774,13 @@ export async function collectAnalytics() {
     const shares = Math.round(views * 0.009);
     const clicks = Math.round(views * (0.012 + (p.id.charCodeAt(4) % 5) / 400));
     const followers = Math.round(views * 0.0035);
+    // удержание в demo: база площадки + качество аккаунта + «зашло ли» ролик.
+    // Формула та же по смыслу, что и в seed, поэтому графики сходятся.
+    const accountQuality = db.prepare('SELECT quality FROM accounts WHERE id = ?').get(p.account_id)?.quality ?? 75;
+    const baseRetention = p.platform === 'youtube' ? 52 : p.platform === 'tiktok' ? 46 : 50;
+    const retained = clamp(baseRetention + (accountQuality - 70) * 0.25 + (p.id.charCodeAt(5) % 12) + 4, 35, 88);
     db.prepare(`UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, clicks = ?, followers = ?, watch_avg = ?
-      WHERE id = ?`).run(views, likes, comments, shares, clicks, followers,
-      Math.round((26 + (p.id.charCodeAt(5) % 14)) * 10) / 10, p.id);
+      WHERE id = ?`).run(views, likes, comments, shares, clicks, followers, Math.round(retained * 10) / 10, p.id);
     // пишем только прирост относительно уже сохранённого итога публикации
     const dViews = views - p.views;
     const dLikes = Math.max(0, likes - p.likes);
@@ -741,8 +789,16 @@ export async function collectAnalytics() {
     const dClicks = Math.max(0, clicks - p.clicks);
     const dFollowers = Math.max(0, followers - p.followers);
     if (dViews > 0) upsertDay.run(`${p.id}:${day}`, p.id, day, dViews, dLikes, dComments, dShares, dClicks, dFollowers);
+    if (!isLive) followerDelta.set(p.account_id, (followerDelta.get(p.account_id) || 0) + dFollowers);
     updated++;
   }
+  // в demo подписчики аккаунта растут из факта: сколько подписок принесли наши ролики
+  for (const [accountId, delta] of followerDelta) {
+    if (!accountId || !delta) continue;
+    db.prepare("UPDATE accounts SET followers = COALESCE(followers,0) + ?, followers_updated_at = ? WHERE id = ?")
+      .run(delta, nowIso(), accountId);
+  }
+
   // спонсорские деньги считаются из тех же фактических просмотров
   try {
     syncCampaignMetrics();

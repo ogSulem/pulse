@@ -187,7 +187,7 @@ export default function Ads() {
       {(overview?.risks || []).length > 0 && (
         <div className="card" style={{ borderColor: 'rgba(244,63,94,.35)', background: 'rgba(244,63,94,.06)' }}>
           <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
-            <Icon name="alert" size={16} style={{ color: 'var(--rose)', marginTop: 2 }} />
+            <Icon name="alert" size={16} style={{ color: 'var(--red)', marginTop: 2 }} />
             <div>
               <b style={{ fontSize: 12.5 }}>Маркировка неполная — публикации остановятся</b>
               <div className="col" style={{ gap: 4, marginTop: 6 }}>

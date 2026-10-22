@@ -20,6 +20,7 @@ const DAY = 86400000;
 export const PLATFORM_PEAKS = {
   reels: { hours: [11, 12, 13, 18, 19, 20, 21], label: 'обед и вечер' },
   tiktok: { hours: [7, 8, 12, 13, 17, 18, 19, 20, 21, 22], label: 'утро, обед, вечер' },
+  youtube: { hours: [9, 11, 14, 17, 18, 20], label: 'день и вечерний прайм' },
 };
 
 const priorScore = (hour, platform) => {
@@ -152,7 +153,7 @@ export function bestHours(platform, count = 3) {
 /** Сводка для интерфейса: какие часы лучшие и на чём основано решение */
 export function scheduleInsights({ days = 45 } = {}) {
   const platforms = db.prepare("SELECT DISTINCT platform FROM accounts").all().map((r) => r.platform);
-  const list = (platforms.length ? platforms : ['reels', 'tiktok']).map((platform) => {
+  const list = (platforms.length ? platforms : ['reels', 'tiktok', 'youtube']).map((platform) => {
     const rows = hourScores(platform, { days });
     const withData = rows.filter((r) => r.samples >= 8);
     return {

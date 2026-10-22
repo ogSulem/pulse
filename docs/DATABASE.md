@@ -48,7 +48,7 @@ episodes 1─* jobs (через payload)     logs — независимый а�
 | Поле | Тип | Смысл |
 |------|-----|-------|
 | id | uuid PK | |
-| platform | enum(`reels`,`tiktok`) | площадка |
+| platform | enum(`reels`,`tiktok`,`youtube`) | площадка |
 | handle, display_name | text | @ник |
 | status | enum(`healthy`,`warmup`,`cooldown`,`blocked`) | состояние |
 | daily_limit | int | личная квота в день |
@@ -62,6 +62,9 @@ episodes 1─* jobs (через payload)     logs — независимый а�
 | external_id | text | id бизнес-аккаунта на площадке (`ig_user_id`, TikTok `open_id`) — нужен для API-вызовов |
 | token_expires_at | timestamptz | когда истекает токен; за 3 дня аккаунт помечается «обновить» |
 | auth_note | text | что записал провайдер при подключении: scopes, кто выдал, почему отозван |
+| followers | int | подписчики аккаунта — обновляются из API площадки (`providers.stats.audience`) |
+| followers_source | text | откуда цифра: `api` / `seed` / `manual` — чтобы не путать факт с демо-данными |
+| followers_at | timestamptz | когда подписчики обновлялись в последний раз |
 
 ### accounts_daily — израсходованная квота
 `(account_id, day)` PK, `used int`. Обновляется атомарно при публикации:
@@ -178,7 +181,7 @@ CREATE TABLE pulse.projects (
 
 CREATE TABLE pulse.accounts (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  platform     text NOT NULL CHECK (platform IN ('reels','tiktok')),
+  platform     text NOT NULL CHECK (platform IN ('reels','tiktok','youtube')),
   handle       text NOT NULL,
   status       text NOT NULL DEFAULT 'warmup'
                CHECK (status IN ('healthy','warmup','cooldown','blocked')),
@@ -188,6 +191,9 @@ CREATE TABLE pulse.accounts (
   window_end   time NOT NULL DEFAULT '23:00',
   timezone     text NOT NULL DEFAULT 'Europe/Moscow',
   quality      int  NOT NULL DEFAULT 70,
+  followers    int  NOT NULL DEFAULT 0,
+  followers_source text NOT NULL DEFAULT 'manual',
+  followers_at timestamptz,
   secret_ref   text,
   warmup_until timestamptz,
   blocked_until timestamptz,
@@ -520,3 +526,35 @@ JSON вида `{ "weights": { "hook": 0.31, … }, "lift": { "hook": 1.4, … },
 
 Таблицы создаются в `migrate()` через `CREATE TABLE IF NOT EXISTS`, поля `episodes.campaign_id` и
 `episodes.ad_disclosure` добавляет `ensureColumns()` — обновление существующей базы не требует ручных шагов.
+
+## v6: рост, Shorts и монетизация
+
+Изменения минимальны: рост считается из уже существующих таблиц, поэтому схема почти не менялась.
+
+### Новые поля `accounts`
+
+| Поле | Тип | Зачем |
+|------|-----|-------|
+| `followers` | INTEGER DEFAULT 0 | подписчики аккаунта: без них прогресс к YPP и Creator Rewards не посчитать |
+| `followers_source` | TEXT DEFAULT 'manual' | `api` — из площадки, `seed` — демо, `manual` — вписано руками; UI не выдаёт демо за факт |
+| `followers_at` | TEXT NULL | время последнего обновления; `collectAnalytics()` пишет его вместе с цифрой |
+| `project_id` | TEXT NULL FK → `projects.id` | бренд, который ведёт аккаунт. `NULL` — универсальный аккаунт. `pickAccount()` не отдаёт ролик проекта чужому бренду |
+
+Правило: `providers.stats.audience()` возвращает `null`, если токена нет или API не ответил, —
+`collectAnalytics()` в этом случае **оставляет прежнее значение** и не выдумывает подписчиков.
+
+### Новые ключи `settings`
+
+| Ключ | Значение | Смысл |
+|------|----------|-------|
+| `youtube_audited` | `0` / `1` | проект Google прошёл аудит. Пока `0`, `privacyFor('youtube')` = `private`: это правило площадки, а не настройка осторожности |
+| `rpm_youtube` | число | доход на 1000 просмотров Shorts; по умолчанию 30, дальше подставляется факт |
+
+`knowledge`-таблиц под тренды и хуки нет: тренды считаются из `publications` (формат, охват, свежесть),
+хуки — из шаблонов в коде. Это осознанно: справочник шаблонов живёт в репозитории и версионируется
+вместе с правилами площадок, а не расходится с ними в базе.
+
+### Миграции
+
+`youtube` в `CHECK (platform IN …)` и колонки `accounts.followers*` добавляет `migrate()` /
+`ensureColumns()` — существующая база обновляется без ручных шагов и без потери публикаций.

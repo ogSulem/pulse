@@ -4,7 +4,7 @@ import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, Empty } from '../components/ui.jsx';
 import EpisodeDrawer from '../components/EpisodeDrawer.jsx';
-import { time, dateShort, STATUS_META, plural } from '../lib/format.js';
+import { time, dateShort, STATUS_META, plural, platformLabel } from '../lib/format.js';
 
 const WD = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
 
@@ -123,7 +123,7 @@ export default function Calendar() {
                 <div>
                   <div className="row" style={{ gap: 6 }}>
                     <PlatformIcon platform={p.platform} size={14} />
-                    <b style={{ fontSize: 12.5 }}>{p.platform === 'tiktok' ? 'TikTok' : 'Reels'}</b>
+                    <b style={{ fontSize: 12.5 }}>{platformLabel(p.platform)}</b>
                   </div>
                   <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 3 }}>
                     {p.learned ? `${p.samples} наблюдений` : p.label}

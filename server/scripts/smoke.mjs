@@ -309,6 +309,139 @@ try {
   ok('веса скора обучаются', `${res.samples} роликов, сильнейший фактор — ${Object.entries(res.weights).sort((a, b) => b[1] - a[1])[0][0]}`);
 } catch (err) { fail('веса скора обучаются', err); }
 
+// ── рост: портфель мультиплатформы ──────────────────────────────────────────
+try {
+  const { portfolio } = await import('../src/engine/growth.js');
+  const p = portfolio();
+  const labels = p.platforms.map((x) => x.label);
+  for (const need of ['TikTok', 'Instagram Reels', 'YouTube Shorts']) {
+    if (!labels.includes(need)) throw new Error(`нет площадки ${need}`);
+  }
+  if (p.totals.accounts < 6) throw new Error(`мало аккаунтов: ${p.totals.accounts}`);
+  if (!(p.totals.followers > 0)) throw new Error('подписчики не собраны');
+  if (!(p.totals.avgRetention >= 35 && p.totals.avgRetention <= 88)) {
+    throw new Error(`удержание вне диапазона: ${p.totals.avgRetention}`);
+  }
+  const yt = p.platforms.find((x) => x.platform === 'youtube');
+  if (!(yt.accounts >= 2)) throw new Error(`YouTube-аккаунтов ${yt.accounts}`);
+  if (!yt.idealSec || yt.idealSec.length !== 2) throw new Error('нет окна длительности для Shorts');
+  if (!(yt.retentionTarget > 0)) throw new Error('нет цели по удержанию для Shorts');
+  ok('портфель роста', `${p.totals.accounts} аккаунтов, ${p.totals.followers} подписчиков, ${labels.join(' / ')}`);
+} catch (err) { fail('портфель роста', err); }
+
+// ── рост: лаборатория хуков ─────────────────────────────────────────────────
+try {
+  const { hookLab, scoreHook } = await import('../src/engine/growth.js');
+  const lab = hookLab({ topic: 'привычки', platform: 'youtube' });
+  if (lab.hooks.length < 7) throw new Error(`мало хуков: ${lab.hooks.length}`);
+  if (lab.hooks.some((h) => h.text.includes('{topic}'))) throw new Error('плейсхолдер темы не подставлен');
+  if (!(lab.best.score > 50)) throw new Error(`лучший хук слабый: ${lab.best.score}`);
+  if (!lab.guidance.length) throw new Error('нет рекомендаций');
+  const weak = scoreHook('ну вот, сегодня поговорим о разном', { platform: 'tiktok' });
+  const strong = scoreHook('Одна ошибка в «привычках» убивает результат', { platform: 'tiktok' });
+  if (!(strong.score > weak.score)) throw new Error('скоринг хуков не различает сильный и слабый');
+  ok('лаборатория хуков', `${lab.hooks.length} шаблонов, лучший ${lab.best.score}/100, окно ${lab.best.fitsWindow ? 'укладывается' : 'длинноват'}`);
+} catch (err) { fail('лаборатория хуков', err); }
+
+// ── рост: монетизация по всем каналам ───────────────────────────────────────
+try {
+  const { monetizationPlan } = await import('../src/engine/growth.js');
+  const m = monetizationPlan();
+  const ids = m.programs.map((x) => x.id);
+  for (const need of ['youtube-ypp-1', 'youtube-ypp-2', 'tiktok-rewards']) {
+    if (!ids.includes(need)) throw new Error(`нет программы ${need}`);
+  }
+  if (m.programs.some((x) => !(x.progress >= 0 && x.progress <= 100))) throw new Error('прогресс вне 0–100');
+  const rewards = m.programs.find((x) => x.id === 'tiktok-rewards');
+  if (!rewards.regionLimited || !rewards.regionNote) throw new Error('региональные ограничения TikTok Rewards не показаны');
+  if (!(m.totals.followers > 0)) throw new Error('подписчики не учтены в монетизации');
+  ok('монетизация по каналам', `${m.programs.length} программ, YPP ${m.programs[0].progress}%, TikTok Rewards ${rewards.progress}% (${rewards.regionNote})`);
+} catch (err) { fail('монетизация по каналам', err); }
+
+// ── гейт публикации ─────────────────────────────────────────────────────────
+try {
+  const { publishGate } = await import('../src/engine/growth.js');
+  const { db } = await import('../src/core/db.js');
+  const ep = db.prepare("SELECT id FROM episodes WHERE status IN ('published','scheduled') LIMIT 1").get()
+    || db.prepare('SELECT id FROM episodes LIMIT 1').get();
+  const gate = publishGate(ep.id);
+  if (!['go', 'fix', 'block'].includes(gate.verdict)) throw new Error(`неизвестный вердикт: ${gate.verdict}`);
+  if (!(gate.score >= 0 && gate.score <= 100)) throw new Error('скор вне диапазона');
+  if (!gate.retention || !gate.viral) throw new Error('нет разложения по удержанию и вирусности');
+  if (gate.verdict === 'block' && !gate.blockers.length) throw new Error('блок без причин');
+  ok('гейт публикации', `${gate.verdict}, ${gate.score}/100, ${gate.platformLabel}, удержание ${gate.retention.predictedCompletion}%`);
+} catch (err) { fail('гейт публикации', err); }
+
+// ── YouTube Shorts: адаптер и статистика ────────────────────────────────────
+try {
+  const { providers } = await import('../src/providers/index.js');
+  const res = await providers.publish.send({
+    platform: 'youtube',
+    account: { handle: 'pulse.studio', access_token: null },
+    title: 'Тестовый Shorts',
+    description: 'Описание #pulse',
+    privacy: 'private',
+  });
+  if (!String(res.url).includes('youtube.com/shorts/')) throw new Error(`ссылка Shorts: ${res.url}`);
+  // без токена демо-режим честно возвращает null: подписчиков подменять нельзя,
+  // pipeline в этом случае оставляет последнее известное значение из базы
+  const audience = await providers.stats.audience({ platform: 'youtube', account: { handle: 'pulse.studio' } });
+  if (audience !== null) throw new Error('демо-режим выдумал подписчиков без токена');
+  const { privacyFor } = await import('../src/engine/pipeline.js');
+  const { db } = await import('../src/core/db.js');
+  db.prepare("UPDATE settings SET value = '0' WHERE key = 'youtube_audited'").run();
+  if (privacyFor('youtube') !== 'private') throw new Error('неаудированный проект публикует не приватно');
+  db.prepare("UPDATE settings SET value = '1' WHERE key = 'youtube_audited'").run();
+  ok('YouTube Shorts', `${res.url.replace('https://', '')}, приватность соблюдена, аудитория без токена — null`);
+} catch (err) { fail('YouTube Shorts', err); }
+
+// ── квота учитывает A/B (два выхода за один заход) ──────────────────────────
+try {
+  const { pickAccount, accountQuota } = await import('../src/engine/pipeline.js');
+  const { db, nowIso } = await import('../src/core/db.js');
+  const acc = db.prepare("SELECT * FROM accounts WHERE platform = 'tiktok' AND status = 'healthy' LIMIT 1").get();
+  if (!acc) throw new Error('нет tiktok-аккаунта для проверки');
+  const day = nowIso().slice(0, 10);
+  const cap = accountQuota(acc).cap;
+  // остаток ровно один слот: одиночный пост можно, A/B (два) — нельзя
+  db.prepare(`INSERT INTO accounts_daily (account_id, day, used) VALUES (?, ?, ?)
+              ON CONFLICT(account_id, day) DO UPDATE SET used = excluded.used`).run(acc.id, day, Math.max(0, cap - 1));
+  // останавливаем остальные аккаунты площадки, чтобы выбор был однозначным
+  db.prepare("UPDATE accounts SET status = 'paused' WHERE platform = 'tiktok' AND id != ?").run(acc.id);
+  const single = pickAccount('tiktok', null, 1);
+  const pair = pickAccount('tiktok', null, 2);
+  if (!single) throw new Error('последний слот не выдаётся одиночному посту');
+  if (pair) throw new Error('A/B занял два слота при остатке один — лимит аккаунта превышен');
+  // на warming-аккаунте лимит 1: A/B вообще не должен туда вставать
+  const warm = db.prepare("SELECT * FROM accounts WHERE platform = 'tiktok' LIMIT 1").get();
+  db.prepare("UPDATE accounts SET status = 'warmup' WHERE id = ?").run(warm.id);
+  if (pickAccount('tiktok', null, 2)) throw new Error('A/B встал на прогреваемый аккаунт');
+  ok('квота под A/B', `остаток 1 слот: одиночный пост — да, A/B — перенос`);
+} catch (err) { fail('квота под A/B', err); }
+
+// ── бренд-привязка: контент не уходит в чужой аккаунт ──────────────────────
+try {
+  const { pickAccount } = await import('../src/engine/pipeline.js');
+  const { db } = await import('../src/core/db.js');
+  const projects = db.prepare('SELECT * FROM projects ORDER BY name').all();
+  if (projects.length < 2) throw new Error('мало проектов для проверки');
+  const bounded = db.prepare('SELECT * FROM accounts WHERE project_id IS NOT NULL AND status = ?').all('healthy');
+  if (!bounded.length) throw new Error('нет аккаунтов с брендом');
+  for (const project of projects) {
+    for (const platform of ['reels', 'tiktok', 'youtube']) {
+      const acc = pickAccount(platform, project.id, 1);
+      if (!acc) continue;
+      if (acc.project_id && acc.project_id !== project.id) {
+        throw new Error(`аккаунт @${acc.handle} чужого бренда отдан проекту ${project.name}`);
+      }
+    }
+  }
+  // у каждого проекта есть свой аккаунт хотя бы на одной площадке
+  const owned = db.prepare('SELECT project_id, COUNT(*) n FROM accounts WHERE project_id IS NOT NULL GROUP BY project_id').all();
+  if (owned.length !== projects.length) throw new Error(`бренды без аккаунтов: ${projects.length - owned.length}`);
+  ok('бренд-привязка аккаунтов', `${owned.length} брендов, по ${Math.round(owned.reduce((a, x) => a + x.n, 0) / owned.length)} аккаунта на бренд`);
+} catch (err) { fail('бренд-привязка аккаунтов', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

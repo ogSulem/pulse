@@ -14,6 +14,7 @@ import {
 } from '../engine/ads.js';
 import { providers } from '../providers/index.js';
 import { moneySummary, transparency, recordClick, recordConversion, simulateTraffic, rpmFor } from '../engine/money.js';
+import { portfolio, accountPlaybook, trendRadar, hookLab, retentionPlan, monetizationPlan, publishGate, PLATFORM_PLAYBOOK } from '../engine/growth.js';
 import { checkCompliance, PLATFORM_RULES, disclosureText, saveCompliance } from '../engine/compliance.js';
 import { encryptSecret, decryptSecret, maskSecret } from '../core/secrets.js';
 import { scoreViral, saveViral, recalibrate } from '../engine/viral.js';
@@ -500,13 +501,18 @@ api.post('/accounts', (req, res) => {
   if (!b.handle) return res.status(400).json({ error: 'validation', message: 'Укажите @handle аккаунта' });
   const id = uid('ac_');
   const ts = nowIso();
-  db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, b.platform === 'tiktok' ? 'tiktok' : 'reels', String(b.handle).replace(/^@/, ''), String(b.display_name || b.handle).replace(/^@/, ''),
+  if (b.platform && !['reels', 'tiktok', 'youtube'].includes(b.platform)) {
+    return res.status(400).json({ error: 'validation', message: 'Площадка должна быть reels, tiktok или youtube' });
+  }
+  const platform = b.platform || 'reels';
+  const projectId = b.project_id && db.prepare('SELECT id FROM projects WHERE id = ?').get(b.project_id) ? b.project_id : null;
+  db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, project_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, platform, String(b.handle).replace(/^@/, ''), String(b.display_name || b.handle).replace(/^@/, ''),
       num(b.avatar_hue, Math.floor(Math.random() * 360)), String(b.status || 'warmup'),
       clamp(num(b.daily_limit, 3), 1, 10), clamp(num(b.min_gap_min, 90), 15, 720),
       String(b.window_start || '09:00'), String(b.window_end || '23:00'), String(b.timezone || 'Europe/Moscow'),
-      clamp(num(b.quality, 70), 0, 100), String(b.notes || ''), ts, ts);
+      clamp(num(b.quality, 70), 0, 100), String(b.notes || ''), projectId, ts, ts);
   log({ level: 'success', actor: 'user', action: 'account.added', entityType: 'account', entityId: id, message: `Аккаунт @${String(b.handle).replace(/^@/, '')} добавлен (${b.platform || 'reels'})` });
   res.status(201).json(accountRow(db.prepare('SELECT * FROM accounts WHERE id = ?').get(id)));
 });
@@ -531,7 +537,7 @@ api.post('/accounts/:id/connect', (req, res) => {
     .run(encrypted, externalId || account.external_id || null, req.body?.expiresAt || null, 'healthy', nowIso(), account.id);
   log({
     level: 'success', actor: 'user', action: 'account.connected', entityType: 'account', entityId: account.id,
-    message: `@${account.handle} подключён к ${account.platform === 'tiktok' ? 'TikTok' : 'Instagram'} (токен зашифрован)`,
+    message: `@${account.handle} подключён к ${PLATFORM_PLAYBOOK[account.platform]?.label || account.platform} (токен зашифрован)`,
     meta: { platform: account.platform, externalId: externalId || null },
   });
   res.json(accountRow(db.prepare('SELECT * FROM accounts WHERE id = ?').get(account.id)));
@@ -550,6 +556,12 @@ api.patch('/accounts/:id', (req, res) => {
   for (const k of ['handle', 'display_name', 'status', 'daily_limit', 'min_gap_min', 'window_start', 'window_end', 'timezone', 'quality', 'notes', 'blocked_until']) {
     if (k in (req.body || {})) patch[k] = req.body[k];
   }
+  // бренд-привязка: пустая строка = универсальный аккаунт, значение = конкретный проект
+  if ('project_id' in (req.body || {})) {
+    const pid = req.body.project_id;
+    patch.project_id = pid && db.prepare('SELECT id FROM projects WHERE id = ?').get(pid) ? pid : null;
+  }
+  if ('platform' in (req.body || {}) && ['reels', 'tiktok', 'youtube'].includes(req.body.platform)) patch.platform = req.body.platform;
   if (patch.status === 'blocked' && !patch.blocked_until) patch.blocked_until = addDays(nowIso(), 7);
   if (patch.status && patch.status !== 'blocked') patch.blocked_until = null;
   db.prepare(`UPDATE accounts SET ${Object.keys(patch).map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`).run({ ...patch, id: a.id });
@@ -599,6 +611,62 @@ api.delete('/products/:id', (req, res) => {
 });
 
 // ─── Реклама: бренды, кампании, маркировка и деньги ─────────────────────────
+// ─── Рост: портфель аккаунтов, тренды, хуки, удержание, монетизация ─────────
+api.get('/growth/overview', (req, res) => {
+  const days = clamp(num(req.query.days, 30), 7, 90);
+  let ads = null;
+  try { ads = adsOverview(); } catch { ads = null; }
+  res.json({
+    portfolio: portfolio(),
+    trends: trendRadar({ days }),
+    monetization: monetizationPlan(),
+    ads: ads ? { totals: ads.totals, campaigns: ads.campaigns.length } : null,
+    platforms: PLATFORM_PLAYBOOK,
+  });
+});
+
+api.get('/growth/trends', (req, res) => {
+  res.json(trendRadar({ days: clamp(num(req.query.days, 30), 7, 90) }));
+});
+
+api.get('/growth/hooks', (req, res) => {
+  const episode = req.query.episodeId ? db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.query.episodeId) : null;
+  const project = req.query.projectId && req.query.projectId !== 'all'
+    ? db.prepare('SELECT * FROM projects WHERE id = ?').get(req.query.projectId)
+    : episode?.project_id ? db.prepare('SELECT * FROM projects WHERE id = ?').get(episode.project_id) : null;
+  const topic = req.query.topic || episode?.topic || episode?.title || project?.niche || '';
+  const platform = String(req.query.platform || 'reels');
+  res.json({ ...hookLab({ topic, platform, niche: project?.niche || '' }), episodeId: episode?.id || null });
+});
+
+api.post('/growth/retention', (req, res) => {
+  const b = req.body || {};
+  const episode = b.episodeId ? db.prepare('SELECT * FROM episodes WHERE id = ?').get(b.episodeId) : null;
+  const scenes = b.scenes || (episode ? parseJson(episode.scenes, []) : []);
+  res.json(retentionPlan({
+    scenes,
+    title: b.title || episode?.title || '',
+    description: b.description ?? episode?.description ?? '',
+    platform: b.platform || 'reels',
+    durationSec: b.durationSec || null,
+    hashtags: b.hashtags || (episode ? parseJson(episode.hashtags, []) : null),
+  }));
+});
+
+api.get('/growth/monetization', (_req, res) => res.json(monetizationPlan()));
+
+api.get('/growth/playbook/:accountId', (req, res) => {
+  const plan = accountPlaybook(req.params.accountId);
+  if (!plan) return res.status(404).json({ error: 'not_found', message: 'Аккаунт не найден' });
+  res.json(plan);
+});
+
+api.get('/episodes/:id/gate', (req, res) => {
+  const gate = publishGate(req.params.id);
+  if (!gate) return res.status(404).json({ error: 'not_found', message: 'Ролик не найден' });
+  res.json(gate);
+});
+
 api.get('/ads/overview', (_req, res) => {
   res.json(adsOverview());
 });
@@ -1002,9 +1070,9 @@ api.patch('/settings', (req, res) => {
   const allowed = [
     'autopilot_global', 'manual_review', 'risk_threshold', 'max_daily_per_account', 'timezone',
     // площадки
-    'tiktok_audited', 'tiktok_privacy', 'ai_label', 'ad_label', 'min_viral_score', 'ads_enabled',
+    'tiktok_audited', 'tiktok_privacy', 'youtube_audited', 'ai_label', 'ad_label', 'min_viral_score', 'ads_enabled',
     // деньги и себестоимость
-    'currency', 'rpm_reels', 'rpm_tiktok', 'conv_rate', 'ctr_estimate', 'product_price', 'product_margin',
+    'currency', 'rpm_reels', 'rpm_tiktok', 'rpm_youtube', 'conv_rate', 'ctr_estimate', 'product_price', 'product_margin',
     'cost_video', 'cost_tts', 'cost_llm', 'cost_render', 'postback_key',
   ];
   const patch = {};
