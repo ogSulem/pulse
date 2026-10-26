@@ -28,7 +28,7 @@ import {
   seriesOverview, genres as seriesGenres, listSeries, getSeries, createSeries, updateSeries, rebuildBible,
   planSeasonFor, composeEpisode, listEpisodes, getEpisode, updateEpisode, synthesizeEpisode, renderEpisodeById,
   recomposeEpisode, planEpisodeCuts, renderEpisodeCuts, publishEpisodeToYoutube, economics as seriesEconomicsView,
-  refreshSeriesMetrics,
+  refreshSeriesMetrics, pushCutsToQueue,
 } from '../engine/series.js';
 import { buildEpisode } from '../engine/serial.js';
 import fs from 'node:fs';
@@ -1516,6 +1516,19 @@ api.post('/series/episodes/:id/cuts', (req, res) => {
     res.json({ ok: true, cuts: planEpisodeCuts(req.params.id, { count: num(req.body?.count, 3) }) });
   } catch (err) {
     res.status(400).json({ error: 'cuts_failed', message: String(err.message || err) });
+  }
+});
+
+// нарезки уходят в общий конвейер: дальше их публикует обычная очередь
+api.post('/series/episodes/:id/cuts/queue', (req, res) => {
+  try {
+    const created = pushCutsToQueue(req.params.id, {
+      platform: req.body?.platform || 'reels',
+      count: req.body?.count ? num(req.body.count, 3) : null,
+    });
+    res.status(201).json({ ok: true, queued: created.length, episodes: created });
+  } catch (err) {
+    res.status(400).json({ error: 'cuts_queue_failed', message: String(err.message || err) });
   }
 });
 

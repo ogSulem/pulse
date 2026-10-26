@@ -52,7 +52,7 @@ function pickQuality() {
 
 export function seriesRenderInfo() {
   return {
-    available: Boolean(sharp && ffmpegPath && fs.existsSync(ffmpegPath) && fs.existsSync('/') && process.env.PULSE_RENDER !== 'off'),
+    available: Boolean(sharp && ffmpegPath && fs.existsSync(ffmpegPath) && process.env.PULSE_RENDER !== 'off'),
     ffmpeg: Boolean(ffmpegPath && fs.existsSync(ffmpegPath)),
     sharp: Boolean(sharp),
     width: SERIES_W,

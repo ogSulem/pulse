@@ -361,6 +361,9 @@ function EpisodeDrawer({ episodeId, onClose, onChanged }) {
                 <button className="btn btn-soft btn-sm" disabled={busy} onClick={() => run('cutsrender', () => api.renderSeriesCuts(ep.id), 'Нарезки собраны')}>
                   <Icon name="film" size={13} />Собрать нарезки
                 </button>
+                <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => run('cutsqueue', () => api.queueSeriesCuts(ep.id, { platform: 'reels', count: 2 }), 'Нарезки в очереди роликов')}>
+                  <Icon name="upload" size={13} />В очередь
+                </button>
                 <span className="muted" style={{ fontSize: 12 }}>Вертикальные клипы 15–60 с ведут зрителя из Shorts в сериал.</span>
               </div>
               {(cuts || []).length === 0 && <Empty icon="scissors" title="Нарезок пока нет" text="Нажмите «Нарезки», чтобы выбрать самые сильные сцены серии." />}

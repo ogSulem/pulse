@@ -694,6 +694,27 @@ try {
   ok('сериал: вертикальная нарезка', `${cut.seconds} с, ${(cut.bytes / 1024).toFixed(0)} КБ`);
 } catch (err) { fail('сериал: рендер 16:9', err); }
 
+// ── нарезки серии уходят в общий конвейер коротких роликов ─────────────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const ser = await import('../src/engine/series.js');
+  const project = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+  const bible = ser.genres().length ? (await import('../src/engine/serial.js')).buildBible({ title: 'Нарезки', genre: 'mystery' }) : null;
+  const series = ser.createSeries({ title: 'Нарезки', genre: 'mystery', projectId: project?.id, episodesPlanned: 4, episodeSec: 600 });
+  const ep = ser.composeEpisode({ seriesId: series.id, episodeNo: 1, targetSec: 600 });
+  const queued = ser.pushCutsToQueue(ep.id, { platform: 'reels', count: 2 });
+  if (queued.length !== 2) throw new Error(`в очередь ушло ${queued.length} нарезок вместо 2`);
+  const row = db.prepare('SELECT * FROM episodes WHERE id = ?').get(queued[0].episodeId);
+  const scenes = JSON.parse(row.scenes);
+  if (scenes.length < 2) throw new Error('у нарезки нет сцен');
+  if (!/в профиле/i.test(row.description)) throw new Error('в описании нет призыва к полной серии');
+  if (row.promo !== 'soft') throw new Error('нарезка не помечена как мягкая продажа');
+  if (!JSON.parse(row.creative || '{}').seriesId) throw new Error('нарезка не знает, из какого она сериала');
+  db.prepare('DELETE FROM episodes WHERE id IN (?, ?)').run(queued[0].episodeId, queued[1].episodeId);
+  db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
+  ok('сериал: нарезки в очереди', `${queued.length} ролика, ${scenes.length} сцены, CTA на серию`);
+} catch (err) { fail('сериал: нарезки в очереди', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

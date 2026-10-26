@@ -909,10 +909,12 @@ export function buildEpisode({
     let guard = 0;
     while (got < budget && guard < 80) {
       guard += 1;
-      const wantDetail = !beat.noDetail && rnd() < 0.3;
-      let line = wantDetail
-        ? pickDetail(ctx, rnd, state)
-        : pickBankLine(beat.bank, ctx, rnd, state);
+      const roll = beat.noDetail ? 1 : rnd();
+      let line = roll < 0.2
+        ? pickAtmosphere(rnd, state)
+        : roll < 0.45
+          ? pickDetail(ctx, rnd, state)
+          : pickBankLine(beat.bank, ctx, rnd, state);
       if (!line && !beat.noDetail) line = pickDetail(ctx, rnd, state);  // банк бита исчерпан
       if (!line) break;
       lines.push(line);

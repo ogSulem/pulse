@@ -19,8 +19,9 @@ import { uid, num, clamp, parseJson, addDays } from '../core/utils.js';
 import { log } from '../core/logger.js';
 import { providers } from '../providers/index.js';
 import { SERIES_GENRES, SERIES_GENRES_LIST, buildBible, planSeason, buildEpisode, authenticityAudit, seriesEconomics, planCuts, revenueForecast } from './serial.js';
-import { planVoiceSections, buildTimeline, renderSeriesEpisode, renderSeriesCut, seriesRenderInfo } from './serialrender.js';
+import { planVoiceSections, renderSeriesEpisode, renderSeriesCut, seriesRenderInfo } from './serialrender.js';
 import { MEDIA_DIR } from './render.js';
+import { createEpisode, touchEpisode, nextSlot } from './pipeline.js';
 import { decryptSecret } from '../core/secrets.js';
 
 const STAGES = {
@@ -413,6 +414,89 @@ export async function renderEpisodeCuts(id, { onProgress = null } = {}) {
   db.prepare('UPDATE series_episodes SET cuts = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(done), nowIso(), id);
   log({ level: 'info', actor: 'series', action: 'episode.cuts', entityType: 'series_episode', entityId: id, message: `Нарезки собраны: ${done.length}` });
   return done;
+}
+
+/**
+ * Нарезки → обычная очередь коротких роликов.
+ *
+ * Это главный источник трафика для сериала: вертикальный клип ловит зрителя в
+ * Shorts/TikTok, а в описании и на экране — «полная серия в профиле». Дальше
+ * ролик живёт своей жизнью: креатив, комплаенс, лимиты площадок и публикация
+ * берутся из существующего конвейера, дублировать его здесь нельзя.
+ */
+export function pushCutsToQueue(id, { platform = 'reels', count = null, startAt = null } = {}) {
+  const ep = getEpisode(id);
+  if (!ep) throw new Error('Серия не найдена');
+  const series = db.prepare('SELECT * FROM series WHERE id = ?').get(ep.series_id);
+  const projectId = series.project_id
+    || db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get()?.id;
+  if (!projectId) throw new Error('Нет проекта: нарезкам нужен бренд для описания и ссылок');
+
+  let cuts = ep.cuts || [];
+  if (!cuts.length) cuts = planEpisodeCuts(id, { count: count || 3 });
+  const picked = count ? cuts.slice(0, count) : cuts;
+
+  const created = [];
+  let slot = startAt || nowIso();
+  for (const cut of picked) {
+    const scenes = splitCutScenes(cut);
+    const episode = createEpisode({
+      projectId,
+      title: cut.title?.slice(0, 90) || `Сериал «${series.title}»: серия ${ep.episode_no}`,
+      scheduledAt: slot,
+    });
+    touchEpisode(episode.id, {
+      scenes: JSON.stringify(scenes),
+      description: cutCaption({ series, ep, cut }),
+      hashtags: JSON.stringify(['сериал', 'история', 'shorts', 'нарезка']),
+      caption_platform: platform,
+      promo: 'soft',
+      creative: JSON.stringify({ source: 'series', seriesId: series.id, episodeId: ep.id, cut: cut.index }),
+    });
+    created.push({ episodeId: episode.id, title: cut.title, scenes: scenes.length });
+    slot = nextSlot(projectId, slot);
+  }
+
+  log({
+    level: 'info', actor: 'series', action: 'cuts.queued', entityType: 'series_episode', entityId: id,
+    message: `Нарезки в очереди: ${created.length} роликов на площадку ${platform}`,
+    meta: { count: created.length, platform },
+  });
+  return created;
+}
+
+function splitCutScenes(cut) {
+  // Нарезка должна начинаться с крючка и кончаться призывом: два-три титра
+  // держат 20–30 секунд, больше — и это уже не нарезка, а вторая серия.
+  const text = String(cut.text || '').trim();
+  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const hook = sentences[0] || text.slice(0, 80);
+  const rest = sentences.slice(1).join(' ');
+  const body = rest || text.slice(80, 200);
+  const tail = `Полная серия — ${cut.episodeNo || 1} в профиле.`;
+  const total = Math.max(15, Math.min(60, num(cut.seconds, 28)));
+  const parts = [
+    { text: hook, weight: 0.34 },
+    { text: body, weight: 0.46 },
+    { text: tail, weight: 0.2 },
+  ].filter((p) => p.text);
+  const sum = parts.reduce((a, p) => a + p.weight, 0);
+  return parts.map((p, i) => ({
+    text: p.text.slice(0, 220),
+    seconds: Math.max(2.5, Math.round(((total * p.weight) / sum) * 10) / 10),
+    index: i,
+    role: i === 0 ? 'hook' : i === parts.length - 1 ? 'cta' : 'body',
+  }));
+}
+
+function cutCaption({ series, ep, cut }) {
+  return [
+    cut.title || `Сериал «${series.title}»`,
+    '',
+    `Серия ${ep.episode_no}${ep.title ? ` · ${ep.title}` : ''} — целиком в профиле, все серии идут по порядку в плейлисте «${series.title}».`,
+    '',
+    ep.disclosure || 'Художественная история. Текст и озвучка созданы с помощью ИИ; персонажи вымышлены.',
+  ].join('\n');
 }
 
 function youtubeAccount(projectId = null) {

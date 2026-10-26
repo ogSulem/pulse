@@ -834,6 +834,14 @@ scenes, captions, audio, renderMs }`.
 Тело: `{ count? }`. Планирует вертикальные нарезки 15–60 с из самых сильных сцен:
 `{ ok, cuts[{ index, startAt, seconds, title, scenery, episodeNo }] }`.
 
+### `POST /api/series/episodes/{id}/cuts/queue`
+
+Тело: `{ platform?, count? }`. Отправляет нарезки в **общий конвейер коротких роликов**:
+создаёт эпизоды в `episodes` со сценами (крючок → тело → «полная серия в профиле»),
+описанием с CTA на сериал, `promo: 'soft'` и меткой источника. Дальше их публикует обычная
+очередь: креатив, комплаенс и лимиты площадок берутся из существующего конвейера.
+Возвращает `{ ok, queued, episodes[{ episodeId, title, scenes }] }`.
+
 ### `POST /api/series/episodes/{id}/cuts/render`
 
 Собирает нарезки 1080×1920 с текстом-крючком. Возвращает `cuts` с `videoPath`.
@@ -843,6 +851,12 @@ scenes, captions, audio, renderMs }`.
 Тело: `{ privacy? }`. Загружает серию как **обычное видео** (не Shorts), создаёт плейлист
 сезона при первой публикации и добавляет серию в него. Возвращает
 `{ ok, url, videoId, privacy, playlistId, inPlaylist, checklist[] }`.
+
+### `POST /api/series/metrics/refresh`
+
+Пересчитывает метрики опубликованных серий: в live — из YouTube Data API, в demo — по
+модели роста. Обновляет `views`, `rpm`, `revenue_cents`. Вызывается и планировщиком
+(раз в ~20 с вместе с остальной аналитикой).
 
 ### `GET /api/series/{id}/economics?targetRub=50000`
 
