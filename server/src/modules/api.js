@@ -24,6 +24,13 @@ import { studio, buildPackage, promotionDecision, PROMO_SHARE } from '../engine/
 import { encryptSecret, decryptSecret, maskSecret } from '../core/secrets.js';
 import { scoreViral, saveViral, recalibrate } from '../engine/viral.js';
 import { renderInfo, renderAvailable, MEDIA_DIR } from '../engine/render.js';
+import {
+  seriesOverview, genres as seriesGenres, listSeries, getSeries, createSeries, updateSeries, rebuildBible,
+  planSeasonFor, composeEpisode, listEpisodes, getEpisode, updateEpisode, synthesizeEpisode, renderEpisodeById,
+  recomposeEpisode, planEpisodeCuts, renderEpisodeCuts, publishEpisodeToYoutube, economics as seriesEconomicsView,
+  refreshSeriesMetrics,
+} from '../engine/series.js';
+import { buildEpisode } from '../engine/serial.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkPassword, issueToken, verifyToken } from './auth.js';
@@ -1348,6 +1355,202 @@ api.post('/demo/reseed', async (_req, res) => {
   const { reseed } = await import('../seed/seed.js');
   reseed();
   res.json({ ok: true, message: 'Демо-данные пересозданы' });
+});
+
+// ─── Сериалы: длинные истории 10–20 минут ──────────────────────────────────
+// Отдельный продукт рядом с короткими роликами: своя библия, сезон, серии,
+// фото-ряд 16:9, мид-роллы и публикация в плейлист по порядку.
+
+api.get('/series', (_req, res) => {
+  res.json(seriesOverview());
+});
+
+api.get('/series/genres', (_req, res) => {
+  res.json({ genres: seriesGenres() });
+});
+
+api.post('/series', (req, res) => {
+  try {
+    const series = createSeries({
+      title: req.body?.title,
+      genre: req.body?.genre,
+      premise: req.body?.premise,
+      tone: req.body?.tone,
+      projectId: req.body?.projectId || req.body?.project_id || null,
+      episodesPlanned: req.body?.episodes_planned,
+      episodeSec: req.body?.episode_sec,
+    });
+    res.status(201).json(series);
+  } catch (err) {
+    res.status(400).json({ error: 'series_create_failed', message: String(err.message || err) });
+  }
+});
+
+api.get('/series/:id', (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return res.status(404).json({ error: 'not_found', message: 'Сериал не найден' });
+  res.json({ ...series, economics: seriesEconomicsView(req.params.id) });
+});
+
+api.patch('/series/:id', (req, res) => {
+  try {
+    res.json(updateSeries(req.params.id, req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: 'series_update_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/series/:id/bible', (req, res) => {
+  try {
+    res.json(rebuildBible(req.params.id, { variant: num(req.body?.variant, 0) }));
+  } catch (err) {
+    res.status(400).json({ error: 'bible_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/series/:id/plan', (req, res) => {
+  try {
+    const plan = planSeasonFor(req.params.id, {
+      startAt: req.body?.startAt || null,
+      perWeek: clamp(num(req.body?.perWeek, 2), 1, 3),
+    });
+    res.json({ ok: true, plan, series: getSeries(req.params.id) });
+  } catch (err) {
+    res.status(400).json({ error: 'plan_failed', message: String(err.message || err) });
+  }
+});
+
+api.get('/series/:id/episodes', (req, res) => {
+  const series = db.prepare('SELECT id FROM series WHERE id = ?').get(req.params.id);
+  if (!series) return res.status(404).json({ error: 'not_found', message: 'Сериал не найден' });
+  res.json({ episodes: listEpisodes(req.params.id) });
+});
+
+api.post('/series/:id/episodes', (req, res) => {
+  try {
+    const series = db.prepare('SELECT * FROM series WHERE id = ?').get(req.params.id);
+    if (!series) return res.status(404).json({ error: 'not_found', message: 'Сериал не найден' });
+    const nextNo = db.prepare('SELECT COALESCE(MAX(episode_no),0)+1 n FROM series_episodes WHERE series_id = ?').get(req.params.id).n;
+    const episodeNo = clamp(num(req.body?.episodeNo, nextNo), 1, 12);
+    const ep = composeEpisode({
+      seriesId: req.params.id,
+      episodeNo,
+      targetSec: req.body?.targetSec || series.episode_sec,
+      variant: num(req.body?.variant, 0),
+    });
+    res.status(201).json(ep);
+  } catch (err) {
+    res.status(400).json({ error: 'episode_failed', message: String(err.message || err) });
+  }
+});
+
+// предпросмотр сценария без сохранения: «покажи, что получится»
+api.post('/series/:id/preview', (req, res) => {
+  const series = db.prepare('SELECT * FROM series WHERE id = ?').get(req.params.id);
+  if (!series) return res.status(404).json({ error: 'not_found', message: 'Сериал не найден' });
+  try {
+    const ep = buildEpisode({
+      series,
+      episodeNo: clamp(num(req.body?.episodeNo, 1), 1, 12),
+      targetSec: req.body?.targetSec || series.episode_sec,
+      variant: num(req.body?.variant, 0),
+    });
+    res.json(ep);
+  } catch (err) {
+    res.status(400).json({ error: 'preview_failed', message: String(err.message || err) });
+  }
+});
+
+api.get('/series/episodes/:id', (req, res) => {
+  const ep = getEpisode(req.params.id);
+  if (!ep) return res.status(404).json({ error: 'not_found', message: 'Серия не найдена' });
+  res.json(ep);
+});
+
+api.patch('/series/episodes/:id', (req, res) => {
+  try {
+    res.json(updateEpisode(req.params.id, req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: 'episode_update_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/series/episodes/:id/recompose', (req, res) => {
+  try {
+    res.json(recomposeEpisode(req.params.id, { variant: req.body?.variant ?? null }));
+  } catch (err) {
+    res.status(400).json({ error: 'recompose_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/series/episodes/:id/voice', async (req, res) => {
+  try {
+    res.json(await synthesizeEpisode(req.params.id, { voiceId: req.body?.voiceId || null }));
+  } catch (err) {
+    res.status(400).json({ error: 'voice_failed', message: String(err.message || err) });
+  }
+});
+
+// Рендер идёт минутами: по умолчанию запускаем в фоне и отдаём job, а с
+// ?wait=1 — ждём результат (нужно для проверки и для слабых серий).
+api.post('/series/episodes/:id/render', async (req, res) => {
+  const id = req.params.id;
+  const ep = getEpisode(id);
+  if (!ep) return res.status(404).json({ error: 'not_found', message: 'Серия не найдена' });
+  const wait = String(req.query.wait || req.body?.wait || '') === '1';
+  const task = renderEpisodeById(id).catch((err) => {
+    log({ level: 'error', actor: 'series', action: 'episode.render_failed', entityType: 'series_episode', entityId: id, message: String(err.message || err) });
+    return { ok: false, message: String(err.message || err) };
+  });
+  if (!wait) {
+    res.status(202).json({ ok: true, accepted: true, message: 'Сборка серии запущена в фоне', episodeId: id });
+    return;
+  }
+  const out = await task;
+  if (!out.ok) return res.status(400).json({ error: 'render_failed', message: out.message || 'Сборка не удалась' });
+  res.json(out);
+});
+
+api.post('/series/episodes/:id/cuts', (req, res) => {
+  try {
+    res.json({ ok: true, cuts: planEpisodeCuts(req.params.id, { count: num(req.body?.count, 3) }) });
+  } catch (err) {
+    res.status(400).json({ error: 'cuts_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/series/episodes/:id/cuts/render', async (req, res) => {
+  try {
+    const cuts = await renderEpisodeCuts(req.params.id);
+    res.json({ ok: true, cuts });
+  } catch (err) {
+    res.status(400).json({ error: 'cuts_render_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/series/episodes/:id/publish', async (req, res) => {
+  try {
+    const out = await publishEpisodeToYoutube(req.params.id, { privacy: req.body?.privacy || null });
+    res.json(out);
+  } catch (err) {
+    res.status(400).json({ error: 'publish_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/series/metrics/refresh', async (_req, res) => {
+  try {
+    res.json(await refreshSeriesMetrics());
+  } catch (err) {
+    res.status(400).json({ error: 'metrics_failed', message: String(err.message || err) });
+  }
+});
+
+api.get('/series/:id/economics', (req, res) => {
+  try {
+    res.json(seriesEconomicsView(req.params.id, { targetRub: num(req.query.targetRub, 50000) }));
+  } catch (err) {
+    res.status(400).json({ error: 'economics_failed', message: String(err.message || err) });
+  }
 });
 
 api.use((req, res) => res.status(404).json({ error: 'not_found', message: `Нет маршрута ${req.method} ${req.path}` }));

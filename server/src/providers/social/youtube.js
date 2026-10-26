@@ -71,7 +71,10 @@ export function normalizeMeta({ title, description, tags = [] }) {
  * Загружает видео целиком через resumable-сессию.
  * Возвращает { videoId, privacy, url }.
  */
-export async function uploadVideo({ token, filePath, title, description, tags = [], privacy = 'private', madeForKids = false, categoryId = '22', onProgress }) {
+export async function uploadVideo({
+  token, filePath, title, description, tags = [], privacy = 'private',
+  madeForKids = false, categoryId = '22', onProgress, format = 'short', playlistId = null,
+}) {
   if (!token) throw new Error('YouTube: нет токена доступа');
   if (!fs.existsSync(filePath)) throw new Error('YouTube: нет файла ролика для загрузки');
   const size = fs.statSync(filePath).size;
@@ -125,10 +128,62 @@ export async function uploadVideo({ token, filePath, title, description, tags = 
     }
     const videoId = result?.id;
     if (!videoId) throw new Error('YouTube: загрузка завершилась без идентификатора видео');
-    return { videoId, privacy, url: `https://www.youtube.com/shorts/${videoId}` };
+
+    // Сериал — обычное видео (watch), а не Shorts: длина 10–20 минут уже не
+    // проходит в Shorts, и ссылка должна вести на страницу с плейлистом.
+    const url = format === 'long'
+      ? `https://www.youtube.com/watch?v=${videoId}`
+      : `https://www.youtube.com/shorts/${videoId}`;
+
+    let inPlaylist = false;
+    if (playlistId) {
+      try {
+        await addToPlaylist({ token, playlistId, videoId });
+        inPlaylist = true;
+      } catch (err) {
+        // видео уже загружено: падать из-за плейлиста нельзя, только фиксируем
+        inPlaylist = false;
+      }
+    }
+    return { videoId, privacy, url, inPlaylist, format, playlistId: playlistId || null };
   } finally {
     fs.closeSync(fd);
   }
+}
+
+/**
+ * Плейлист — основа «Shows»: зритель смотрит серию за серией, а YouTube сам
+ * включает следующую. Это главный механизм удержания в сериальном формате.
+ */
+export async function createPlaylist({ token, title, description = '', privacy = 'public' }) {
+  const res = await fetch(`${DATA}/playlists?part=snippet,status`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      snippet: { title: String(title || 'Сериал').slice(0, 150), description: String(description || '').slice(0, 5000) },
+      status: { privacyStatus: privacy },
+    }),
+  });
+  if (!res.ok) throw describeError(await parse(res), res.status);
+  const data = await parse(res);
+  return { playlistId: data.id, url: `https://www.youtube.com/playlist?list=${data.id}` };
+}
+
+export async function addToPlaylist({ token, playlistId, videoId, position = null }) {
+  if (!playlistId) throw new Error('YouTube: не задан playlistId');
+  const res = await fetch(`${DATA}/playlistItems?part=snippet`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      snippet: {
+        playlistId,
+        ...(position != null ? { position: Number(position) } : {}),
+        resourceId: { kind: 'youtube#video', videoId },
+      },
+    }),
+  });
+  if (!res.ok) throw describeError(await parse(res), res.status);
+  return await parse(res);
 }
 
 /** Статистика по видео (1 unit за вызов, до 50 id). */
@@ -182,4 +237,4 @@ export async function uploadAllowed({ token }) {
   }
 }
 
-export default { uploadVideo, videoStats, channelStats, normalizeMeta, uploadAllowed };
+export default { uploadVideo, videoStats, channelStats, normalizeMeta, uploadAllowed, createPlaylist, addToPlaylist };
