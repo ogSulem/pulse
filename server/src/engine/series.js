@@ -17,6 +17,7 @@ import path from 'node:path';
 import { db, getSettings, nowIso } from '../core/db.js';
 import { uid, num, clamp, parseJson, addDays } from '../core/utils.js';
 import { log } from '../core/logger.js';
+import { enqueue } from '../core/queue.js';
 import { providers } from '../providers/index.js';
 import { SERIES_GENRES, SERIES_GENRES_LIST, buildBible, planSeason, buildEpisode, authenticityAudit, seriesEconomics, planCuts, revenueForecast } from './serial.js';
 import { planVoiceSections, renderSeriesEpisode, renderSeriesCut, seriesRenderInfo } from './serialrender.js';
@@ -78,6 +79,8 @@ export function episodeRow(e) {
     stage_label: STAGES[e.stage] || e.stage,
     minutes: Math.round((num(e.duration_sec, 0) / 60) * 10) / 10,
     revenue_rub: Math.round(num(e.revenue_cents, 0) / 100),
+    // ссылка на опубликованное видео: без неё карточка серии бесполезна после выхода
+    url: e.external_id ? `https://www.youtube.com/watch?v=${e.external_id}` : null,
   };
 }
 
@@ -515,6 +518,45 @@ function publicUrl() {
  * попадает в плейлист сезона. Плейлист создаётся автоматически при первой
  * публикации — это и есть «Shows»: серии идут по порядку, автоплей следующий.
  */
+/**
+ * Ставим серию в расписание: серия должна быть собрана (есть файл), иначе
+ * расписание бессмысленно — рендер идёт минутами и не может ждать дедлайна.
+ */
+export function scheduleEpisode(id, { publishAt = null } = {}) {
+  const ep = getEpisode(id);
+  if (!ep) throw new Error('Серия не найдена');
+  if (!ep.video_path) throw new Error('Сначала соберите серию: без файла публиковать нечего');
+  const at = publishAt || ep.publish_at || nowIso();
+  db.prepare("UPDATE series_episodes SET stage = 'scheduled', publish_at = ?, error = NULL, updated_at = ? WHERE id = ?")
+    .run(at, nowIso(), id);
+  log({ level: 'info', actor: 'series', action: 'episode.scheduled', entityType: 'series_episode', entityId: id, message: `Серия ${ep.episode_no} в расписании на ${at}` });
+  return getEpisode(id);
+}
+
+/**
+ * Планировщик серий. Работает как sweepDueEpisodes для коротких роликов:
+ * пришло время — ставим задачу публикации в общую очередь, а не публикуем
+ * внутри тика (загрузка файла может идти минутами).
+ * Выключается настройкой series_autopublish = 0.
+ */
+export function sweepDueSeriesEpisodes({ now = nowIso() } = {}) {
+  const settings = getSettings();
+  if (num(settings.series_autopublish, 1) !== 1) return 0;
+  const due = db.prepare(`SELECT id, episode_no FROM series_episodes
+      WHERE stage = 'scheduled' AND publish_at <= ? AND video_path IS NOT NULL AND COALESCE(external_id, '') = ''
+      ORDER BY publish_at ASC LIMIT 12`).all(now);
+  let n = 0;
+  const busyStmt = db.prepare(`SELECT 1 x FROM jobs WHERE status IN ('pending','running')
+      AND type = 'series.publish' AND payload LIKE ? LIMIT 1`);
+  for (const ep of due) {
+    // задача уже стоит — не плодим вторую копию каждые 20 секунд
+    if (busyStmt.get(`%${ep.id}%`)) continue;
+    enqueue('series.publish', { episodeId: ep.id }, { priority: 3, dedupeKey: `series-publish:${ep.id}` });
+    n++;
+  }
+  return n;
+}
+
 export async function publishEpisodeToYoutube(id, { privacy = null } = {}) {
   const ep = getEpisode(id);
   if (!ep) throw new Error('Серия не найдена');
@@ -531,13 +573,20 @@ export async function publishEpisodeToYoutube(id, { privacy = null } = {}) {
   // а чекбокс «altered or synthetic content» YouTube ставит только в Студии —
   // поэтому возвращаем напоминание прямо в ответе.
   const disclosure = ep.disclosure || 'Художественная история. Текст и озвучка созданы с помощью ИИ под редакцией автора; персонажи вымышлены.';
-  const description = `${ep.description || ''}\n\n${disclosure}`.trim();
   const privacyStatus = privacy || (num(settings.youtube_audited, 0) ? 'public' : 'private');
 
-  const token = decryptSecret(account.access_token);
+  const token = account.access_token ? decryptSecret(account.access_token) : null;
+  // В demo-режиме площадка не вызывается вообще: как и для коротких роликов,
+  // провайдер возвращает правдоподобную заглушку. Иначе кнопка «Опубликовать»
+  // падала бы у каждого, кто просто открыл панель и нажал её.
+  const demo = String(process.env.PULSE_MODE || 'demo') !== 'live' || !token;
   const { uploadVideo, createPlaylist } = await import('../providers/social/youtube.js');
 
   let playlistId = series.playlist_id || null;
+  if (!playlistId && demo) {
+    playlistId = `PL_demo_${(series.id || '').replace(/[^a-z0-9]/gi, '').slice(-10) || 'pulse'}`;
+    db.prepare('UPDATE series SET playlist_id = ?, updated_at = ? WHERE id = ?').run(playlistId, nowIso(), series.id);
+  }
   if (!playlistId) {
     try {
       const pl = await createPlaylist({
@@ -553,7 +602,22 @@ export async function publishEpisodeToYoutube(id, { privacy = null } = {}) {
     }
   }
 
-  const uploaded = await uploadVideo({
+  // Плейлист — это не украшение: он тянет следующую серию автоплеем и
+  // добавляет сессии. Ссылку кладём в описание, чтобы зритель мог уйти в
+  // сериал с любого места, а не искать канал.
+  const playlistUrl = playlistId ? `https://www.youtube.com/playlist?list=${playlistId}` : null;
+  const description = [
+    ep.description || '',
+    playlistUrl ? `Все серии по порядку: ${playlistUrl}` : '',
+    disclosure,
+  ].filter(Boolean).join('\n\n').trim();
+
+  const uploaded = demo ? {
+    videoId: `yt_demo_${Math.random().toString(36).slice(2, 12)}`,
+    url: `https://www.youtube.com/watch?v=yt_demo_${Math.random().toString(36).slice(2, 10)}`,
+    privacy: privacyStatus,
+    demo: true,
+  } : await uploadVideo({
     token,
     filePath: abs,
     title: ep.title,
@@ -564,8 +628,10 @@ export async function publishEpisodeToYoutube(id, { privacy = null } = {}) {
     playlistId,
   });
 
-  db.prepare('UPDATE series_episodes SET stage = ?, published_at = ?, external_id = ?, error = NULL, updated_at = ? WHERE id = ?')
-    .run('published', nowIso(), uploaded.videoId, nowIso(), id);
+  // Сохраняем ровно то описание, которое ушло на площадку: в нём ссылка на
+  // плейлист и маркировка, и именно его увидит пользователь в карточке серии.
+  db.prepare('UPDATE series_episodes SET stage = ?, published_at = ?, external_id = ?, description = ?, error = NULL, updated_at = ? WHERE id = ?')
+    .run('published', nowIso(), uploaded.videoId, description, nowIso(), id);
 
   log({
     level: 'info', actor: 'series', action: 'episode.published', entityType: 'series_episode', entityId: id,

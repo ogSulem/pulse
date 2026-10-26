@@ -186,6 +186,12 @@ export default function Settings({ refresh }) {
             hint="Без аудита YouTube принимает только приватные загрузки. После проверки проекта включите — Shorts начнут выходить публично (вертикальное видео ≤ 3 минут)."
           />
           <Toggle
+            checked={String(settings.series_autopublish ?? '1') === '1'}
+            onChange={(v) => patch({ series_autopublish: v ? 1 : 0 })}
+            label="Серии выходят по расписанию сами"
+            hint="Собранная серия, поставленная в расписание, публикуется задачей в очереди — без вашего участия. Выключите, если хотите подтверждать каждый выпуск вручную."
+          />
+          <Toggle
             checked={String(settings.ai_label) === '1'}
             onChange={(v) => patch({ ai_label: v ? 1 : 0 })}
             label="Маркировать ИИ-контент"

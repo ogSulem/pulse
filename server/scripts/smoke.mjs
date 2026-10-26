@@ -713,7 +713,82 @@ try {
   db.prepare('DELETE FROM episodes WHERE id IN (?, ?)').run(queued[0].episodeId, queued[1].episodeId);
   db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
   ok('сериал: нарезки в очереди', `${queued.length} ролика, ${scenes.length} сцены, CTA на серию`);
+
 } catch (err) { fail('сериал: нарезки в очереди', err); }
+
+// ── длинный формат в общих деньгах: часы, RPM, путь к 4000 часов ───────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const ser = await import('../src/engine/series.js');
+  const { moneySummary } = await import('../src/engine/money.js');
+  const project = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+  const series = ser.createSeries({ title: 'Деньги серии', genre: 'noir', projectId: project?.id, episodesPlanned: 4, episodeSec: 720 });
+  const ep = ser.composeEpisode({ seriesId: series.id, episodeNo: 1, targetSec: 720 });
+  db.prepare("UPDATE series_episodes SET stage='published', views=25000, revenue_cents=625000, cost_cents=24900, duration_sec=720, published_at=? WHERE id=?").run(new Date().toISOString(), ep.id);
+  const money = moneySummary({ days: 30 }).longform;
+  if (money.episodes !== 1) throw new Error(`в деньгах ${money.episodes} длинных серий вместо 1`);
+  if (money.views !== 25000 || Math.round(money.revenue) !== 6250) throw new Error(`просмотры/доход не сошлись: ${money.views}/${money.revenue}`);
+  if (money.watchHours !== 2000) throw new Error(`часы просмотра ${money.watchHours} вместо 2000 (25000 × 12 мин × 0.4 avg)`);
+  if (money.hoursToMonetization !== 2000) throw new Error(`до монетизации ${money.hoursToMonetization} ч вместо 2000`);
+  if (Math.round(money.rpmAvg) !== 250) throw new Error(`RPM ${money.rpmAvg} вместо 250 ₽`);
+  if (!money.top[0]?.seriesId) throw new Error('в топе серий нет ссылки на сериал');
+  db.prepare('DELETE FROM series_episodes WHERE id = ?').run(ep.id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
+  ok('сериал: деньги длинного формата', `${money.episodes} серия, ${money.views} просмотров, ${money.watchHours} ч, RPM ${money.rpmAvg} ₽, до 4000 ч — ${money.hoursToMonetization} ч`);
+} catch (err) { fail('сериал: деньги длинного формата', err); }
+
+
+
+// ── расписание серий: своя задача в очереди, без вечного цикла ──────────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const ser = await import('../src/engine/series.js');
+  const project = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+  const series = ser.createSeries({ title: 'Расписание', genre: 'zombie', projectId: project?.id, episodesPlanned: 3, episodeSec: 600 });
+  const ep = ser.composeEpisode({ seriesId: series.id, episodeNo: 1, targetSec: 600 });
+
+  let refused = false;
+  try { ser.scheduleEpisode(ep.id); } catch { refused = true; }
+  if (!refused) throw new Error('серия без файла попала в расписание');
+
+  db.prepare("UPDATE series_episodes SET video_path = 'smoke.mp4', publish_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 60000).toISOString(), ep.id);
+  const scheduled = ser.scheduleEpisode(ep.id);
+  if (scheduled.stage !== 'scheduled') throw new Error(`стадия «${scheduled.stage}» вместо scheduled`);
+
+  const first = ser.sweepDueSeriesEpisodes();
+  const second = ser.sweepDueSeriesEpisodes();
+  const jobs = db.prepare("SELECT COUNT(*) c FROM jobs WHERE type = 'series.publish' AND payload LIKE ?").get(`%${ep.id}%`).c;
+  if (first !== 1) throw new Error(`планировщик взял ${first} серий вместо 1`);
+  if (second !== 0 || jobs !== 1) throw new Error(`дубли задач: sweep=${second}, jobs=${jobs}`);
+
+  db.prepare("DELETE FROM jobs WHERE type = 'series.publish' AND payload LIKE ?").run(`%${ep.id}%`);
+  db.prepare('DELETE FROM series_episodes WHERE id = ?').run(ep.id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
+  ok('сериал: расписание серий', 'без файла отказ, с файлом — задача series.publish, дублей нет');
+} catch (err) { fail('сериал: расписание серий', err); }
+
+// ── публикация серии: demo-провайдер, плейлист и ссылка в описании ──────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const ser = await import('../src/engine/series.js');
+  const project = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+  const series = ser.createSeries({ title: 'Публикация', genre: 'mystery', projectId: project?.id, episodesPlanned: 3, episodeSec: 600 });
+  const ep = ser.composeEpisode({ seriesId: series.id, episodeNo: 1, targetSec: 600 });
+  fs.writeFileSync(path.join(process.env.PULSE_MEDIA_DIR || path.join(tmp, 'media'), 'smoke-series.mp4'), Buffer.alloc(64 * 1024, 7));
+  db.prepare('UPDATE series_episodes SET video_path = ?, duration_sec = 600 WHERE id = ?').run('smoke-series.mp4', ep.id);
+  const out = await ser.publishEpisodeToYoutube(ep.id);
+  if (!out.ok || !out.url) throw new Error('публикация не вернула ссылку');
+  if (!/youtube\.com\/watch/.test(out.url)) throw new Error(`серия ушла не как обычное видео: ${out.url}`);
+  if (!out.playlistId) throw new Error('плейлист не создан');
+  const row = db.prepare('SELECT * FROM series_episodes WHERE id = ?').get(ep.id);
+  if (row.stage !== 'published' || !row.external_id) throw new Error('серия не перешла в published');
+  if (!new RegExp(out.playlistId).test(row.description)) throw new Error('в описании нет ссылки на плейлист');
+  ok('сериал: публикация и плейлист', `${out.privacy}, плейлист ${out.playlistId.slice(0, 12)}…, ссылка в описании`);
+  db.prepare('DELETE FROM series_episodes WHERE id = ?').run(ep.id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
+  fs.rmSync(path.join(process.env.PULSE_MEDIA_DIR || path.join(tmp, 'media'), 'smoke-series.mp4'), { force: true });
+} catch (err) { fail('сериал: публикация и плейлист', err); }
 
 fs.rmSync(tmp, { recursive: true, force: true });
 

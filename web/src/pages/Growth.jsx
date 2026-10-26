@@ -840,6 +840,23 @@ function KnowledgeTab({ knowledge, playbook }) {
         </div>
       </div>
 
+      {(knowledge.general.longform || []).length > 0 && (
+        <div className="card pad-lg">
+          <div className="card-head">
+            <div><h2>Сериалы и длинный формат</h2><p>Почему 12-минутная серия приносит больше, чем десять Shorts — и где здесь ловушка</p></div>
+            <Badge tone="accent">16:9</Badge>
+          </div>
+          <div className="page-grid grid-2" style={{ gap: 10 }}>
+            {knowledge.general.longform.map((l) => (
+              <div key={l.label} style={{ padding: '9px 11px', border: '1px solid var(--line)', borderRadius: 10 }}>
+                <div style={{ fontSize: 10.5, color: 'var(--accent)', fontWeight: 700, letterSpacing: '.04em', textTransform: 'uppercase', marginBottom: 3 }}>{l.label}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.55 }}>{l.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="page-grid grid-2">
         <div className="card pad-lg">
           <div className="card-head"><div><h2>Лимиты Pulse против лимитов API</h2><p>Мы всегда ниже технического потолка — это часть стратегии роста</p></div></div>

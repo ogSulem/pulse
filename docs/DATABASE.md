@@ -603,4 +603,11 @@ JSON вида `{ "weights": { "hook": 0.31, … }, "lift": { "hook": 1.4, … },
 
 Настройки сериала — в общем `settings`: `series_episode_sec` (900), `series_episodes` (6),
 `series_max_sec` (1200 — потолок рендера), `series_quality` (high/balanced/fast),
-`rpm_youtube_long` (190 ₽), `cost_tts_1000` (20 ₽), `cost_render_min` (6 ₽).
+`series_autopublish` (1 — серии из `scheduled` публикуются задачей `series.publish` сами;
+0 — каждый выпуск подтверждается вручную), `rpm_youtube_long` (190 ₽), `cost_tts_1000` (20 ₽),
+`cost_render_min` (6 ₽).
+
+Публикация по расписанию идёт через общую очередь (`jobs.type = 'series.publish'`), поэтому
+переживает перезапуск: `sweepDueSeriesEpisodes()` видит `stage = 'scheduled'`,
+`publish_at <= now`, непустой `video_path` и пустой `external_id`. Ошибка загрузки возвращает
+серию в `review` и пишет причину в `error` — планировщик не зацикливается.

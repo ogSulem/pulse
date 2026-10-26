@@ -117,6 +117,7 @@ export const api = {
   renderSeriesCuts: (id) => request(`/series/episodes/${id}/cuts/render`, { method: 'POST', body: {} }),
   queueSeriesCuts: (id, payload = {}) => request(`/series/episodes/${id}/cuts/queue`, { method: 'POST', body: payload }),
   publishSeriesEpisode: (id, payload = {}) => request(`/series/episodes/${id}/publish`, { method: 'POST', body: payload }),
+  scheduleSeriesEpisode: (id, payload = {}) => request(`/series/episodes/${id}/schedule`, { method: 'POST', body: payload }),
   seriesEconomics: (id) => request(`/series/${id}/economics`),
 
   adsOverview: () => request('/ads/overview'),

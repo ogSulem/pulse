@@ -225,12 +225,27 @@ function EpisodeDrawer({ episodeId, onClose, onChanged }) {
               <Icon name="scissors" size={14} />Нарезки
             </button>
             {ep.stage === 'review' && (
-              <button className="btn btn-soft btn-sm" disabled={busy} onClick={async () => {
-                const res = await run('publish', () => api.publishSeriesEpisode(ep.id), 'Серия отправлена на YouTube');
-                if (res) setPublishResult(res);
-              }}>
-                <Icon name="upload" size={14} />Опубликовать
-              </button>
+              <>
+                <button className="btn btn-soft btn-sm" disabled={busy} onClick={async () => {
+                  const res = await run('publish', () => api.publishSeriesEpisode(ep.id), 'Серия отправлена на YouTube');
+                  if (res) setPublishResult(res);
+                }}>
+                  <Icon name="upload" size={14} />Опубликовать
+                </button>
+                <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run('schedule', () => api.scheduleSeriesEpisode(ep.id), 'Серия в расписании — выйдет сама')}>
+                  <Icon name="clock" size={14} />В расписание
+                </button>
+              </>
+            )}
+            {ep.stage === 'scheduled' && (
+              <span className="badge accent" style={{ alignSelf: 'center' }}>
+                <Icon name="clock" size={12} />выйдет {ep.publish_at ? new Date(ep.publish_at).toLocaleString('ru-RU', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'по плану сезона'}
+              </span>
+            )}
+            {ep.url && (
+              <a className="btn btn-ghost btn-sm" href={ep.url} target="_blank" rel="noreferrer">
+                <Icon name="link" size={14} />Видео на YouTube
+              </a>
             )}
           </div>
 

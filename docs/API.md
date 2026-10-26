@@ -849,8 +849,17 @@ scenes, captions, audio, renderMs }`.
 ### `POST /api/series/episodes/{id}/publish`
 
 Тело: `{ privacy? }`. Загружает серию как **обычное видео** (не Shorts), создаёт плейлист
-сезона при первой публикации и добавляет серию в него. Возвращает
+сезона при первой публикации, добавляет серию в него и подставляет ссылку на плейлист в
+описание — так сессия продолжается следующей серией, а не заканчивается на одной. Возвращает
 `{ ok, url, videoId, privacy, playlistId, inPlaylist, checklist[] }`.
+
+### `POST /api/series/episodes/{id}/schedule`
+
+Тело: `{ publishAt? }`. Переводит **собранную** серию в `stage = 'scheduled'` (без `video_path`
+возвращает `schedule_failed`). Дальше `sweepDueSeriesEpisodes()` ставит задачу `series.publish`
+в очередь, и серия выходит сама — если в настройках включено «Серии выходят по расписанию сами»
+(`series_autopublish = 1`, по умолчанию включено). Ошибка публикации возвращает серию в
+`review` с текстом причины, поэтому цикл не повторяется бесконечно.
 
 ### `POST /api/series/metrics/refresh`
 

@@ -28,7 +28,7 @@ import {
   seriesOverview, genres as seriesGenres, listSeries, getSeries, createSeries, updateSeries, rebuildBible,
   planSeasonFor, composeEpisode, listEpisodes, getEpisode, updateEpisode, synthesizeEpisode, renderEpisodeById,
   recomposeEpisode, planEpisodeCuts, renderEpisodeCuts, publishEpisodeToYoutube, economics as seriesEconomicsView,
-  refreshSeriesMetrics, pushCutsToQueue,
+  refreshSeriesMetrics, pushCutsToQueue, scheduleEpisode,
 } from '../engine/series.js';
 import { buildEpisode } from '../engine/serial.js';
 import fs from 'node:fs';
@@ -1538,6 +1538,14 @@ api.post('/series/episodes/:id/cuts/render', async (req, res) => {
     res.json({ ok: true, cuts });
   } catch (err) {
     res.status(400).json({ error: 'cuts_render_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/series/episodes/:id/schedule', (req, res) => {
+  try {
+    res.json(scheduleEpisode(req.params.id, { publishAt: req.body?.publishAt || null }));
+  } catch (err) {
+    res.status(400).json({ error: 'schedule_failed', message: String(err.message || err) });
   }
 });
 
