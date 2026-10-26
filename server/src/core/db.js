@@ -274,6 +274,78 @@ CREATE TABLE IF NOT EXISTS campaign_posts (
   created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_campaign_posts ON campaign_posts(campaign_id, episode_id);
+
+-- ── Сериалы (длинные истории 10–20 минут) ──────────────────────────────────
+-- Отдельные таблицы, а не «эпизоды с флагом»: у сериала своя библия, сезон,
+-- арка и сквозные персонажи. Шортсы живут в episodes и не смешиваются с ним.
+CREATE TABLE IF NOT EXISTS series (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT,
+  title            TEXT NOT NULL,
+  genre            TEXT NOT NULL DEFAULT 'zombie',
+  premise          TEXT DEFAULT '',
+  tone             TEXT DEFAULT 'cinematic',
+  bible            TEXT NOT NULL DEFAULT '{}',
+  season           INTEGER DEFAULT 1,
+  episodes_planned INTEGER DEFAULT 6,
+  episode_sec      INTEGER DEFAULT 900,
+  season_plan      TEXT NOT NULL DEFAULT '{}',
+  status           TEXT DEFAULT 'draft',
+  playlist_id      TEXT,
+  show_id          TEXT,
+  cadence          TEXT DEFAULT '',
+  notes            TEXT DEFAULT '',
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_series_status ON series(status);
+
+CREATE TABLE IF NOT EXISTS series_episodes (
+  id              TEXT PRIMARY KEY,
+  series_id       TEXT NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+  project_id      TEXT,
+  episode_no      INTEGER NOT NULL,
+  title           TEXT DEFAULT '',
+  logline         TEXT DEFAULT '',
+  arc             TEXT DEFAULT '',
+  stage           TEXT DEFAULT 'planned',
+  script          TEXT DEFAULT '{}',
+  scenes          TEXT DEFAULT '[]',
+  chapters        TEXT DEFAULT '[]',
+  cuts            TEXT DEFAULT '[]',
+  duration_sec    INTEGER DEFAULT 0,
+  words           INTEGER DEFAULT 0,
+  wpm             INTEGER DEFAULT 0,
+  mid_rolls       INTEGER DEFAULT 0,
+  rolls_at        TEXT DEFAULT '[]',
+  description     TEXT DEFAULT '',
+  tags            TEXT DEFAULT '[]',
+  thumb_text      TEXT DEFAULT '',
+  title_variants  TEXT DEFAULT '[]',
+  scores          TEXT DEFAULT '{}',
+  authenticity    TEXT DEFAULT '{}',
+  forecast        TEXT DEFAULT '{}',
+  disclosure      TEXT DEFAULT '',
+  frames          TEXT DEFAULT '[]',
+  video_path      TEXT,
+  video_bytes     INTEGER DEFAULT 0,
+  render_ms       INTEGER DEFAULT 0,
+  cover_paths     TEXT DEFAULT '{}',
+  audio_path      TEXT,
+  audio_sec       REAL DEFAULT 0,
+  publish_at      TEXT,
+  published_at    TEXT,
+  external_id     TEXT,
+  views           INTEGER DEFAULT 0,
+  rpm             REAL DEFAULT 0,
+  revenue_cents   INTEGER DEFAULT 0,
+  cost_cents      INTEGER DEFAULT 0,
+  error           TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_series_ep_no ON series_episodes(series_id, episode_no);
+CREATE INDEX IF NOT EXISTS ix_series_ep_stage ON series_episodes(stage);
 `;
 
 // SQLite не умеет ADD COLUMN IF NOT EXISTS — добавляем колонки точечно.
@@ -323,6 +395,24 @@ function ensureColumns() {
     },
     projects: {
       ai_generated: 'INTEGER DEFAULT 1',
+    },
+    series: {
+      // сериал переиспользует проект-бренд, но может жить и без него
+      project_id: 'TEXT',
+      season_plan: "TEXT NOT NULL DEFAULT '{}'",
+      playlist_id: 'TEXT',
+      show_id: 'TEXT',
+      cadence: "TEXT DEFAULT ''",
+      notes: "TEXT DEFAULT ''",
+      updated_at: 'TEXT',
+    },
+    series_episodes: {
+      audio_path: 'TEXT',
+      audio_sec: 'REAL DEFAULT 0',
+      frames: "TEXT DEFAULT '[]'",
+      cuts: "TEXT DEFAULT '[]'",
+      disclosure: "TEXT DEFAULT ''",
+      error: 'TEXT',
     },
     conversions: {
       external_id: 'TEXT',
@@ -376,6 +466,7 @@ export const settingsDefaults = {
   // ── площадки: реальные лимиты и статус приложений ────────────────────────
   tiktok_audited: '0',            // 0 = неаудированный клиент → только приватные посты
   youtube_audited: '0',           // 0 = проект Google без аудита → загрузки только private
+  series_autopublish: '1',        // серии, поставленные в расписание, публикуются сами
   tiktok_privacy: 'SELF_ONLY',
   ai_label: '1',                  // помечать AI-контент (требование площадок)
   ad_label: '1',                  // помечать рекламу в описании
@@ -386,6 +477,15 @@ export const settingsDefaults = {
   rpm_reels: '25',                // доход с 1000 просмотров Reels, ₽
   rpm_tiktok: '10',
   rpm_youtube: '30',
+  // длинные серии (10–20 мин) монетизируются в 2–3 раза лучше шортсов:
+  // пре-ролл + мид-роллы + пост-ролл. Ставка — средняя по хоррору и мистике.
+  rpm_youtube_long: '190',
+  series_episode_sec: '900',      // целевая длина серии, секунд
+  series_episodes: '6',           // серий в сезоне
+  series_max_sec: '1200',         // потолок рендера одной серии
+  series_quality: 'high',         // качество рендера сериала (high|balanced|fast)
+  cost_tts_1000: '20',            // озвучка длинной серии, ₽ за 1000 знаков (ElevenLabs ~$0.22/1000)
+  cost_render_min: '6',           // рендер 16:9, ₽ за минуту готового видео
   conv_rate: '1.6',               // % кликов, которые становятся покупкой
   ctr_estimate: '1.2',            // % просмотров, которые переходят по ссылке
   postback_key: '',               // секрет для POST /api/postback (пусто = demo без проверки)

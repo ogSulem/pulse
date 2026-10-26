@@ -269,6 +269,37 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
     top: sorted.slice(0, 8),
     worst: sorted.slice(-5).reverse(),
     series,
+    // Сериалы живут отдельно от publications: у них своя ставка RPM и своя
+    // экономика. Показываем их рядом, чтобы «Деньги» были одной картиной.
+    longform: (() => {
+      const rows = db.prepare(`SELECT e.id, e.title, e.episode_no, e.views, e.rpm, e.revenue_cents, e.cost_cents,
+          e.duration_sec, e.published_at, s.title series_title, s.id series_id
+        FROM series_episodes e JOIN series s ON s.id = e.series_id
+        WHERE e.stage = 'published'`).all();
+      const revenue = rows.reduce((a, r) => a + (r.revenue_cents || 0), 0) / 100;
+      const cost = rows.reduce((a, r) => a + (r.cost_cents || 0), 0) / 100;
+      const viewsLong = rows.reduce((a, r) => a + (r.views || 0), 0);
+      const watchHours = rows.reduce((a, r) => a + ((r.views || 0) * ((r.duration_sec || 0) / 60) * 0.4) / 60, 0);
+      return {
+        episodes: rows.length,
+        views: viewsLong,
+        revenue: round2(revenue),
+        cost: round2(cost),
+        profit: round2(revenue - cost),
+        watchHours: Math.round(watchHours),
+        rpmAvg: viewsLong > 0 ? round2(revenue / (viewsLong / 1000)) : 0,
+        hoursToMonetization: Math.max(0, Math.round(4000 - watchHours)),
+        top: rows
+          .sort((a, b) => (b.revenue_cents || 0) - (a.revenue_cents || 0))
+          .slice(0, 5)
+          .map((r) => ({
+            id: r.id, seriesId: r.series_id, series: r.series_title, title: r.title,
+            episodeNo: r.episode_no, views: r.views || 0, minutes: Math.round((r.duration_sec || 0) / 60),
+            revenue: round2((r.revenue_cents || 0) / 100), rpm: round2(r.rpm || 0),
+          })),
+        note: 'Длинные серии: включают мид-роллы, поэтому RPM выше Shorts того же канала в 2–3 раза.',
+      };
+    })(),
     sponsor: (() => {
       const rows = db.prepare(`SELECT c.id, c.name, c.model, b.name brand, c.budget_cents, c.paid_cents,
           COALESCE(SUM(cp.revenue_cents),0) revenue, COUNT(cp.id) posts

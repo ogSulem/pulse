@@ -306,7 +306,7 @@ export const providers = {
       publish: [
         { id: 'meta', label: 'Meta Graph API (Reels)', live: Boolean(env.META_APP_ID), active: Boolean(env.META_APP_ID) },
         { id: 'tiktok', label: 'TikTok Content Posting API', live: Boolean(env.TIKTOK_CLIENT_KEY), active: Boolean(env.TIKTOK_CLIENT_KEY) },
-        { id: 'youtube', label: 'YouTube Data API v3 (Shorts)', live: Boolean(env.YOUTUBE_CLIENT_ID), active: Boolean(env.YOUTUBE_CLIENT_ID) },
+        { id: 'youtube', label: 'YouTube Data API v3 (видео и серии)', live: Boolean(env.YOUTUBE_CLIENT_ID), active: Boolean(env.YOUTUBE_CLIENT_ID) },
       ],
     };
   },

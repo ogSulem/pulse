@@ -609,6 +609,187 @@ try {
   ok('креатив доезжает до очереди', `хук «${pack.hook.slice(0, 40)}…», ${pack.scenes.length} сцен`);
 } catch (err) { fail('креатив доезжает до очереди', err); }
 
+// ── сериалы: библия → сезон → серия → аудит → рендер 16:9 ─────────────────
+try {
+  const serial = await import('../src/engine/serial.js');
+  const { planVoiceSections } = await import('../src/engine/serialrender.js');
+  const bible = serial.buildBible({ title: 'Смоук-сериал', genre: 'zombie' });
+  if (!bible.characters?.length || !bible.world?.rule || !bible.disclosure) throw new Error('библия неполная');
+  const series = { id: 'sr_smoke', title: 'Смоук-сериал', genre: 'zombie', episode_sec: 900, episodes_planned: 6, bible };
+  const plan = serial.planSeason({ series });
+  if (plan.episodes.length !== 6) throw new Error(`в плане ${plan.episodes.length} серий вместо 6`);
+
+  // длительность должна сходиться к цели, темп — в коридоре живой речи
+  for (const target of [600, 780, 900, 1200]) {
+    const ep = serial.buildEpisode({ series, episodeNo: 2, targetSec: target });
+    const drift = Math.abs(ep.durationSec - target) / target;
+    if (drift > 0.05) throw new Error(`${target} с → ${ep.durationSec} с (расхождение ${Math.round(drift * 100)}%)`);
+    if (ep.wpm < 120 || ep.wpm > 165) throw new Error(`темп ${ep.wpm} слов/мин вне 120–165`);
+    if (ep.midRolls < 1) throw new Error('нет мид-роллов: серия не заработает');
+    if (ep.authenticity.score < 85) throw new Error(`аудит оригинальности ${ep.authenticity.score}`);
+    if (ep.scenes.some((s) => !s.text || !s.frame?.prompt)) throw new Error('у сцены нет текста или брифа кадра');
+    if (new Set(ep.scenes.map((s) => s.text)).size !== ep.scenes.length) throw new Error('в серии есть дословные повторы');
+    if (ep.chapters.at(-1).at >= ep.durationSec) throw new Error('глава за пределами длительности');
+  }
+  ok('сериал: сценарий и хронометраж', '600/780/900/1200 с, темп 120–165, мид-роллы, аудит ≥85');
+
+  // аудит ловит шаблон: две серии с одинаковыми сценами — это масс-продакшн
+  const epA = serial.buildEpisode({ series, episodeNo: 1, targetSec: 600 });
+  const audit = serial.authenticityAudit({
+    series, bible, scenes: epA.scenes, episodeNo: 2, plan: plan.episodes[1],
+    wpm: epA.wpm, durationSec: epA.durationSec, midRolls: epA.midRolls,
+    siblingScenes: epA.scenes.map((s) => s.text),
+  });
+  if (audit.similarity < 50 || audit.verdict === 'безопасно') throw new Error(`аудит не заметил повтор: ${audit.similarity}%`);
+  ok('сериал: аудит ловит повторы', `похожесть ${audit.similarity}% → «${audit.verdict}»`);
+
+  const sections = planVoiceSections({ scenes: epA.scenes });
+  if (sections.length < 2) throw new Error('озвучка не разбита на секции');
+  if (sections.some((x) => x.chars > 3200)) throw new Error('секция озвучки длиннее лимита TTS');
+  ok('сериал: секции озвучки', `${sections.length} секций, максимум ${Math.max(...sections.map((x) => x.chars))} знаков`);
+
+  const econ = serial.seriesEconomics({ series, episodes: [{ id: 'x', episode_no: 1, views: 20000 }], targetRub: 50000 });
+  if (!econ.ypp.hoursLeft || !econ.target.viewsNeeded) throw new Error('экономика не считается');
+  ok('сериал: экономика', `RPM ${serial.revenueForecast({ genre: 'zombie', minutes: 15, midRolls: 2 }).rpmRub} ₽, цель ${econ.target.viewsNeeded} просмотров`);
+} catch (err) { fail('сериал: сценарий и хронометраж', err); }
+
+try {
+  const { planVoiceSections, buildTimeline, seriesRenderInfo } = await import('../src/engine/serialrender.js');
+  const serial = await import('../src/engine/serial.js');
+  const bible = serial.buildBible({ title: 'Смоук-кадр', genre: 'noir' });
+  const series = { id: 'sr_smoke2', title: 'Смоук-кадр', genre: 'noir', episode_sec: 120, episodes_planned: 4, bible };
+  const ep = serial.buildEpisode({ series, episodeNo: 1, targetSec: 120 });
+
+  // тайминг: реальные длительности секций переопределяют сценарные секунды
+  const sections = planVoiceSections({ scenes: ep.scenes.slice(0, 6) });
+  const audioDurations = sections.map((s) => s.chars / 13);
+  const timeline = buildTimeline({ scenes: ep.scenes.slice(0, 6), sections, audioDurations });
+  const audioSum = audioDurations.reduce((a, b) => a + b, 0);
+  if (Math.abs(timeline.durationSec - audioSum) > audioSum * 0.15) {
+    throw new Error(`тайминг ${timeline.durationSec} с не сходится со звуком ${Math.round(audioSum)} с`);
+  }
+  ok('сериал: тайминг по озвучке', `${timeline.durationSec} с против ${Math.round(audioSum)} с звука`);
+
+  const info = seriesRenderInfo();
+  if (!info.available) throw new Error('рендер сериала недоступен');
+  const { renderSeriesEpisode } = await import('../src/engine/serialrender.js');
+  const short = serial.buildEpisode({ series: { ...series, episode_sec: 40 }, episodeNo: 1, targetSec: 40 });
+  const scenes = short.scenes.slice(0, 3).map((s, i) => ({ ...s, seconds: 2 + i }));
+  const out = await renderSeriesEpisode({
+    series, episode: { id: 'se_smoke', episode_no: 1, title: 'Смоук' },
+    scenes, frames: scenes.map((s) => s.frame), handle: 'pulse.studio',
+    workId: 'smoke-series',
+  });
+  const size = fs.statSync(out.videoAbs).size;
+  if (!out.ok || size < 50_000) throw new Error(`файл слишком мал: ${size}`);
+  if (out.width !== 1920 || out.height !== 1080) throw new Error(`кадр не 16:9 1920×1080: ${out.width}×${out.height}`);
+  if (!out.coverPaths?.A) throw new Error('обложка не собрана');
+  const coverMeta = await (await import('node:module')).createRequire(import.meta.url)('sharp')(out.coverPaths.A.replace('/media', path.join(process.env.PULSE_MEDIA_DIR, ''))).metadata();
+  if (coverMeta.width !== 1280 || coverMeta.height !== 720) throw new Error(`обложка не 1280×720: ${coverMeta.width}×${coverMeta.height}`);
+  ok('сериал: рендер 16:9', `${out.width}×${out.height}, ${(size / 1048576).toFixed(1)} МБ, кадров ${out.scenes}, субтитров ${out.captions}`);
+
+  const { renderSeriesCut } = await import('../src/engine/serialrender.js');
+  const cut = await renderSeriesCut({ series, cut: { index: 1, seconds: 16, text: 'Крючок нарезки', title: 'Нарезка', scenery: 'city', episodeNo: 1 }, workId: 'smoke-series' });
+  if (!cut.ok || cut.width !== 1080 || cut.height !== 1920) throw new Error('нарезка не вертикальная 1080×1920');
+  ok('сериал: вертикальная нарезка', `${cut.seconds} с, ${(cut.bytes / 1024).toFixed(0)} КБ`);
+} catch (err) { fail('сериал: рендер 16:9', err); }
+
+// ── нарезки серии уходят в общий конвейер коротких роликов ─────────────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const ser = await import('../src/engine/series.js');
+  const project = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+  const bible = ser.genres().length ? (await import('../src/engine/serial.js')).buildBible({ title: 'Нарезки', genre: 'mystery' }) : null;
+  const series = ser.createSeries({ title: 'Нарезки', genre: 'mystery', projectId: project?.id, episodesPlanned: 4, episodeSec: 600 });
+  const ep = ser.composeEpisode({ seriesId: series.id, episodeNo: 1, targetSec: 600 });
+  const queued = ser.pushCutsToQueue(ep.id, { platform: 'reels', count: 2 });
+  if (queued.length !== 2) throw new Error(`в очередь ушло ${queued.length} нарезок вместо 2`);
+  const row = db.prepare('SELECT * FROM episodes WHERE id = ?').get(queued[0].episodeId);
+  const scenes = JSON.parse(row.scenes);
+  if (scenes.length < 2) throw new Error('у нарезки нет сцен');
+  if (!/в профиле/i.test(row.description)) throw new Error('в описании нет призыва к полной серии');
+  if (row.promo !== 'soft') throw new Error('нарезка не помечена как мягкая продажа');
+  if (!JSON.parse(row.creative || '{}').seriesId) throw new Error('нарезка не знает, из какого она сериала');
+  db.prepare('DELETE FROM episodes WHERE id IN (?, ?)').run(queued[0].episodeId, queued[1].episodeId);
+  db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
+  ok('сериал: нарезки в очереди', `${queued.length} ролика, ${scenes.length} сцены, CTA на серию`);
+
+} catch (err) { fail('сериал: нарезки в очереди', err); }
+
+// ── длинный формат в общих деньгах: часы, RPM, путь к 4000 часов ───────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const ser = await import('../src/engine/series.js');
+  const { moneySummary } = await import('../src/engine/money.js');
+  const project = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+  const series = ser.createSeries({ title: 'Деньги серии', genre: 'noir', projectId: project?.id, episodesPlanned: 4, episodeSec: 720 });
+  const ep = ser.composeEpisode({ seriesId: series.id, episodeNo: 1, targetSec: 720 });
+  db.prepare("UPDATE series_episodes SET stage='published', views=25000, revenue_cents=625000, cost_cents=24900, duration_sec=720, published_at=? WHERE id=?").run(new Date().toISOString(), ep.id);
+  const money = moneySummary({ days: 30 }).longform;
+  if (money.episodes !== 1) throw new Error(`в деньгах ${money.episodes} длинных серий вместо 1`);
+  if (money.views !== 25000 || Math.round(money.revenue) !== 6250) throw new Error(`просмотры/доход не сошлись: ${money.views}/${money.revenue}`);
+  if (money.watchHours !== 2000) throw new Error(`часы просмотра ${money.watchHours} вместо 2000 (25000 × 12 мин × 0.4 avg)`);
+  if (money.hoursToMonetization !== 2000) throw new Error(`до монетизации ${money.hoursToMonetization} ч вместо 2000`);
+  if (Math.round(money.rpmAvg) !== 250) throw new Error(`RPM ${money.rpmAvg} вместо 250 ₽`);
+  if (!money.top[0]?.seriesId) throw new Error('в топе серий нет ссылки на сериал');
+  db.prepare('DELETE FROM series_episodes WHERE id = ?').run(ep.id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
+  ok('сериал: деньги длинного формата', `${money.episodes} серия, ${money.views} просмотров, ${money.watchHours} ч, RPM ${money.rpmAvg} ₽, до 4000 ч — ${money.hoursToMonetization} ч`);
+} catch (err) { fail('сериал: деньги длинного формата', err); }
+
+
+
+// ── расписание серий: своя задача в очереди, без вечного цикла ──────────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const ser = await import('../src/engine/series.js');
+  const project = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+  const series = ser.createSeries({ title: 'Расписание', genre: 'zombie', projectId: project?.id, episodesPlanned: 3, episodeSec: 600 });
+  const ep = ser.composeEpisode({ seriesId: series.id, episodeNo: 1, targetSec: 600 });
+
+  let refused = false;
+  try { ser.scheduleEpisode(ep.id); } catch { refused = true; }
+  if (!refused) throw new Error('серия без файла попала в расписание');
+
+  db.prepare("UPDATE series_episodes SET video_path = 'smoke.mp4', publish_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 60000).toISOString(), ep.id);
+  const scheduled = ser.scheduleEpisode(ep.id);
+  if (scheduled.stage !== 'scheduled') throw new Error(`стадия «${scheduled.stage}» вместо scheduled`);
+
+  const first = ser.sweepDueSeriesEpisodes();
+  const second = ser.sweepDueSeriesEpisodes();
+  const jobs = db.prepare("SELECT COUNT(*) c FROM jobs WHERE type = 'series.publish' AND payload LIKE ?").get(`%${ep.id}%`).c;
+  if (first !== 1) throw new Error(`планировщик взял ${first} серий вместо 1`);
+  if (second !== 0 || jobs !== 1) throw new Error(`дубли задач: sweep=${second}, jobs=${jobs}`);
+
+  db.prepare("DELETE FROM jobs WHERE type = 'series.publish' AND payload LIKE ?").run(`%${ep.id}%`);
+  db.prepare('DELETE FROM series_episodes WHERE id = ?').run(ep.id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
+  ok('сериал: расписание серий', 'без файла отказ, с файлом — задача series.publish, дублей нет');
+} catch (err) { fail('сериал: расписание серий', err); }
+
+// ── публикация серии: demo-провайдер, плейлист и ссылка в описании ──────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const ser = await import('../src/engine/series.js');
+  const project = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+  const series = ser.createSeries({ title: 'Публикация', genre: 'mystery', projectId: project?.id, episodesPlanned: 3, episodeSec: 600 });
+  const ep = ser.composeEpisode({ seriesId: series.id, episodeNo: 1, targetSec: 600 });
+  fs.writeFileSync(path.join(process.env.PULSE_MEDIA_DIR || path.join(tmp, 'media'), 'smoke-series.mp4'), Buffer.alloc(64 * 1024, 7));
+  db.prepare('UPDATE series_episodes SET video_path = ?, duration_sec = 600 WHERE id = ?').run('smoke-series.mp4', ep.id);
+  const out = await ser.publishEpisodeToYoutube(ep.id);
+  if (!out.ok || !out.url) throw new Error('публикация не вернула ссылку');
+  if (!/youtube\.com\/watch/.test(out.url)) throw new Error(`серия ушла не как обычное видео: ${out.url}`);
+  if (!out.playlistId) throw new Error('плейлист не создан');
+  const row = db.prepare('SELECT * FROM series_episodes WHERE id = ?').get(ep.id);
+  if (row.stage !== 'published' || !row.external_id) throw new Error('серия не перешла в published');
+  if (!new RegExp(out.playlistId).test(row.description)) throw new Error('в описании нет ссылки на плейлист');
+  ok('сериал: публикация и плейлист', `${out.privacy}, плейлист ${out.playlistId.slice(0, 12)}…, ссылка в описании`);
+  db.prepare('DELETE FROM series_episodes WHERE id = ?').run(ep.id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
+  fs.rmSync(path.join(process.env.PULSE_MEDIA_DIR || path.join(tmp, 'media'), 'smoke-series.mp4'), { force: true });
+} catch (err) { fail('сериал: публикация и плейлист', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

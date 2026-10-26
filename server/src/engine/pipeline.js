@@ -455,6 +455,25 @@ export function consumeQuota(accountId) {
               ON CONFLICT(account_id, day) DO UPDATE SET used = used + 1`).run(accountId, day);
 }
 
+// ── Публикация серии сериала (16:9) ─────────────────────────────────────────
+// Длинную серию нельзя публиковать внутри тика: загрузка файла идёт минутами.
+// Поэтому планировщик сериалов ставит задачу в ту же очередь, что и короткие
+// ролики, и она переживает перезапуск процесса.
+registerHandler('series.publish', async ({ episodeId }) => {
+  const { publishEpisodeToYoutube } = await import('./series.js');
+  try {
+    const out = await publishEpisodeToYoutube(episodeId);
+    return out;
+  } catch (err) {
+    // Возвращаем серию на проверку: иначе планировщик будет ставить её в
+    // очередь каждые 20 секунд до бесконечности.
+    db.prepare("UPDATE series_episodes SET stage = 'review', error = ?, updated_at = ? WHERE id = ?")
+      .run(String(err?.message || err).slice(0, 500), nowIso(), episodeId);
+    log({ level: 'warn', actor: 'series', action: 'episode.publish.failed', entityType: 'series_episode', entityId: episodeId, message: `Публикация серии отложена: ${err?.message || err}` });
+    throw err;
+  }
+});
+
 // ── Публикация ──────────────────────────────────────────────────────────────
 registerHandler('episode.publish', async ({ episodeId }) => {
   let episode = getEpisode(episodeId);

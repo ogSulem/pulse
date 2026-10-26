@@ -377,6 +377,52 @@ export default function Money() {
         </div>
       )}
 
+      {/* ── Длинные серии: свой RPM, свои мид-роллы ───────────────────────── */}
+      {money_?.longform && (
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Длинные серии</div>
+              <div className="card-sub">{money_.longform.note}</div>
+            </div>
+            <a className="btn btn-ghost btn-sm" href="#/series"><Icon name="film" size={14} /> Сериалы</a>
+          </div>
+          <div className="col" style={{ gap: 10 }}>
+            <div className="grid-4">
+              <div><span className="mini-label">Серий вышло</span><div className="mini-value">{money_.longform.episodes}</div></div>
+              <div><span className="mini-label">Доход</span><div className="mini-value">{money(money_.longform.revenue, currency)}</div></div>
+              <div><span className="mini-label">RPM длинных</span><div className="mini-value">{money(money_.longform.rpmAvg, currency)}</div></div>
+              <div><span className="mini-label">До YPP</span><div className="mini-value">{fmt(money_.longform.hoursToMonetization)} ч</div></div>
+            </div>
+            {(money_.longform.top || []).length > 0 && (
+              <div className="table-wrap">
+                <table className="table">
+                  <thead><tr><th>Серия</th><th>Мин</th><th>Просмотры</th><th>Доход</th></tr></thead>
+                  <tbody>
+                    {money_.longform.top.map((r) => (
+                      <tr key={r.id}>
+                        <td>
+                          <div style={{ fontWeight: 600 }}>{r.series}</div>
+                          <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>Серия {r.episodeNo}</div>
+                        </td>
+                        <td>{r.minutes}</td>
+                        <td>{fmt(r.views)}</td>
+                        <td><b>{money(r.revenue, currency)}</b></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {!money_.longform.episodes && (
+              <div className="muted" style={{ fontSize: 12 }}>
+                Пока нет опубликованных серий. Первая серия 10–15 минут с двумя мид-роллами принесёт больше, чем десять Shorts.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Допущения ───────────────────────────────────────────────────── */}
       <div className="card assumptions">
         <div className="card-head">

@@ -564,3 +564,50 @@ JSON вида `{ "weights": { "hook": 0.31, … }, "lift": { "hook": 1.4, … },
 
 `youtube` в `CHECK (platform IN …)` и колонки `accounts.followers*` добавляет `migrate()` /
 `ensureColumns()` — существующая база обновляется без ручных шагов и без потери публикаций.
+
+## Сериалы (v8)
+
+Две таблицы. Сериал отделён от `episodes` намеренно: у короткого ролика нет ни библии,
+ни сезона, ни сквозных персонажей, а у серии нет формата 9:16 и лимита 42 секунды.
+
+### `series`
+
+| Поле | Тип | Смысл |
+|------|-----|-------|
+| `id` | TEXT PK | `sr_…` |
+| `title`, `genre`, `premise`, `tone` | TEXT | жанр — из `SERIES_GENRES` (zombie/mystery/noir/scifi/folk): задаёт лексику и RPM |
+| `bible` | TEXT (JSON) | мир (место, правило, цена, секрет сезона), три персонажа (роль, пол, профессия, желание, рана, тайна), визуальный стиль, дисклеймер ИИ, возрастное ограничение |
+| `season_plan` | TEXT (JSON) | арка сезона: 3–8 серий с `title`, `logline`, `cliffhanger`, `newElement`, `publishAt`, `arc` |
+| `episodes_planned`, `episode_sec` | INTEGER | 3–8 серий; 480–1800 секунд на серию |
+| `season`, `status` | INTEGER/TEXT | `draft` → `active` → `archived` |
+| `playlist_id`, `show_id` | TEXT | плейлист сезона на YouTube и (для YPP) Shows |
+| `cadence` | TEXT | ритм выпуска, подставляется из плана |
+| `project_id` | TEXT | бренд-привязка, необязательна |
+
+### `series_episodes`
+
+| Поле | Смысл |
+|------|-------|
+| `series_id`, `episode_no` | уникальная пара — серия не может дублироваться |
+| `stage` | `planned → script → voice → render → review → scheduled → published` (или `failed`) |
+| `script` | TEXT (JSON) — полный сценарий: сцены, главы, оценки, секции озвучки, вариант |
+| `scenes`, `chapters`, `frames` | сцены с таймингом и брифом кадра, главы с таймкодами, кадры фото-ряда |
+| `duration_sec`, `words`, `wpm`, `mid_rolls`, `rolls_at` | метрики хронометража и мид-роллов |
+| `description`, `tags`, `thumb_text`, `title_variants` | публикация: описание с главами, теги, текст обложки, варианты заголовка |
+| `scores`, `authenticity`, `forecast` | JSON: оценки, 7 проверок аудита с вердиктом, прогноз денег |
+| `video_path`, `video_bytes`, `render_ms`, `cover_paths`, `audio_path`, `audio_sec` | артефакты 16:9 |
+| `cuts` | TEXT (JSON) — вертикальные нарезки: план и собранные файлы |
+| `publish_at`, `published_at`, `external_id` | график и факт публикации |
+| `views`, `rpm`, `revenue_cents`, `cost_cents` | деньги: просмотры, ставка, доход, себестоимость (озвучка по знакам + рендер по минутам) |
+| `error` | причина падения сборки |
+
+Настройки сериала — в общем `settings`: `series_episode_sec` (900), `series_episodes` (6),
+`series_max_sec` (1200 — потолок рендера), `series_quality` (high/balanced/fast),
+`series_autopublish` (1 — серии из `scheduled` публикуются задачей `series.publish` сами;
+0 — каждый выпуск подтверждается вручную), `rpm_youtube_long` (190 ₽), `cost_tts_1000` (20 ₽),
+`cost_render_min` (6 ₽).
+
+Публикация по расписанию идёт через общую очередь (`jobs.type = 'series.publish'`), поэтому
+переживает перезапуск: `sweepDueSeriesEpisodes()` видит `stage = 'scheduled'`,
+`publish_at <= now`, непустой `video_path` и пустой `external_id`. Ошибка загрузки возвращает
+серию в `review` и пишет причину в `error` — планировщик не зацикливается.

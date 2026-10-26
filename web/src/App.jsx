@@ -15,6 +15,7 @@ import Accounts from './pages/Accounts.jsx';
 import Products from './pages/Products.jsx';
 import Ads from './pages/Ads.jsx';
 import Growth from './pages/Growth.jsx';
+import Series from './pages/Series.jsx';
 import Logs from './pages/Logs.jsx';
 import Settings from './pages/Settings.jsx';
 import LaunchModal from './components/LaunchModal.jsx';
@@ -23,6 +24,7 @@ const NAV = [
   { section: 'Производство' },
   { id: 'dashboard', label: 'Обзор', icon: 'grid', hash: '#/' },
   { id: 'queue', label: 'Очередь роликов', icon: 'film', hash: '#/queue', badge: 'active' },
+  { id: 'series', label: 'Сериалы', icon: 'sparkles', hash: '#/series' },
   { id: 'calendar', label: 'Расписание', icon: 'calendar', hash: '#/calendar' },
   { id: 'projects', label: 'Проекты и темы', icon: 'sparkles', hash: '#/projects' },
   { section: 'Рост' },
@@ -42,6 +44,7 @@ const NAV = [
 const TITLES = {
   dashboard: { title: 'Обзор', sub: 'Конвейер, публикации и результат в одном экране' },
   queue: { title: 'Очередь роликов', sub: 'Каждый этап, статус и ручные правки' },
+  series: { title: 'Сериалы', sub: 'Длинные истории: библия, сезон, фото-ряд, мид-роллы и плейлист' },
   calendar: { title: 'Расписание публикаций', sub: 'Слоты по аккаунтам и площадкам' },
   projects: { title: 'Проекты и темы', sub: 'Ниша, продукт и генерация идей' },
   analytics: { title: 'Аналитика', sub: 'Просмотры, CTR, подписчики и эффективность тем' },
@@ -93,6 +96,7 @@ function Shell({ data, refresh, refreshLight, loading }) {
   const pages = {
     dashboard: <Dashboard onLaunch={() => setLaunch(true)} />,
     queue: <Queue onLaunch={() => setLaunch(true)} />,
+    series: <Series />,
     calendar: <Calendar />,
     projects: <Projects />,
     analytics: <Analytics />,

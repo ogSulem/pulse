@@ -744,3 +744,131 @@ curl -s "http://localhost:8080/api/growth/hooks?topic=привычки&platform=
 
 Прогоняет очередь. По умолчанию отвечает сразу: `{ started: true, limit, queue }` — рендер
 продолжается в фоне. Для сценариев и CI: `{ "wait": true }` → `{ processed, queue, waited: true }`.
+
+## 15. Сериалы (v8): библия, сезон, серии, сборка и деньги
+
+Все маршруты требуют токен (`Authorization: Bearer …`). Сериал — отдельная сущность,
+не связанная с `episodes` короткого формата.
+
+### `GET /api/series`
+
+Сводка: `{ series[], genres[], render, totals, pipeline }`. `totals` содержит число серий,
+опубликованных, суммарные минуты, просмотры, доход, часы просмотра и остаток до 4000 часов YPP.
+`pipeline` — шесть шагов производства с пояснениями для интерфейса.
+
+### `GET /api/series/genres`
+
+Жанры с RPM-диапазонами (`₽/1000`): `zombie 120–260`, `mystery 140–300`, `noir 160–340`,
+`scifi 150–320`, `folk 110–240`.
+
+### `POST /api/series`
+
+Тело: `{ title, genre?, premise?, tone?, projectId?, episodes_planned?, episode_sec? }`.
+Создаёт сериал, сразу строит **библию** и **план сезона** (3–8 серий с аркой).
+Возвращает сериал с `bible`, `season_plan` и счётчиками.
+
+### `GET /api/series/{id}`
+
+Сериал целиком: библия, план сезона, `episode_list` и `economics` (доход, расход,
+окупаемость серии, часы до YPP, прогноз по охватам).
+
+### `PATCH /api/series/{id}`
+
+Правит `title, genre, premise, tone, status, playlist_id, show_id, project_id, notes,
+episodes_planned, episode_sec, bible`.
+
+### `POST /api/series/{id}/bible`
+
+Тело: `{ variant? }`. Пересобирает библию (другой мир и герои при том же названии).
+
+### `POST /api/series/{id}/plan`
+
+Тело: `{ startAt?, perWeek? }`. Пересобирает арку сезона: названия, логлайны, крючки,
+даты выхода. Возвращает `{ ok, plan, series }`.
+
+### `GET /api/series/{id}/episodes`
+
+Список серий: `scenes`, `chapters`, `scores`, `authenticity`, `forecast`, `frames`,
+`cover_paths`, `cuts`, `video_path`, `stage`.
+
+### `POST /api/series/{id}/episodes`
+
+Тело: `{ episodeNo?, targetSec?, variant? }`. Генерирует сценарий серии и сохраняет его.
+По умолчанию берёт следующий номер и длительность сериала.
+
+Ответ серии: `durationSec`, `minutes`, `words`, `wpm`, `midRolls`, `rollsAt`, `scenes[]`
+(`n, beat, beatLabel, at, text, seconds, visual, shot, frame{prompt}, sfx, roll`),
+`chapters[]`, `description` (с таймкодами глав), `tags`, `thumbText`, `titleVariants[]`,
+`scores{total,hook,retention,authenticity,monetization}`, `authenticity{score,checks,verdict,similarity}`,
+`forecast`, `disclosure`, `frames[]`.
+
+### `POST /api/series/{id}/preview`
+
+То же, что генерация серии, но **без сохранения** — для «покажи, что получится».
+
+### `GET /api/series/episodes/{id}` · `PATCH /api/series/episodes/{id}`
+
+Чтение и правка серии (`title, description, thumb_text, publish_at, stage, tags,
+title_variants, script, scenes`).
+
+### `POST /api/series/episodes/{id}/recompose`
+
+Тело: `{ variant? }`. Переписывает сценарий (по умолчанию следующая вариация) и заново
+прогоняет аудит оригинальности с учётом соседних серий.
+
+### `POST /api/series/episodes/{id}/voice`
+
+Тело: `{ voiceId? }`. Режет серию на секции ≤3200 знаков, синтезирует каждую, пишет mp3
+в `data/media`, считает себестоимость. В demo-режиме файлов нет, но тайминг и стоимость
+считаются: `{ ok, sections, chars, audioSec, costCents, files, demo }`.
+
+### `POST /api/series/episodes/{id}/render`
+
+Собирает видео 16:9: фото-ряд (свой кадр на сцену), субтитры, озвучка. По умолчанию
+запускает в фоне и отвечает `202 { accepted: true }`. С `?wait=1` ждёт результат:
+`{ ok, videoPath, posterPath, coverPaths{A,B,C}, bytes, durationSec, width:1920, height:1080,
+scenes, captions, audio, renderMs }`.
+
+### `POST /api/series/episodes/{id}/cuts`
+
+Тело: `{ count? }`. Планирует вертикальные нарезки 15–60 с из самых сильных сцен:
+`{ ok, cuts[{ index, startAt, seconds, title, scenery, episodeNo }] }`.
+
+### `POST /api/series/episodes/{id}/cuts/queue`
+
+Тело: `{ platform?, count? }`. Отправляет нарезки в **общий конвейер коротких роликов**:
+создаёт эпизоды в `episodes` со сценами (крючок → тело → «полная серия в профиле»),
+описанием с CTA на сериал, `promo: 'soft'` и меткой источника. Дальше их публикует обычная
+очередь: креатив, комплаенс и лимиты площадок берутся из существующего конвейера.
+Возвращает `{ ok, queued, episodes[{ episodeId, title, scenes }] }`.
+
+### `POST /api/series/episodes/{id}/cuts/render`
+
+Собирает нарезки 1080×1920 с текстом-крючком. Возвращает `cuts` с `videoPath`.
+
+### `POST /api/series/episodes/{id}/publish`
+
+Тело: `{ privacy? }`. Загружает серию как **обычное видео** (не Shorts), создаёт плейлист
+сезона при первой публикации, добавляет серию в него и подставляет ссылку на плейлист в
+описание — так сессия продолжается следующей серией, а не заканчивается на одной. Возвращает
+`{ ok, url, videoId, privacy, playlistId, inPlaylist, checklist[] }`.
+
+### `POST /api/series/episodes/{id}/schedule`
+
+Тело: `{ publishAt? }`. Переводит **собранную** серию в `stage = 'scheduled'` (без `video_path`
+возвращает `schedule_failed`). Дальше `sweepDueSeriesEpisodes()` ставит задачу `series.publish`
+в очередь, и серия выходит сама — если в настройках включено «Серии выходят по расписанию сами»
+(`series_autopublish = 1`, по умолчанию включено). Ошибка публикации возвращает серию в
+`review` с текстом причины, поэтому цикл не повторяется бесконечно.
+
+### `POST /api/series/metrics/refresh`
+
+Пересчитывает метрики опубликованных серий: в live — из YouTube Data API, в demo — по
+модели роста. Обновляет `views`, `rpm`, `revenue_cents`. Вызывается и планировщиком
+(раз в ~20 с вместе с остальной аналитикой).
+
+### `GET /api/series/{id}/economics?targetRub=50000`
+
+Экономика: `totalViews, totalRevenueRub, watchHours, ypp{hoursLeft}, target{viewsNeeded,
+episodesNeeded}, costRub, profitRub, margin, perEpisodeCost, breakevenViews, rpm, forecast,
+plan, advice[]`.
