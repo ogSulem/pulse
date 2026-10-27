@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: "Зависимости"
+        run: npm ci --no-audit --no-fund
+
+      - name: "Сборка панели"
+        run: npm run build
+
+      - name: "Smoke: 51 проверка (рендер, деньги, сериалы, деплой)"
+        run: npm run smoke
+        env:
+          PULSE_MODE: demo
+          PULSE_TZ: Europe/Moscow
+
+      - name: "Docker-образ собирается"
+        run: docker build -t pulse:ci .

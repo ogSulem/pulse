@@ -23,12 +23,13 @@ import { MEDIA_DIR } from './render.js';
 import { getSettings } from '../core/db.js';
 import { num } from '../core/utils.js';
 
+import { resolveFfmpeg, ffmpegSource } from '../core/ffmpeg.js';
 const require = createRequire(import.meta.url);
 
 let sharp = null;
 try { sharp = require('sharp'); } catch { sharp = null; }
-let ffmpegPath = null;
-try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; } catch { ffmpegPath = null; }
+// ffmpeg: env → @ffmpeg-installer → системный бинарь (см. core/ffmpeg.js).
+const ffmpegPath = resolveFfmpeg();
 
 const ASPECT = { '16:9': [1920, 1080], '9:16': [1080, 1920] };
 const SERIES_W = 1920;
@@ -54,6 +55,7 @@ export function seriesRenderInfo() {
   return {
     available: Boolean(sharp && ffmpegPath && fs.existsSync(ffmpegPath) && process.env.PULSE_RENDER !== 'off'),
     ffmpeg: Boolean(ffmpegPath && fs.existsSync(ffmpegPath)),
+    ffmpegSource: ffmpegSource(ffmpegPath),
     sharp: Boolean(sharp),
     width: SERIES_W,
     height: SERIES_H,

@@ -48,6 +48,19 @@ SVG-типографика → sharp → слойный монтаж в ffmpeg (
 |-----------|-------------|
 | ![](docs/media/scene-example.jpg) | ![](docs/media/cover-example.jpg) |
 
+## Что нового в v8.3: запуск на хостинге и защита публичной панели
+
+| Блок | Что сделано |
+|------|-------------|
+| **Деплой одной командой** | `deploy/install.sh` для Oracle Always Free и любого VPS: Docker, своп, `.env` со случайными паролем и секретом, сборка, запуск, проверка `/api/health` |
+| **Конфиги площадок** | `railway.json` (Dockerfile + healthcheck), `render.yaml` (blueprint), `fly.toml` (том + HTTP-сервис), обновлённый `docker-compose.yml` |
+| **Порт как у платформы** | приложение читает `PORT` (Railway/Render/Fly), затем `PULSE_PORT` — раньше слушало только свой |
+| **Секреты не из репозитория** | `PULSE_SECRET` генерируется и хранится в томе; на облаке пароль входа случайный, печатается в лог один раз и переживает рестарт |
+| **ffmpeg на любой архитектуре** | `PULSE_FFMPEG_PATH` → installer → системный бинарь; в образ ставится apt-ffmpeg, поэтому ARM (Oracle Ampere) тоже рендерит |
+| **Честная рамка demo** | в панели видна полоса «Демо-режим: реальных выплат нет»; в `live` она исчезает |
+| **Бэкапы** | `npm run backup` — консистентный дамп SQLite через `db.backup()`, хранит 14 копий, знает про медиа |
+| **CI** | GitHub Actions: сборка панели, 51 проверка smoke и сборка Docker-образа на каждый push |
+
 ## Что нового в v8: сериалы — длинные истории 8–20 минут
 
 | Блок | Что сделано |
@@ -116,9 +129,28 @@ SVG-типографика → sharp → слойный монтаж в ffmpeg (
 | **Трекинг** | короткая ссылка `/t/<token>`, postback `POST /api/postback` (идемпотентно по `external_id`), клики и конверсии в БД |
 | **Дизайн** | экран «Деньги» с воронкой и разрезами, экран «Прозрачность» с проверками и лимитами, медиа-превью и панель проверки в карточке ролика, быстрая правка описания |
 
-## Быстрый старт на VPS
+## Куда это поставить
 
-Нужен только Docker и Docker Compose (v2.24+).
+| Вариант | Цена | Диск | Когда выбирать |
+|---|---|---|---|
+| **Oracle Cloud Always Free** | 0 ₽ навсегда | 200 ГБ постоянный | основной вариант «бесплатно и надолго»: 4 ARM-ядра, 24 ГБ RAM |
+| Railway | $5 пробно, далее от $5/мес | том подключается | быстро проверить «как в бою» по этой кнопке |
+| Render / Koyeb free | 0 ₽ | **временный** | посмотреть интерфейс; данные исчезают после перезапуска |
+| Свой VPS | от ~$4–6/мес | есть | когда пошли первые деньги |
+
+Одна команда на чистом сервере (Ubuntu/Debian, Oracle, VPS):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ogSulem/pulse/main/deploy/install.sh | sudo bash
+```
+
+Скрипт поставит Docker, сгенерирует пароль и секрет, соберёт образ, поднимет контейнер и
+напечатает адрес и пароль. Домен и HTTPS: `sudo PULSE_DOMAIN=pulse.example.com bash deploy/install.sh`.
+
+**Полная инструкция:** [`docs/DEPLOY.md`](docs/DEPLOY.md) — Railway по шагам, бесплатный Oracle,
+переезд, бэкапы, переменные окружения и честный путь к первым деньгам.
+
+### Вручную через Docker Compose
 
 ```bash
 git clone <repo-url> pulse && cd pulse
@@ -138,9 +170,10 @@ sudo chown -R 1000:1000 data
 ```
 
 ```bash
-docker compose logs -f pulse     # логи
-docker compose restart pulse     # перезапуск
-docker compose down              # остановка (данные в ./data сохраняются)
+docker compose logs -f pulse            # логи
+docker compose restart pulse            # перезапуск
+docker compose down                     # остановка (данные в ./data сохраняются)
+docker compose exec pulse npm run backup  # консистентный бэкап базы в data/backups
 ```
 
 **HTTPS** (опционально, нужен домен):
@@ -261,9 +294,13 @@ pulse/
 │  ├─ DATABASE.md      # схема БД, DDL Postgres, EF Core
 │  ├─ API.md           # эндпоинты и примеры curl
 │  └─ PLAN.md          # MVP за 4–6 недель
-├─ deploy/Caddyfile    # HTTPS
+├─ deploy/
+│  ├─ Caddyfile        # HTTPS для docker compose --profile tls
+│  └─ install.sh       # установка на чистый сервер одной командой
 ├─ Dockerfile · docker-compose.yml · .env.example
-└─ data/               # SQLite (том контейнера, в git не попадает)
+├─ railway.json · render.yaml · fly.toml   # конфиги площадок
+├─ .github/workflows/ci.yml                # сборка + 51 проверка smoke на каждый push
+└─ data/               # SQLite, медиа, бэкапы (том контейнера, в git не попадает)
 ```
 
 ---
@@ -274,9 +311,10 @@ pulse/
 
 | Переменная | По умолчанию | Смысл |
 |------------|--------------|-------|
-| `PULSE_PASSWORD` | `pulse` | пароль входа в панель — **смените** |
+| `PULSE_PASSWORD` | `pulse` локально; на облаке генерируется | пароль входа в панель — **смените** |
 | `PULSE_SECRET` | — | ключ подписи сессий (`openssl rand -hex 32`) |
-| `PULSE_PORT` | `8080` | внешний порт |
+| `PORT` / `PULSE_PORT` | `8080` | порт: `PORT` приоритетнее (его передают Railway/Render/Fly) |
+| `PULSE_DATA_DIR` | `./data` | каталог данных: база, медиа, бэкапы, секрет |
 | `PULSE_MODE` | `demo` | `demo` (симуляция) или `live` (реальные API и публикация) |
 | `PULSE_SECRET` | — | ≥8 символов: подпись сессий **и** ключ AES-256-GCM для токенов площадок |
 | `PULSE_PUBLIC_URL` | — | публичный адрес, по нему Instagram забирает `video_url`/`cover_url` |

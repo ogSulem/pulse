@@ -212,6 +212,19 @@ function Shell({ data, refresh, refreshLight, loading }) {
           </div>
         </header>
 
+        {/* Честная рамка: в demo цифры и публикации симулированы. Без этой
+            строки легко решить, что панель уже зарабатывает. */}
+        {(data.settings?.mode || 'demo') !== 'live' && !loading && (
+          <div className="demo-strip">
+            <Icon name="info" size={14} />
+            <span>
+              <b>Демо-режим.</b> Ролики, просмотры и доход симулируются — реальных выплат здесь нет.
+              Для заработка переключите <code>PULSE_MODE=live</code>, подключите аккаунты и ключи провайдеров.
+            </span>
+            <a className="link-btn" href="#/settings">Настройки <Icon name="arrowUpRight" size={11} /></a>
+          </div>
+        )}
+
         {loading && !data.projects.length ? (
           <div className="page">
             <div className="page-grid grid-4">{[0, 1, 2, 3].map((i) => <div className="skeleton" key={i} style={{ height: 128 }} />)}</div>

@@ -1,3 +1,4 @@
+import { boot, bootBanner } from './core/boot.js';
 import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -16,7 +17,8 @@ import { MEDIA_DIR } from './engine/render.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = Number(process.env.PULSE_PORT || 8080);
+// Railway/Render/Fly передают PORT; PULSE_PORT — для docker compose.
+const PORT = boot.port;
 
 app.set('trust proxy', true);
 app.disable('x-powered-by');
@@ -87,7 +89,7 @@ if ((process.env.PULSE_MODE || 'demo') !== 'live') {
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  ▲ Pulse — панель управления контент-конвейером`);
-  console.log(`  → http://localhost:${PORT}  (режим: ${process.env.PULSE_MODE || 'demo'})`);
+  console.log(bootBanner());
   console.log(`  → API: http://localhost:${PORT}/api/health\n`);
 });
 

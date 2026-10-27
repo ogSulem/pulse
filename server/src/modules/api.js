@@ -150,7 +150,10 @@ api.get('/auth/me', (_req, res) => res.json({ user: { name: 'Owner', role: 'owne
 
 // ─── Bootstrap: один запрос для первого рендера SPA ─────────────────────────
 api.get('/bootstrap', (_req, res) => {
-  const settings = getSettings();
+  // Режим — это переменная окружения, а не запись в базе: после переезда на live
+  // панель должна сразу перестать показывать «демо», даже если база старая.
+  const envMode = String(process.env.PULSE_MODE || 'demo') === 'live' ? 'live' : 'demo';
+  const settings = { ...getSettings(), mode: envMode };
   const projects = db.prepare('SELECT * FROM projects WHERE archived = 0 ORDER BY created_at ASC').all().map(projectRow);
   const accounts = db.prepare('SELECT * FROM accounts ORDER BY platform, created_at').all().map(accountRow);
   const products = db.prepare('SELECT * FROM products ORDER BY created_at DESC').all();

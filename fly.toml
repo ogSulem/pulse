@@ -1,0 +1,28 @@
+# Fly.io. Перед деплоем: fly launch --no-deploy --copy-config, затем
+# fly volumes create pulse_data --size 3 --region fra
+app = "pulse"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PULSE_MODE = "demo"
+  PULSE_TZ = "Europe/Moscow"
+  PULSE_DATA_DIR = "/app/data"
+
+[mounts]
+  source = "pulse_data"
+  destination = "/app/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

@@ -23,18 +23,25 @@ RUN npm prune --omit=dev --no-audit --no-fund
 FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
+# PORT не задаём: Railway/Render/Fly передают свой, docker compose — PULSE_PORT.
 ENV NODE_ENV=production \
-    PULSE_PORT=8080 \
-    PULSE_DB_PATH=/app/data/pulse.db
+    PULSE_DATA_DIR=/app/data \
+    PULSE_DB_PATH=/app/data/pulse.db \
+    PULSE_MEDIA_DIR=/app/data/media
+
+# ffmpeg ставим системный: @ffmpeg-installer/ffmpeg есть не для всех платформ
+# (на arm64 в образе может не оказаться optional-пакета), а рендер нужен всегда.
+# tini — корректная остановка ffmpeg-детей по SIGTERM при перезапуске контейнера.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gosu ffmpeg tini ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/web/dist ./web/dist
 COPY package.json ./package.json
 COPY server ./server
 
-RUN apt-get update && apt-get install -y --no-install-recommends gosu \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /app/data && chown -R node:node /app
+RUN mkdir -p /app/data && chown -R node:node /app
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
@@ -42,7 +49,8 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 8080
 VOLUME ["/app/data"]
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PULSE_PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# Порт берём из окружения: в облаке это PORT, локально — 8080.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||process.env.PULSE_PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]

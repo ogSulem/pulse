@@ -11,6 +11,8 @@ import os from 'node:os';
 // изолируем артефакты теста, чтобы не засорять рабочий каталог data/
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-smoke-'));
 process.env.PULSE_MEDIA_DIR = path.join(tmp, 'media');
+// каталог данных тоже изолируем: boot.js пишет туда секрет и first-login.txt
+process.env.PULSE_DATA_DIR = tmp;
 process.env.PULSE_DB_PATH = path.join(tmp, 'smoke.db');
 process.env.PULSE_MODE = process.env.PULSE_MODE || 'demo';
 
@@ -789,6 +791,91 @@ try {
   db.prepare('DELETE FROM series WHERE id = ?').run(series.id);
   fs.rmSync(path.join(process.env.PULSE_MEDIA_DIR || path.join(tmp, 'media'), 'smoke-series.mp4'), { force: true });
 } catch (err) { fail('сериал: публикация и плейлист', err); }
+
+// ── деплой: настройки, которые решают, поднимется ли сервис в облаке ────────
+try {
+  // Секрет должен создаться один раз и лежать на диске: иначе рестарт контейнера
+  // разлогинивает всех и делает старые токены аккаунтов нечитаемыми.
+  // Проверяем в отдельном процессе: выше тесты шифрования выставляют PULSE_SECRET.
+  const { execFileSync } = await import('node:child_process');
+  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
+  const dir = path.join(tmp, 'boot-secret');
+  const env = { ...process.env, PULSE_DATA_DIR: dir };
+  delete env.PULSE_SECRET;
+  const script = "import('./server/src/core/boot.js').then(m=>console.log(JSON.stringify({secret:m.appSecret(),created:m.boot.secretCreated})))";
+  const first = JSON.parse(execFileSync(process.execPath, ['-e', script], { cwd: root, env }).toString());
+  const second = JSON.parse(execFileSync(process.execPath, ['-e', script], { cwd: root, env }).toString());
+  if (!first.created) throw new Error('секрет не создан при первом старте');
+  if (second.created) throw new Error('секрет пересоздался при втором старте');
+  if (first.secret !== second.secret) throw new Error('секрет изменился между запусками');
+  if (!fs.existsSync(path.join(dir, '.pulse-secret'))) throw new Error('файл секрета не найден');
+  const mode = fs.statSync(path.join(dir, '.pulse-secret')).mode & 0o777;
+  if (mode !== 0o600) throw new Error(`права на .pulse-secret ${mode.toString(8)} вместо 600`);
+  ok('деплой: секрет сессий переживает рестарт', `создан один раз, права 600, ${first.secret.length} символов`);
+} catch (err) { fail('деплой: секрет сессий переживает рестарт', err); }
+
+try {
+  // PORT приоритетнее PULSE_PORT: так работает Railway/Render/Fly
+  const { execFileSync } = await import('node:child_process');
+  const script = "import('./server/src/core/boot.js').then(m=>console.log(m.boot.port))";
+  const out = execFileSync(process.execPath, ['-e', script], {
+    cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..'),
+    env: { ...process.env, PORT: '3000', PULSE_PORT: '8080', PULSE_DATA_DIR: path.join(tmp, 'boot-port') },
+  }).toString().trim();
+  if (out !== '3000') throw new Error(`порт из PORT=${out}, ожидали 3000`);
+  ok('деплой: PORT от платформы', 'PORT=3000 перекрывает PULSE_PORT=8080');
+} catch (err) { fail('деплой: PORT от платформы', err); }
+
+try {
+  // На публичном адресе пароль по умолчанию недопустим: он должен генерироваться.
+  const { execFileSync } = await import('node:child_process');
+  const dir = path.join(tmp, 'boot-hosted');
+  const script = "import('./server/src/core/boot.js').then(m=>console.log(JSON.stringify({p:m.boot.passwordCreated,d:m.boot.passwordDefault,hosted:m.boot.hosted,pass:m.appPassword()})))";
+  const run = () => JSON.parse(execFileSync(process.execPath, ['-e', script], {
+    cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..'),
+    env: { ...process.env, RAILWAY_ENVIRONMENT: 'production', PULSE_DATA_DIR: dir, PULSE_PASSWORD: '' },
+  }).toString().trim());
+  const data = run();
+  if (!data.hosted || !data.p || data.d) throw new Error(`на облаке пароль не сгенерирован: ${JSON.stringify(data)}`);
+  const saved = fs.readFileSync(path.join(dir, 'first-login.txt'), 'utf8').trim();
+  const fileMode = fs.statSync(path.join(dir, 'first-login.txt')).mode & 0o777;
+  if (saved.length < 12) throw new Error('сгенерированный пароль короче 12 символов');
+  if (fileMode !== 0o600) throw new Error(`права на first-login.txt ${fileMode.toString(8)} вместо 600`);
+  // Рестарт контейнера не должен выдавать новый пароль — иначе владелец
+  // остаётся без входа после каждого перезапуска.
+  const again = run();
+  if (again.p || again.pass !== data.pass) throw new Error('пароль меняется при рестарте контейнера');
+  ok('деплой: пароль на публичном хостинге', 'сгенерирован один раз, права 600, рестарт его не меняет');
+} catch (err) { fail('деплой: пароль на публичном хостинге', err); }
+
+try {
+  // ffmpeg должен находиться и без @ffmpeg-installer (системный бинарь в образе).
+  const { resolveFfmpeg, ffmpegSource } = await import('../src/core/ffmpeg.js');
+  const binary = resolveFfmpeg();
+  if (!binary) throw new Error('ffmpeg не найден ни одним способом');
+  ok('деплой: поиск ffmpeg', `${ffmpegSource(binary)} → ${binary}`);
+} catch (err) { fail('деплой: поиск ffmpeg', err); }
+
+try {
+  const { db } = await import('../src/core/db.js');
+  const { moneySummary } = await import('../src/engine/money.js');
+  const before = moneySummary({ days: 7 });
+  const dir = path.join(tmp, 'backups');
+  process.env.PULSE_BACKUP_DIR = dir;
+  const { execFileSync } = await import('node:child_process');
+  execFileSync(process.execPath, ['server/scripts/backup.mjs'], {
+    cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..'),
+    env: { ...process.env, PULSE_BACKUP_DIR: dir },
+  });
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.db'));
+  if (!files.length) throw new Error('бэкап не создан');
+  const copy = new (await import('better-sqlite3')).default(path.join(dir, files[0]), { readonly: true });
+  const projects = copy.prepare('SELECT COUNT(*) c FROM projects').get().c;
+  copy.close();
+  if (!projects) throw new Error('в бэкапе нет данных');
+  if (!before) throw new Error('сводка денег не читается');
+  ok('деплой: бэкап базы', `${files.length} копия, ${projects} проектов внутри`);
+} catch (err) { fail('деплой: бэкап базы', err); }
 
 fs.rmSync(tmp, { recursive: true, force: true });
 
