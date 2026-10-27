@@ -14,7 +14,8 @@
     "dev:api": "node --watch server/src/index.js",
     "dev:web": "npm --workspace web run dev",
     "seed": "node server/src/seed/reset.js",
-    "smoke": "node server/scripts/smoke.mjs"
+    "smoke": "node server/scripts/smoke.mjs",
+    "backup": "node server/scripts/backup.mjs"
   },
   "engines": {
     "node": ">=20.11"

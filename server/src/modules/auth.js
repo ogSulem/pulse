@@ -1,7 +1,10 @@
 import crypto from 'node:crypto';
+import { appPassword, appSecret } from '../core/boot.js';
 
-const SECRET = process.env.PULSE_SECRET || 'pulse-dev-secret-change-me';
-const PASSWORD = process.env.PULSE_PASSWORD || 'pulse';
+// Секрет и пароль решает boot.js: на публичном хостинге это случайные значения,
+// а не известные всем дефолты из репозитория.
+const SECRET = appSecret();
+const PASSWORD = appPassword();
 const TTL_MS = 1000 * 60 * 60 * 24 * 14;
 
 const b64url = (buf) => Buffer.from(buf).toString('base64url');

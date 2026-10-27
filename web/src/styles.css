@@ -1005,3 +1005,25 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-grid .span-2 { grid-column: span 2; }
 .form-grid .input { width: 100%; }
+
+/* ── Честная рамка demo-режима ────────────────────────────────────────────── */
+.demo-strip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 12px;
+  padding: 9px 13px;
+  border-radius: 11px;
+  border: 1px solid rgba(167, 139, 250, .26);
+  background: linear-gradient(90deg, rgba(124, 58, 237, .12), rgba(124, 58, 237, .04));
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.demo-strip b { color: var(--text); }
+.demo-strip code { font-family: var(--mono, ui-monospace, monospace); font-size: 10.5px; color: var(--violet-2); }
+.demo-strip .link-btn { margin-left: auto; white-space: nowrap; }
+@media (max-width: 760px) {
+  .demo-strip { flex-wrap: wrap; }
+  .demo-strip .link-btn { margin-left: 0; }
+}

@@ -3,6 +3,8 @@ dist/
 data/*.db
 data/*.db-*
 data/backups/
+data/.pulse-secret
+data/first-login.txt
 .env
 .env.local
 *.log

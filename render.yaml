@@ -1,0 +1,23 @@
+# Render blueprint. ВАЖНО: на плане free диск не подключается, поэтому после
+# каждого деплоя база и медиа начинаются с нуля — это только для демонстрации.
+# Для постоянной работы нужен план starter + disk (см. docs/DEPLOY.md).
+services:
+  - type: web
+    name: pulse
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PULSE_MODE
+        value: demo
+      - key: PULSE_TZ
+        value: Europe/Moscow
+      - key: PULSE_SECRET
+        generateValue: true
+      - key: PULSE_PASSWORD
+        sync: false          # задайте свой пароль в дашборде
+      - key: PULSE_PUBLIC_URL
+        sync: false          # https://<ваш-домен>.onrender.com — нужен Instagram

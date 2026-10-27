@@ -16,15 +16,15 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { buildBackground, buildTextOverlay, buildCover, PALETTES, hash, fontsReady, sanitize } from './scene.js';
-
+import { resolveFfmpeg, ffmpegSource } from '../core/ffmpeg.js';
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let sharp = null;
 try { sharp = require('sharp'); } catch { sharp = null; }
 
-let ffmpegPath = null;
-try { ffmpegPath = require('@ffmpeg-installer/ffmpeg').path; } catch { ffmpegPath = null; }
+// ffmpeg: env → @ffmpeg-installer → системный бинарь (см. core/ffmpeg.js).
+const ffmpegPath = resolveFfmpeg();
 
 // Рилсы и TikTok — это вертикаль 1080×1920. Именно в этом разрешении площадки
 // принимают видео без апскейла, поэтому «по умолчанию» рендерим нативно.
@@ -57,6 +57,7 @@ export function renderInfo() {
   return {
     available: renderAvailable(),
     ffmpeg: Boolean(ffmpegPath && fs.existsSync(ffmpegPath)),
+    ffmpegSource: ffmpegSource(ffmpegPath),
     sharp: Boolean(sharp),
     fonts: fontsReady(),
     width: W,
