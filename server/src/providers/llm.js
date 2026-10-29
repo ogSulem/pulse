@@ -251,25 +251,29 @@ export function current() {
 }
 
 export function status() {
+  const providers = PROVIDERS.map((p) => ({
+    id: p.id,
+    label: p.label,
+    model: modelOf(p),
+    keyEnv: p.keyEnv,
+    configured: Boolean(keyOf(p)),
+    free: p.free,
+    rpm: p.rpm || null,
+    rpd: p.rpd || null,
+    callsToday: budget.get(p.id)?.day === new Date().toISOString().slice(0, 10) ? budget.get(p.id).dayCount : 0,
+    note: p.note,
+    docs: p.docs,
+    active: p.id === current(),
+  }));
   return {
     enabled: enabled(),
     mode: (process.env.PULSE_MODE || 'demo') === 'live' ? 'live' : 'demo',
     active: current(),
+    // порядок, в котором реально будут пробоваться модели: видно и в панели, и в healthcheck
+    chain: chain().map((p) => p.id),
+    callsToday: providers.reduce((a, p) => a + (p.callsToday || 0), 0),
     cached: cacheSize(),
-    providers: PROVIDERS.map((p) => ({
-      id: p.id,
-      label: p.label,
-      model: modelOf(p),
-      keyEnv: p.keyEnv,
-      configured: Boolean(keyOf(p)),
-      free: p.free,
-      rpm: p.rpm || null,
-      rpd: p.rpd || null,
-      callsToday: budget.get(p.id)?.day === new Date().toISOString().slice(0, 10) ? budget.get(p.id).dayCount : 0,
-      note: p.note,
-      docs: p.docs,
-      active: p.id === current(),
-    })),
+    providers,
   };
 }
 

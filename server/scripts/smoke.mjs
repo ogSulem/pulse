@@ -991,6 +991,8 @@ try {
 
   const status = llm.status();
   if (!Array.isArray(status.providers) || !status.providers.length) throw new Error('статус ИИ без провайдеров');
+  if (!Array.isArray(status.chain)) throw new Error('статус ИИ без явной цепочки провайдеров');
+  if (typeof status.callsToday !== 'number') throw new Error('статус ИИ без счётчика запросов за день');
   const nvidia = status.providers.find((p) => p.id === 'nvidia');
   if (!nvidia?.free) throw new Error('NVIDIA не помечен бесплатным');
 
