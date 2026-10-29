@@ -149,6 +149,17 @@ async function tick() {
 }
 setInterval(work, 2500);
 setInterval(tick, 3000);
+
+// Суточная сводка в Telegram: проверяем раз в 10 минут, но отправляем не чаще
+// раза в 20 часов — рестарты контейнера не должны спамить владельца.
+setInterval(() => {
+  import('./engine/notify.js')
+    .then((notify) => {
+      if (notify.digestDue()) return notify.sendDigest();
+      return null;
+    })
+    .catch((err) => log({ level: 'warn', actor: 'notify', action: 'digest.check_failed', message: String(err.message || err) }));
+}, 10 * 60 * 1000);
 setTimeout(work, 600);
 setTimeout(tick, 800);
 

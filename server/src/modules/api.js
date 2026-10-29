@@ -1386,6 +1386,39 @@ api.post('/launch/check-url', async (req, res) => {
   }
 });
 
+// ─── Уведомления: суточная сводка в Telegram (бесплатно) ────────────────────
+api.get('/notify/status', async (_req, res) => {
+  try {
+    const notify = await import('../engine/notify.js');
+    res.json({ ...notify.notifyConfig(), lastDigestAt: getSettings().last_digest_at || null });
+  } catch (err) {
+    res.status(400).json({ configured: false, error: String(err.message || err) });
+  }
+});
+
+api.post('/notify/test', async (_req, res) => {
+  try {
+    const notify = await import('../engine/notify.js');
+    if (!notify.notifyEnabled()) return res.status(400).json({ ok: false, ...notify.notifyConfig() });
+    const result = await notify.sendTelegram('Pulse: проверка связи. Сводка будет приходить сюда каждый день.');
+    res.status(result.ok ? 200 : 400).json(result);
+  } catch (err) {
+    res.status(400).json({ ok: false, reason: String(err.message || err) });
+  }
+});
+
+// force=1 — отправить сводку немедленно (кнопка «Отправить сейчас»)
+api.post('/notify/digest', async (req, res) => {
+  try {
+    const notify = await import('../engine/notify.js');
+    if (!notify.notifyEnabled()) return res.status(400).json({ ok: false, ...notify.notifyConfig() });
+    const result = await notify.sendDigest({ force: req.body?.force === true });
+    res.status(result.ok ? 200 : 409).json({ ...result, data: undefined });
+  } catch (err) {
+    res.status(400).json({ ok: false, reason: String(err.message || err) });
+  }
+});
+
 // ─── Студия: одно место, где видно «что настроено и что делать дальше» ─────
 // Это не дашборд ради дашборда: каждый пункт — действие, без которого контент
 // не выйдет или не заработает.

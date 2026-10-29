@@ -136,6 +136,59 @@ function AiBrain({ onToast }) {
   );
 }
 
+// Уведомления: автопилот работает сутками, и владелец должен узнавать о поломке
+// не из тишины. Telegram бесплатен, поэтому это единственный канал «по умолчанию».
+function NotifyCard({ onToast }) {
+  const [st, setSt] = useState(null);
+  const [busy, setBusy] = useState('');
+
+  const load = async () => {
+    try { setSt(await api.notifyStatus()); } catch { setSt({ configured: false }); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const run = async (kind) => {
+    setBusy(kind);
+    try {
+      if (kind === 'test') {
+        await api.notifyTest();
+        onToast({ tone: 'success', title: 'Сообщение ушло в Telegram', text: 'Проверьте чат с ботом.' });
+      } else {
+        const res = await api.notifyDigest(true);
+        onToast({ tone: 'success', title: 'Сводка отправлена', text: `${res.data?.published ?? ''}`.trim() || undefined });
+      }
+      load();
+    } catch (err) {
+      onToast({ tone: 'error', title: 'Telegram не ответил', text: err.message });
+    } finally { setBusy(''); }
+  };
+
+  return (
+    <div className="card">
+      <div className="card-title">
+        <h3>Уведомления</h3>
+        <Badge tone={st?.configured ? 'success' : 'muted'} dot>{st?.configured ? 'включены' : 'не настроены'}</Badge>
+      </div>
+      <p style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.6, marginTop: 0 }}>
+        {st?.note || 'Сводка приходит раз в сутки: что вышло, сколько просмотров и денег, что сломалось.'}
+      </p>
+      <div className="col" style={{ gap: 8 }}>
+        <button className="btn btn-soft btn-sm btn-block" disabled={!st?.configured || busy !== ''} onClick={() => run('test')}>
+          <Icon name="bell" size={13} />{busy === 'test' ? 'Отправляем…' : 'Проверить связь'}
+        </button>
+        <button className="btn btn-ghost btn-sm btn-block" disabled={!st?.configured || busy !== ''} onClick={() => run('digest')}>
+          <Icon name="chart" size={13} />{busy === 'digest' ? 'Собираем…' : 'Отправить сводку сейчас'}
+        </button>
+        {!st?.configured && (
+          <div className="mono" style={{ fontSize: 10, color: 'var(--muted)', lineHeight: 1.7 }}>
+            PULSE_TELEGRAM_BOT_TOKEN=…<br />PULSE_TELEGRAM_CHAT_ID=…
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Settings({ refresh }) {
   const { data } = useApp();
   const toast = useToast();
@@ -280,6 +333,8 @@ export default function Settings({ refresh }) {
       </div>
 
       {/* ── Площадки и маркировка ─────────────────────────────────────────── */}
+      <NotifyCard onToast={toast.push} />
+
       <div className="grid-2">
         <div className="card">
           <div className="card-head">

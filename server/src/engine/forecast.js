@@ -15,6 +15,7 @@ import { db, getSettings, nowIso } from '../core/db.js';
 import { log } from '../core/logger.js';
 import { num, clamp, addDays, parseJson } from '../core/utils.js';
 import { hourScores, platformForProject, localParts } from './schedule.js';
+import { effectiveCosts } from './costs.js';
 import { rpmFor } from './money.js';
 
 const DAY = 86400000;
@@ -79,7 +80,7 @@ export function forecastEpisode({ episode, project = null, account = null, platf
   const revenueAd = (expectedViews / 1000) * rpm;
   const revenueSales = expectedConversions * price * margin;
   const revenue = revenueAd + revenueSales;
-  const cost = num(episode?.cost_cents, 0) / 100 || (num(settings.cost_video, 45) + num(settings.cost_tts, 12) + num(settings.cost_llm, 8) + num(settings.cost_render, 1));
+  const cost = num(episode?.cost_cents, 0) / 100 || effectiveCosts().perVideo;
   const profit = revenue - cost;
   const roi = cost > 0 ? (profit / cost) * 100 : 0;
 

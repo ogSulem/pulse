@@ -1132,6 +1132,51 @@ try {
   ok('проверка публичного адреса', 'пусто / недоступно / доступно — три разных ответа');
 } catch (err) { fail('проверка публичного адреса', err); }
 
+try {
+  // Себестоимость по факту: бесплатные Edge/Flux/NVIDIA не должны давать «убыток»
+  const { effectiveCosts, freeStack } = await import('../src/engine/costs.js');
+  const { setSettings } = await import('../src/core/db.js');
+  const c = effectiveCosts();
+  const stack = freeStack();
+  if (stack.tts.provider === 'edge' && c.tts !== 0) throw new Error(`Edge TTS, а озвучка стоит ${c.tts} ₽`);
+  if (stack.video.free && c.video !== 0) throw new Error(`бесплатное видео, а цена ${c.video} ₽`);
+  if (c.perVideo > 5) throw new Error(`себестоимость ролика на бесплатном стеке ${c.perVideo} ₽ — слишком много`);
+  if (!c.note) throw new Error('нет пояснения, что бесплатно');
+  // владелец платит за сервер — расчёт обязан вернуться к прайсу настроек
+  setSettings({ powered_by_me: '1', cost_video: '45', cost_tts: '12', cost_llm: '8', cost_render: '1' });
+  const paid = effectiveCosts();
+  if (paid.perVideo < 60) throw new Error(`powered_by_me не вернул прайс: ${paid.perVideo}`);
+  setSettings({ powered_by_me: '0' });
+  ok('себестоимость по факту провайдеров', `бесплатный стек: ${c.perVideo} ₽ за ролик вместо ${paid.perVideo} ₽ по прайсу`);
+} catch (err) { fail('себестоимость по факту провайдеров', err); }
+
+try {
+  // Telegram-сводка: отправка не бросает, ошибка площадки не рушит конвейер
+  const notify = await import('../src/engine/notify.js');
+  const cfg = notify.notifyConfig();
+  if (cfg.configured) throw new Error('Telegram «настроен» без токена');
+  const skipped = await notify.sendTelegram('тест', { fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true }) }) });
+  if (!skipped.skipped) throw new Error('без токена сообщение не помечено пропущенным');
+
+  const data = notify.digestData();
+  if (typeof data.published !== 'number' || !Array.isArray(data.blockers)) throw new Error('сводка собрана неверно');
+  const text = notify.digestText(data);
+  if (!/сводка/.test(text) || text.length < 40) throw new Error('текст сводки пустой');
+
+  const sent = await notify.sendTelegram('<b>x</b>', {
+    token: '1:test', chat: '42',
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true }) }),
+  });
+  if (!sent.ok) throw new Error(`отправка не удалась: ${sent.reason}`);
+
+  const broken = await notify.sendTelegram('x', {
+    token: '1:test', chat: '42',
+    fetchImpl: async () => { throw new Error('ETIMEDOUT'); },
+  });
+  if (broken.ok || !/ETIMEDOUT/.test(broken.reason)) throw new Error('ошибка сети не отловлена');
+  ok('Telegram-сводка', `блокеров ${data.blockers.length}, отправка и ошибки обработаны`);
+} catch (err) { fail('Telegram-сводка', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

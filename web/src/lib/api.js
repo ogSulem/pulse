@@ -102,6 +102,11 @@ export const api = {
   studioQueue: (payload) => request('/studio/queue', { method: 'POST', body: payload }),
   regeneratePackage: (id, payload = {}) => request(`/episodes/${id}/package/regenerate`, { method: 'POST', body: payload }),
 
+  // Уведомления в Telegram: статус, проверка связи, суточная сводка
+  notifyStatus: () => request('/notify/status'),
+  notifyTest: () => request('/notify/test', { method: 'POST', body: {} }),
+  notifyDigest: (force = false) => request('/notify/digest', { method: 'POST', body: { force } }),
+
   // Запуск «на деньги»: полный автопилот одним вызовом и проверка публичного адреса
   launchStart: (payload = {}) => request('/launch/start', { method: 'POST', body: payload }),
   launchStop: () => request('/launch/stop', { method: 'POST', body: {} }),

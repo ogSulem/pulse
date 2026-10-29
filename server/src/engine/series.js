@@ -17,6 +17,7 @@ import path from 'node:path';
 import { db, getSettings, nowIso } from '../core/db.js';
 import { uid, num, clamp, parseJson, addDays } from '../core/utils.js';
 import { log } from '../core/logger.js';
+import { effectiveCosts } from './costs.js';
 import { enqueue } from '../core/queue.js';
 import { ensureFreshToken } from './oauth.js';
 import { providers } from '../providers/index.js';
@@ -454,10 +455,12 @@ export function updateEpisode(id, patch = {}) {
 function seriesBudget(settings) {
   // Себестоимость серии считаем по факту: длинная озвучка дороже короткой
   // пропорционально числу знаков, а рендер 15 минут CPU-тяжёлый.
+  const costs = effectiveCosts();
   return {
-    voiceRubPer1000: num(settings.cost_tts_1000, 180),
-    renderRubPerMin: num(settings.cost_render_min, 6),
-    llmRub: num(settings.cost_llm, 8),
+    // Edge TTS в текущей конфигурации бесплатен → озвучка серии не стоит ничего
+    voiceRubPer1000: costs.ttsPer1000,
+    renderRubPerMin: costs.renderPerMin,
+    llmRub: costs.llmPerEpisode,
   };
 }
 
