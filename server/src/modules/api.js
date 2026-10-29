@@ -38,6 +38,7 @@ import { oauthStatus, startFlow, finishFlow } from '../engine/oauth.js';
 import { boot } from '../core/boot.js';
 import { framesStatus } from '../engine/frames.js';
 import { status as aiStatus } from '../providers/llm.js';
+import { aiPassport, scriptAuthor, AI_STEPS } from '../engine/aimeta.js';
 import * as publicUrl from '../core/publicurl.js';
 import { checkLink, withUtm } from '../engine/linkcheck.js';
 
@@ -59,6 +60,9 @@ const has = (row) => row && Object.keys(row).length > 0;
 const projectRow = (p) => p && ({ ...p, autopilot: !!p.autopilot, ab_tests: !!p.ab_tests, archived: !!p.archived });
 const episodeRow = (e) => e && ({
   ...e,
+  // паспорт ролика: кто сделал каждый шаг (engine/aimeta.js)
+  ai: aiPassport(e.ai_meta),
+  author: scriptAuthor(e.ai_meta),
   scenes: parseJson(e.scenes, []),
   hashtags: parseJson(e.hashtags, []),
   autopilot: !!e.autopilot,
@@ -1384,6 +1388,85 @@ api.get('/deploy/ready', async (_req, res) => {
 api.get('/ai/status', async (_req, res) => {
   const llm = await import('../providers/llm.js');
   res.json(llm.status());
+});
+
+// ─── Как это работает: цепочка «идея → деньги» с живыми исполнителями ─────
+// Один запрос отвечает на вопрос «что здесь вообще происходит и кто это делает»:
+// на каждом шаге — кто исполнитель (ИИ, ffmpeg, API площадки или человек),
+// доступен ли он сейчас и что будет, если он недоступен.
+api.get('/ai/chain', async (_req, res) => {
+  const llm = await import('../providers/llm.js');
+  const st = llm.status();
+  const ttsList = providers.status().tts || [];
+  const ttsActive = ttsList.find((p) => p.active) || ttsList[0] || {};
+  const frames = framesStatus();
+  const render = renderInfo();
+  const publish = providers.status().publish || [];
+  const publishLive = publish.filter((p) => p.live);
+
+  res.json({
+    steps: [
+      {
+        id: 'idea', label: 'Идея', by: 'ИИ или библиотека тем',
+        tool: st.enabled ? `${st.active || 'модель'} · идеи под нишу и продукт` : 'библиотека тем (без ключа)',
+        live: st.enabled,
+        fallback: 'без ключа темы берутся из библиотеки проекта',
+        human: false,
+      },
+      {
+        id: 'script', label: 'Сценарий и описание', by: 'языковая модель',
+        tool: st.enabled ? `${st.active || 'модель'} · хук, сцены, теги, CTA` : 'Content Brain — детерминированные шаблоны',
+        live: st.enabled,
+        fallback: 'без ключа текст шаблонный — проще и суше',
+        human: false,
+      },
+      {
+        id: 'voice', label: 'Озвучка', by: 'синтез речи',
+        tool: `${ttsActive.label || 'Edge TTS'}${ttsActive.free ? ' · без ключа' : ''}`,
+        live: true,
+        fallback: 'если провайдер упал — ролик выйдет без звука, с записью в журнале',
+        human: false,
+      },
+      {
+        id: 'frames', label: 'Кадры', by: 'генерация изображений',
+        tool: frames.enabled ? `${frames.active} · ${frames.mode}` : 'процедурные плашки',
+        live: Boolean(frames.enabled),
+        fallback: 'без картинок кадры рисуются процедурно — быстрее, но проще',
+        human: false,
+      },
+      {
+        id: 'render', label: 'Монтаж', by: 'ffmpeg',
+        tool: render.available ? `${render.width}×${render.height} @ ${render.fps} fps` : 'недоступен',
+        live: render.available,
+        fallback: 'без ffmpeg файла не будет — ролик уйдёт в проверку с причиной',
+        human: false,
+      },
+      {
+        id: 'publish', label: 'Публикация', by: 'API площадок',
+        tool: publishLive.length ? publishLive.map((p) => p.label).join(', ') : 'не подключено',
+        live: publishLive.length > 0,
+        fallback: 'без подключённых каналов ролик ждёт в очереди и не тратит квоту',
+        human: false,
+      },
+      {
+        id: 'review', label: 'Проверка', by: 'человек — только если нужно',
+        tool: 'правила площадок, риск, вирусный скор, маркировка',
+        live: true,
+        fallback: 'автопилот пропускает проверку, когда все оценки выше порога',
+        human: true,
+      },
+      {
+        id: 'money', label: 'Деньги', by: 'клики, продажи, выплаты',
+        tool: 'UTM, постбеки, спонсорские кампании',
+        live: true,
+        fallback: 'без продукта и ссылки охваты не превращаются в доход',
+        human: false,
+      },
+    ],
+    // суммарно: сколько шагов делают машины, а сколько остаётся человеку
+    automated: 7,
+    human: 1,
+  });
 });
 
 api.post('/ai/test', async (_req, res) => {

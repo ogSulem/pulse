@@ -27,8 +27,10 @@ export default function Today({ onLaunch }) {
   const [audit, setAudit] = useState(null);
   const [ready, setReady] = useState(null);
   const [pipeline, setPipeline] = useState(null);
+  const [chain, setChain] = useState(null);
 
   useEffect(() => {
+    api.aiChain().then(setChain).catch(() => {});
     api.deployReady().then(setReady).catch(() => {});
     api.growthAudit().then(setAudit).catch(() => {});
     api.pipelineStatus().then(setPipeline).catch(() => {});
@@ -287,6 +289,35 @@ export default function Today({ onLaunch }) {
           </div>
         </div>
       </div>
+
+      {/* Как это работает — свёрнуто: нужно один раз, но важно, чтобы было под рукой */}
+      {chain && (
+        <details className="how-card">
+          <summary>
+            <Icon name="info" size={14} />
+            <span>Как это работает: {chain.automated} шагов делает машина, человек — по желанию</span>
+            <Icon name="chevronDown" size={14} style={{ marginLeft: 'auto' }} />
+          </summary>
+          <div className="how-grid">
+            {chain.steps.map((st) => (
+              <div className="how-step" key={st.id}>
+                <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <b style={{ fontSize: 12 }}>{st.label}</b>
+                  <span style={{ fontSize: 10.5, color: st.live ? 'var(--green)' : 'var(--muted)' }}>
+                    {st.human ? 'человек по желанию' : st.live ? 'готово' : 'не подключено'}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 3, lineHeight: 1.45 }}>{st.tool}</div>
+                {/* резервный вариант показываем только там, где он реально отличается:
+                    иначе это тот же текст дважды и лишний шум */}
+                {!st.live && !st.human && st.fallback && (
+                  <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 3, lineHeight: 1.45 }}>{st.fallback}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 }

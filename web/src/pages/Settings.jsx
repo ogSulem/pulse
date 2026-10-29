@@ -252,7 +252,7 @@ export default function Settings({ refresh }) {
               <h2>Правила конвейера</h2>
               <p>Глобальные настройки, которые действуют на все проекты</p>
             </div>
-            <Badge tone={isDemo ? 'warn' : 'success'} dot>{isDemo ? 'demo-режим' : 'live-режим'}</Badge>
+            <Badge tone={isDemo ? 'warn' : 'success'} dot>{isDemo ? 'демо' : 'боевой'}</Badge>
           </div>
 
           <div className="col" style={{ gap: 4 }}>
@@ -299,11 +299,11 @@ export default function Settings({ refresh }) {
 
         <div className="col" style={{ gap: 16 }}>
           <div className="card">
-            <div className="card-title"><h3>Режим работы</h3><Badge tone={isDemo ? 'muted' : 'success'}>{settings.mode || 'demo'}</Badge></div>
+            <div className="card-title"><h3>Режим работы</h3><Badge tone={isDemo ? 'muted' : 'success'}>{isDemo ? 'демо' : 'боевой'}</Badge></div>
             <p style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.6 }}>
               {isDemo
-                ? 'Demo: сценарии, видео, озвучка и публикация симулируются. Панель полностью рабочая, ключи API не нужны.'
-                : 'Live: используются реальные провайдеры из .env. Публикация идёт через официальные API площадок.'}
+                ? 'Демо: сценарии, видео и публикация симулируются. Всё остальное работает, ключи не нужны.'
+                : 'Боевой: реальные провайдеры из .env, публикация через официальные API площадок.'}
             </p>
             <div className="divider" style={{ margin: '12px -18px' }} />
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--violet-3)', lineHeight: 1.8 }}>
@@ -430,9 +430,9 @@ export default function Settings({ refresh }) {
             checked={String(settings.powered_by_me) === '1'}
             onChange={(v) => patch({ powered_by_me: v ? '1' : '0' })}
             label="Я плачу за инфраструктуру"
-            hint="Выключено: бесплатные провайдеры (Edge TTS, Flux через Pollinations, бесплатный ключ LLM) считаются как 0 ₽, и прибыль показывается по факту. Включите, если платите за GPU/озвучку и хотите видеть прайс из настроек."
+            hint="Выключено — бесплатные провайдеры стоят 0 ₽, прибыль считается по факту. Включайте, если платите за GPU и озвучку."
           />
-          <Field label="Ключ postback" hint="Необязательно. Если задан, POST /api/postback требует заголовок x-pulse-key или ?key=.">
+          <Field label="Ключ postback" hint="Необязательно. Если задан, POST /api/postback требует x-pulse-key или ?key=.">
             <input className="input" defaultValue={settings.postback_key || ''} placeholder="например, 32 случайных символа"
               onBlur={(e) => e.target.value !== (settings.postback_key || '') && patch({ postback_key: e.target.value })} />
           </Field>
@@ -440,9 +440,9 @@ export default function Settings({ refresh }) {
       </div>
 
       <div className="page-grid grid-4">
-        <ProviderList title="Видео-генерация" items={providers.video} hint="Движок меняется адаптером: NVIDIA NIM, Runway, Luma, Pika, Replicate — без переделки конвейера." />
-        <ProviderList title="Озвучка (TTS)" items={providers.tts} hint="Поддерживается мультиязычный синтез и клонирование голоса." />
-        <ProviderList title="LLM" items={providers.llm} hint="Идеи, сценарии, описания. Полный статус и тест — в блоке «ИИ-движок» ниже." />
+        <ProviderList title="Видео-генерация" items={providers.video} hint="NVIDIA NIM, Runway, Luma, Pika, Replicate — меняются без переделки конвейера." />
+        <ProviderList title="Озвучка (TTS)" items={providers.tts} hint="Мультиязычный синтез и клонирование голоса." />
+        <ProviderList title="LLM" items={providers.llm} hint="Идеи, сценарии, описания. Статус и тест — в блоке «ИИ-движок» ниже." />
         <ProviderList title="Публикация" items={providers.publish} hint="Meta Graph API для Reels и TikTok Content Posting API. Токены — только в секретах." />
       </div>
 

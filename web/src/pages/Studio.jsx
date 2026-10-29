@@ -208,7 +208,7 @@ export default function Studio() {
             <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
               Redirect URI: <code className="mono" style={{ wordBreak: 'break-all' }}>{oauth.platforms?.[0]?.redirectUri || '—'}</code>
             </div>
-            <a className="btn btn-soft btn-sm" href="#/accounts" style={{ marginTop: 4 }}><Icon name="link" size={12} />Открыть аккаунты</a>
+            <a className="btn btn-soft btn-sm" href="#/channels/accounts" style={{ marginTop: 4 }}><Icon name="link" size={12} />Открыть аккаунты</a>
           </div>
         </div>
 
@@ -312,7 +312,7 @@ export default function Studio() {
               <button className="btn btn-soft btn-sm" onClick={testAi} disabled={testing}>
                 <Icon name="sparkles" size={12} />{testing ? 'Проверяем…' : 'Проверить ИИ'}
               </button>
-              <a className="btn btn-ghost btn-sm" href="#/settings">Ключи и модели<Icon name="chevronRight" size={12} /></a>
+              <a className="btn btn-ghost btn-sm" href="#/settings/main">Ключи и модели<Icon name="chevronRight" size={12} /></a>
             </div>
             {!aiReady.length && (
               <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.55 }}>

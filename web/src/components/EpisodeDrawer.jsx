@@ -4,11 +4,101 @@ import { useApp } from '../App.jsx';
 import { Drawer, Badge, Progress, Field, Confirm, useToast } from './ui.jsx';
 import Icon, { PlatformIcon } from './Icons.jsx';
 import {
-  STATUS_META, fmt, dateTime, durationLabel, relative, fmtDateTimeLocal, bytes, money, pct, platformLabel,
+  STATUS_META, fmt, dateTime, durationLabel, relative, fmtDateTimeLocal, bytes, money, pct, platformLabel, plural,
 } from '../lib/format.js';
 
 const RISK = (risk) => (risk >= 70 ? 'danger' : risk >= 55 ? 'warn' : 'success');
 
+
+/* ── Паспорт ролика: кто именно его сделал ──────────────────────────────────
+   В платформе много ИИ, и раньше это было видно только в журнале. Здесь одним
+   взглядом: что придумала модель, чем озвучено, чем нарисованы кадры, чем
+   собран файл, через какой API ушло в канал. Ниже — та же цепочка, но с
+   текущими исполнителями: если модель не подключена, честно написано, кто
+   вместо неё. ----------------------------------------------------------------- */
+const STEP_ICON = { idea: 'sparkles', script: 'edit', voice: 'mic', footage: 'image', render: 'scissors', publish: 'upload' };
+
+function PassportPanel({ episode }) {
+  const [chain, setChain] = useState(null);
+  useEffect(() => { api.aiChain().then(setChain).catch(() => {}); }, []);
+
+  const steps = episode.ai?.steps || [];
+  const author = episode.author;
+
+  return (
+    <div className="col" style={{ gap: 14 }}>
+      <div className="card" style={{ padding: 16 }}>
+        <div className="row-between" style={{ gap: 10, marginBottom: 10 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Кто сделал этот ролик</div>
+            <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 2 }}>
+              {author
+                ? `Сценарий: ${author.model || author.label}${author.ai ? '' : ' — без модели, по шаблону'}`
+                : 'Конвейер ещё не запускался — исполнители появятся по шагам'}
+            </div>
+          </div>
+          {steps.length > 0 && <Badge tone={author?.ai ? 'accent' : 'muted'}>{steps.length} {plural(steps.length, 'шаг', 'шага', 'шагов')}</Badge>}
+        </div>
+
+        {steps.length === 0 ? (
+          <div style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.55 }}>
+            Пока пусто. Запустите конвейер — и здесь появится запись по каждому шагу:
+            модель, голос, кадры, монтаж, публикация.
+          </div>
+        ) : (
+          <div className="col" style={{ gap: 0 }}>
+            {steps.map((st, i) => (
+              <div key={st.id} className="passport-step">
+                <span className="passport-dot"><Icon name={STEP_ICON[st.id] || 'zap'} size={11} /></span>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    <b style={{ fontSize: 12 }}>{st.label}</b>
+                    <span style={{ fontSize: 11.5, color: 'var(--violet-3)' }}>{st.providerLabel || st.provider}</span>
+                    {st.model && <span style={{ fontSize: 11.5, color: 'var(--text-2)' }}>· {st.model}</span>}
+                    {st.demo && st.provider !== 'demo' && <Badge tone="warn">демо</Badge>}
+                    {st.provider === 'template' && <Badge tone="muted">без модели</Badge>}
+                  </div>
+                  {st.note && <div style={{ fontSize: 10.5, color: 'var(--muted)', lineHeight: 1.5, marginTop: 2 }}>{st.note}</div>}
+                </div>
+                <span style={{ fontSize: 10, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                  {st.ms ? `${(st.ms / 1000).toFixed(1)} с` : st.at ? relative(st.at) : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {chain && (
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Как работает конвейер</div>
+          <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 2, marginBottom: 10 }}>
+            {chain.automated} {plural(chain.automated, 'шаг', 'шага', 'шагов')} делает машина. Человек нужен только на проверке — и только если автопилот её не пропустил.
+          </div>
+          <div className="col" style={{ gap: 7 }}>
+            {chain.steps.map((st) => (
+              <div key={st.id} className="row" style={{ gap: 9, alignItems: 'flex-start' }}>
+                <span className={`passport-dot ${st.live ? 'on' : ''} ${st.human ? 'human' : ''}`}>
+                  <Icon name={st.human ? 'user' : (STEP_ICON[st.id] || 'zap')} size={11} />
+                </span>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    <b style={{ fontSize: 11.5 }}>{st.label}</b>
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>{st.by}</span>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--text-2)', marginTop: 1 }}>{st.tool}</div>
+                  {!st.live && !st.human && st.fallback && (
+                    <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 1, lineHeight: 1.45 }}>{st.fallback}</div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* ── Проверка: правила площадок, скор и быстрая правка описания ─────────── */
 function CheckPanel({ episode, onRefresh }) {
@@ -336,6 +426,11 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                   {data.viral ? <Badge tone={data.viral >= 65 ? 'success' : data.viral >= 45 ? 'warn' : 'danger'}>скор {data.viral}</Badge> : null}
                   {data.compliance ? <Badge tone={data.compliance.ok ? 'success' : 'danger'}>{data.compliance.ok ? 'правила ок' : 'нарушение'}</Badge> : null}
                   {data.ab_test ? <Badge tone="accent">A/B</Badge> : null}
+                  {data.author ? (
+                    <button className="badge muted" style={{ cursor: 'pointer' }} title="Кто сделал ролик" onClick={() => setTab('how')}>
+                      <Icon name="sparkles" size={10} />{data.author.model || data.author.label}
+                    </button>
+                  ) : null}
                 </div>
                 <Progress value={data.progress} striped={data.status === 'generating'} />
                 <div className="row" style={{ gap: 12, marginTop: 8, fontSize: 11, color: 'var(--muted)' }}>
@@ -397,6 +492,7 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
             <div className="row" style={{ gap: 4, marginBottom: 14, borderBottom: '1px solid var(--line)' }}>
               {[
                 { id: 'content', label: 'Контент' },
+                { id: 'how', label: 'Как сделано' },
                 { id: 'check', label: 'Проверка' },
                 { id: 'pubs', label: `Публикации${pubs.length ? ` · ${pubs.length}` : ''}` },
                 { id: 'events', label: 'События' },
@@ -557,6 +653,8 @@ export default function EpisodeDrawer({ episodeId, onClose, onChange }) {
                 </div>
               </div>
             )}
+
+            {tab === 'how' && <PassportPanel episode={data} />}
 
             {tab === 'check' && (
               <CheckPanel episode={data} onRefresh={load} />

@@ -1266,7 +1266,21 @@ try {
   delete process.env.NVIDIA_API_KEY;
   delete process.env.NVIDIA_BASE_URL;
   delete process.env.NVIDIA_MODEL;
-  if (llm.enabled()) throw new Error('без ключа ИИ остался включённым');
+
+  // «Без ключа ИИ выключен» проверяем в чистом окружении: у владельца в .env
+  // может лежать любой бесплатный ключ (например GITHUB_TOKEN), и тогда старая
+  // версия теста падала не по делу. Ключи возвращаем как было.
+  const keyEnvs = ['GEMINI_API_KEY', 'GROQ_API_KEY', 'CEREBRAS_API_KEY', 'OPENROUTER_API_KEY',
+    'MISTRAL_API_KEY', 'GITHUB_TOKEN', 'CLOUDFLARE_AI_TOKEN', 'OPENAI_API_KEY'];
+  const kept = Object.fromEntries(keyEnvs.map((k) => [k, process.env[k]]));
+  for (const k of keyEnvs) delete process.env[k];
+  try {
+    if (llm.enabled()) throw new Error('без ключа ИИ остался включённым');
+  } finally {
+    for (const k of keyEnvs) {
+      if (kept[k] === undefined) delete process.env[k]; else process.env[k] = kept[k];
+    }
+  }
   ok('ИИ-роутер', `${first.provider}/${first.model}, кэш и деградация работают`);
 } catch (err) { fail('ИИ-роутер', err); }
 
@@ -1295,6 +1309,72 @@ try {
   process.env.PULSE_DATA_DIR = saved.data; process.env.PULSE_DB_PATH = saved.db; process.env.PULSE_MEDIA_DIR = saved.media;
   ok('каталог данных', 'база и медиа внутри PULSE_DATA_DIR, явные пути главнее');
 } catch (err) { fail('каталог данных', err); }
+
+try {
+  // Паспорт ролика: в карточке должно быть видно, кто сделал каждый шаг —
+  // модель или шаблон. Проверяем сам механизм (без сети и без ключей), иначе
+  // тест зависел бы от того, подключён ли LLM.
+  const { createEpisode } = await import('../src/engine/pipeline.js');
+  const { aiPassport, scriptAuthor, markAi } = await import('../src/engine/aimeta.js');
+  const { db } = await import('../src/core/db.js');
+
+  const project = db.prepare('SELECT id FROM projects LIMIT 1').get();
+  const ep = createEpisode({ projectId: project.id, autopilot: 0 }).id;
+
+  // новый ролик: паспорта нет, но интерфейс не должен падать
+  const fresh = aiPassport(db.prepare('SELECT ai_meta FROM episodes WHERE id = ?').get(ep).ai_meta);
+  if (fresh.steps.length) throw new Error('у нового ролика уже есть шаги');
+  if (scriptAuthor(db.prepare('SELECT ai_meta FROM episodes WHERE id = ?').get(ep).ai_meta) !== null) {
+    throw new Error('автор сценария появился до сценария');
+  }
+
+  // шаги пишутся по мере конвейера; шаблон честно помечается, а не выдаётся за ИИ
+  markAi(ep, 'idea', { provider: 'studio', model: 'автопилот' });
+  markAi(ep, 'script', { provider: 'template', model: 'Content Brain', note: 'без языковой модели' });
+  markAi(ep, 'voice', { provider: 'edge', model: 'ru-RU-DmitryNeural', note: '31 с' });
+  markAi(ep, 'render', { provider: 'ffmpeg', model: '1080×1920 @ 30 fps', ms: 2400 });
+  markAi(ep, 'footage', { provider: 'nvidia', demo: true, note: 'демо-режим' });
+
+  const row = db.prepare('SELECT ai_meta FROM episodes WHERE id = ?').get(ep);
+  const passport = aiPassport(row.ai_meta);
+  const author = scriptAuthor(row.ai_meta);
+
+  if (passport.steps.length !== 5) throw new Error(`шагов ${passport.steps.length}, ожидалось 5`);
+  // порядок — как в конвейере, а не как записали
+  const order = passport.steps.map((x) => x.id).join(',');
+  if (order !== 'idea,script,voice,footage,render') throw new Error(`порядок шагов: ${order}`);
+  if (passport.steps.find((x) => x.id === 'render').ms !== 2400) throw new Error('время рендера потерялось');
+  if (passport.steps.find((x) => x.id === 'voice').providerLabel !== 'Edge TTS') throw new Error('нет человеческого имени провайдера');
+  if (passport.steps.find((x) => x.id === 'footage').demo !== true) throw new Error('демо-шаг не помечен');
+  if (!passport.models.includes('ru-RU-DmitryNeural')) throw new Error('модель озвучки не попала в сводку');
+  if (passport.aiSteps !== 4) throw new Error(`машинных шагов ${passport.aiSteps}, ожидалось 4 (без шаблона)`);
+
+  if (author.ai !== false) throw new Error('шаблон выдан за модель');
+  if (author.label !== 'шаблон Content Brain' || author.short !== 'шаблон') throw new Error(`автор: ${author.label}`);
+
+  // модель вместо шаблона — и подпись для строки очереди без префикса провайдера
+  markAi(ep, 'script', { provider: 'nvidia', model: 'meta/llama-3.3-70b-instruct' });
+  const real = scriptAuthor(db.prepare('SELECT ai_meta FROM episodes WHERE id = ?').get(ep).ai_meta);
+  if (real.ai !== true) throw new Error('модель не отличилась от шаблона');
+  if (real.short !== 'llama-3.3-70b-instruct') throw new Error(`короткая подпись: ${real.short}`);
+
+  // паспорт не должен ронять конвейер, если записи нет
+  if (markAi('нет-такого-ролика', 'voice', { provider: 'edge' }) !== null) throw new Error('markAi не проверил ролик');
+
+  db.prepare('DELETE FROM jobs WHERE payload LIKE ?').run(`%${ep}%`);
+  db.prepare('DELETE FROM episodes WHERE id = ?').run(ep);
+  ok('паспорт ролика', `5 шагов в порядке конвейера, шаблон ≠ модель, ${passport.aiSteps} машинных`);
+} catch (err) { fail('паспорт ролика', err); }
+
+try {
+  // Каждый шаг конвейера обязан оставлять запись в паспорте. Проверка по коду:
+  // если новый шаг забудут разметить, паспорт молча станет неполным.
+  const src = fs.readFileSync(path.join(process.cwd(), 'server/src/engine/pipeline.js'), 'utf8');
+  const missing = ['script', 'idea', 'voice', 'footage', 'render', 'publish']
+    .filter((step) => !src.includes(`markAi(episodeId, '${step}'`));
+  if (missing.length) throw new Error(`без паспорта остались шаги: ${missing.join(', ')}`);
+  ok('паспорт: разметка шагов', 'идея, сценарий, озвучка, кадры, монтаж, публикация');
+} catch (err) { fail('паспорт: разметка шагов', err); }
 
 try {
   // Навигация: пять разделов, у каждого — вкладки, и у каждой вкладки есть экран.
@@ -1457,4 +1537,13 @@ for (const r of results) {
 }
 const failed = results.filter((r) => !r.pass).length;
 console.log(`\n${failed ? `ПРОВАЛЕНО: ${failed} из ${results.length}` : `Всё в порядке: ${results.length}/${results.length}`}\n`);
+
+// В CI лог шага не всегда открывается, а annotations видно прямо в PR:
+// печатаем каждую упавшую проверку строкой GitHub-Actions. Локально они
+// выглядят как обычный текст и никому не мешают.
+if (process.env.CI) {
+  for (const r of results.filter((x) => !x.pass)) {
+    console.log(`::error title=Smoke: ${r.name}::${(r.extra || 'проверка не прошла').replace(/[\r\n]+/g, ' ')}`);
+  }
+}
 process.exit(failed ? 1 : 0);

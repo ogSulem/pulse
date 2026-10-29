@@ -105,11 +105,18 @@ episodes 1─* jobs (через payload)     logs — независимый а�
 | caption_platform | text | под какую площадку написан текст |
 | creative | jsonb | паспорт креатива: хук, оценки, предупреждения, альтернативы, описания по площадкам, обложка, закреплённый комментарий |
 | media_pruned_at | timestamptz | когда файл ролика удалён уборкой; запись и её статистика при этом остаются |
+| ai_meta | jsonb (TEXT) | паспорт ролика: кто сделал каждый шаг — провайдер, модель, заметка, время (см. ниже) |
 
 Индексы: `(status, scheduled_at)`, `(project_id, created_at desc)`.
 
-Колонки `promo`, `caption_platform`, `creative`, `media_pruned_at` добавлены миграцией
+Колонки `promo`, `caption_platform`, `creative`, `media_pruned_at`, `ai_meta` добавлены миграцией
 (`ensureColumns`) — существующие базы обновляются на старте без потери данных.
+
+> **Паспорт ролика (`ai_meta`).** `engine/aimeta.js` дописывает запись на каждом шаге:
+> `idea`, `script`, `voice`, `footage`, `render`, `publish`. Формат одной записи —
+> `{ provider, model, note, ms?, demo?, at }`. Наружу отдаётся как `ai` (шаги + `aiSteps` + `summary`)
+> и `author` (кто написал сценарий: модель или шаблон). Если ключа модели нет, честно пишется
+> `provider: "template"` — интерфейс не выдаёт шаблон за ИИ.
 
 > **Уборка медиа.** `engine/housekeeping.js` раз в 6 часов удаляет файлы старше
 > `PULSE_MEDIA_RETENTION_DAYS` (по умолчанию 14 дней) и ставит `media_pruned_at`. Удаляются только

@@ -22,6 +22,7 @@ import { checkCompliance, disclosureText, saveCompliance, PLATFORM_RULES } from 
 import { scoreViral, saveViral, recalibrate } from './viral.js';
 import { studio, promotionDecision, enrichPackage } from './creative.js';
 import { effectiveCosts } from './costs.js';
+import { markAi } from './aimeta.js';
 import * as aiContent from './ai.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -149,6 +150,11 @@ registerHandler('episode.prepare', async ({ episodeId }) => {
         });
         if (enriched?.ai) {
           creative = enriched;
+          markAi(episodeId, 'script', {
+            provider: enriched.ai.provider || 'ai',
+            model: enriched.ai.model || '',
+            note: enriched.ai.cached ? 'из кэша (тот же текст не оплачивается дважды)' : '',
+          });
           log({
             level: 'info', actor: 'ai', action: 'episode.ai_script', entityType: 'episode', entityId: episodeId,
             message: `Сценарий написан ИИ (${enriched.ai.provider}), скор ${enriched.scores.total}/100`,
@@ -159,6 +165,17 @@ registerHandler('episode.prepare', async ({ episodeId }) => {
     } catch (err) {
       log({ level: 'warn', actor: 'ai', action: 'episode.ai_failed', entityType: 'episode', entityId: episodeId, message: `ИИ недоступен, оставлен шаблон: ${String(err.message || err).slice(0, 160)}` });
     }
+    // Если модель не подключалась — в паспорте так и написано «шаблон»,
+    // иначе интерфейс врал бы про ИИ, которого не было.
+    if (!creative?.ai) {
+      markAi(episodeId, 'script', { provider: 'template', model: 'Content Brain', note: 'без языковой модели — детерминированные шаблоны' });
+    }
+    markAi(episodeId, 'idea', {
+      provider: episode.idea_id ? 'idea-library' : 'studio',
+      model: idea ? (idea.source || 'библиотека тем') : 'автопилот',
+      note: idea?.title ? String(idea.title).slice(0, 80) : '',
+    });
+
     scenes = creative.scenes;
     description = creative.caption;
     hashtags = creative.hashtags;
@@ -234,6 +251,12 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
         fs.writeFileSync(path.join(MEDIA_DIR, `${String(episodeId).replace(/[^a-z0-9_]/gi, '')}.${audio.audioFormat || 'mp3'}`), audio.audioBuffer);
       }
       touchEpisode(episodeId, { stage: 'voice', status: 'generating', progress: STAGE_PROGRESS.voice });
+      markAi(episodeId, 'voice', {
+        provider: audio.provider || 'tts',
+        model: audio.voice || process.env.TTS_VOICE_ID || 'голос по умолчанию',
+        note: `${audio.durationSec} с${audio.parts ? `, ${audio.parts} секций` : ''}`,
+        demo: audio.provider === 'demo',
+      });
       log({ level: 'info', actor: 'provider.tts', action: 'episode.voice', entityType: 'episode', entityId: episodeId, message: `Озвучка готова: ${audio.durationSec} с, провайдер ${audio.provider}`, meta: audio });
       enqueue('episode.render', { episodeId, step: 'footage' }, { delayMs: 1600, priority: 4, dedupeKey: `render:${episodeId}:footage` });
       return;
@@ -248,6 +271,12 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
         seed: episode.id,
       });
       touchEpisode(episodeId, { stage: 'footage', progress: STAGE_PROGRESS.footage });
+      markAi(episodeId, 'footage', {
+        provider: draft.provider || 'video',
+        model: draft.model || '',
+        note: draft.demo ? 'демо-режим: реальный провайдер не вызывался' : 'реальная генерация',
+        demo: Boolean(draft.demo),
+      });
       log({ level: 'info', actor: `provider.video.${draft.provider}`, action: 'episode.footage', entityType: 'episode', entityId: episodeId, message: `Видеоряд сгенерирован (${draft.provider}${draft.demo ? ', demo' : ''})`, meta: draft });
       // Имитация 429 — только для демонстрации ретраев. В live случайные падения
       // недопустимы: они съедают слот публикации и нервы владельца.
@@ -308,6 +337,12 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
           scenes,
           handle,
           audioPath,
+        });
+        markAi(episodeId, 'render', {
+          provider: 'ffmpeg',
+          model: `${video.width}×${video.height} @ ${video.fps || 30} fps`,
+          ms: video.renderMs || null,
+          note: audioPath ? 'со звуком' : 'без звука — файл озвучки не найден',
         });
         log({
           level: 'info', actor: 'render', action: 'episode.render', entityType: 'episode', entityId: episodeId,
@@ -683,6 +718,15 @@ registerHandler('episode.publish', async ({ episodeId }) => {
           Math.round(num(episode.cost_cents, 0) / Math.max(1, variants.length * targets.length)), ts);
       created.push(pid);
       consumeQuota(account.id);
+      // паспорт: какая площадка, через какой API и на какой аккаунт ушло
+      const fired = parseJson(db.prepare('SELECT ai_meta FROM episodes WHERE id = ?').get(episodeId)?.ai_meta, {});
+      markAi(episodeId, 'publish', {
+        provider: result.provider || `${platform}-api`,
+        model: `@${account.handle}`,
+        note: `${PLATFORM_LABELS[platform] || platform}${privacy !== 'public' ? ' · приватно' : ''}`,
+        demo: Boolean(result.demo),
+        platforms: [...new Set([...(fired.publish?.platforms || []), platform])],
+      });
       // TikTok: внешняя ссылка в описании не кликабельна — ведём через
       // закреплённый комментарий, это единственный рабочий путь к продукту.
       const pinned = parseJson(episode.creative, null)?.pinnedComment;
