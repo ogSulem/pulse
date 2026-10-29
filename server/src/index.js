@@ -74,6 +74,24 @@ recoverOrphans();
 await seedIfEmpty();
 log({ level: 'info', actor: 'system', action: 'server.start', message: `Pulse запущен в режиме ${process.env.PULSE_MODE || 'demo'}` });
 
+// Готовность хостинга считается один раз на старте и печатается в лог: на Railway
+// сразу видно, подключён ли том и задан ли пароль, а не через сутки по пустой базе.
+try {
+  const { deployReadiness, readinessLine } = await import('./engine/deploy.js');
+  const ready = deployReadiness();
+  log({
+    level: ready.ok ? 'info' : 'warn',
+    actor: 'system',
+    action: 'deploy.readiness',
+    message: readinessLine(ready),
+    meta: { platform: ready.platform, blockers: ready.blockers, counts: ready.counts, publicUrl: ready.publicUrl },
+  });
+  console.log(`  → ${readinessLine(ready)}`);
+  if (ready.blockers.length) console.log(`  ! ${ready.blockers.map((b) => b.title).join('; ')}`);
+} catch (err) {
+  log({ level: 'warn', actor: 'system', action: 'deploy.readiness_failed', message: String(err?.message || err) });
+}
+
 // Первичное наполнение трафика (только demo): клики и конверсии из счётчиков
 // площадок, чтобы экран «Деньги» с первой секунды показывал реальные записи.
 if ((process.env.PULSE_MODE || 'demo') !== 'live') {
@@ -98,6 +116,17 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 // ролика занимает минуту: пока он шёл, не обновлялась аналитика, не срабатывал
 // автопилот и не восстанавливались зависшие задачи — со стороны это выглядело
 // как «очередь стоит, обработано 0».
+// Уборка медиа: раз в 6 часов, только если есть что убирать. На Railway том
+// 5 ГБ — без этого рендеры падают на «нет места» через месяц работы.
+setInterval(() => {
+  import('./engine/housekeeping.js')
+    .then(({ autoPrune }) => {
+      const result = autoPrune();
+      if (result?.removed) console.log(`  ⌫ уборка медиа: ${result.removed} файлов, ${Math.round(result.freedBytes / 1024 ** 2)} МБ`);
+    })
+    .catch((err) => log({ level: 'warn', actor: 'system', action: 'storage.prune_failed', message: String(err?.message || err) }));
+}, 6 * 3600 * 1000).unref();
+
 let working = false;
 async function work() {
   if (working) return;

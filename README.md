@@ -52,6 +52,17 @@ SVG-типографика → sharp → слойный монтаж в ffmpeg (
 |-----------|-------------|
 | ![](docs/media/scene-example.jpg) | ![](docs/media/cover-example.jpg) |
 
+## Что нового в v14: хостинг без сюрпризов — Railway, самодиагностика, уборка диска
+
+| Блок | Что сделано |
+|------|-------------|
+| **Railway одной командой** | `deploy/railway.sh`: создаёт проект, генерирует пароль и секрет, переносит бесплатные ключи ИИ из `.env`, подключает том к `/app/data`, деплоит и ждёт `/api/health`. В конце — адрес и пароль. Разбор по шагам и разбор сбоев — `docs/RAILWAY.md` |
+| **Публичный адрес без настройки** | адрес берётся из `RAILWAY_PUBLIC_DOMAIN` / `RENDER_EXTERNAL_URL` / `FLY_APP_NAME` / `KOYEB_APP_NAME`, а `PULSE_PUBLIC_URL` остаётся ручным переопределением. Раньше на Railway Instagram получал «задайте PULSE_PUBLIC_URL» при доступной панели |
+| **Самодиагностика хостинга** | `engine/deploy.js` + `GET /api/deploy/ready` + карточка «Хостинг и диск» в студии: подключён ли том (без него на Railway данные исчезают после рестарта), не дефолтный ли пароль, откуда публичный адрес, жив ли ffmpeg, сколько места осталось, включён ли автопилот. Каждая проблема — с готовой командой-решением |
+| **Уборка медиа** | `engine/housekeeping.js`: старые файлы (по умолчанию старше 14 дней) удаляются раз в 6 часов, статистика и записи остаются. На Railway том Hobby — 5 ГБ, без уборки рендер падал на `ENOSPC` через месяц |
+| **Docker без неожиданностей** | `tzdata` (иначе `TZ=Europe/Moscow` не работает), `tini` для корректного SIGTERM от ffmpeg, `stop_grace_period`, healthcheck через `/api/health`, явные `LABEL` и `STOPSIGNAL`. Два режима compose: локальный и `--profile tls` (Caddy сам получает сертификат, а `PULSE_PUBLIC_URL` собирается из `PULSE_DOMAIN`) |
+| **Защита конфигов в CI** | smoke проверяет согласованность `railway.json`, `Dockerfile`, `docker-compose.yml` и `.dockerignore`: healthcheck существует в API, порт из окружения, том на месте, секреты не попадают в образ, оба профиля compose живы |
+
 ## Что нового в v13: ИИ-мозг на виду, проверка денежной ссылки, гайд «с нуля»
 
 | Блок | Что сделано |
@@ -85,7 +96,7 @@ SVG-типографика → sharp → слойный монтаж в ffmpeg (
 | **ffmpeg на любой архитектуре** | `PULSE_FFMPEG_PATH` → installer → системный бинарь; в образ ставится apt-ffmpeg, поэтому ARM (Oracle Ampere) тоже рендерит |
 | **Честная рамка demo** | в панели видна полоса «Демо-режим: реальных выплат нет»; в `live` она исчезает |
 | **Бэкапы** | `npm run backup` — консистентный дамп SQLite через `db.backup()`, хранит 14 копий, знает про медиа |
-| **CI** | GitHub Actions: сборка панели, 68 проверок smoke и сборка Docker-образа на каждый push |
+| **CI** | GitHub Actions: сборка панели, 73 проверки smoke и сборка Docker-образа на каждый push |
 
 ## Что нового в v8: сериалы — длинные истории 8–20 минут
 
@@ -159,10 +170,28 @@ SVG-типографика → sharp → слойный монтаж в ffmpeg (
 
 | Вариант | Цена | Диск | Когда выбирать |
 |---|---|---|---|
-| **Oracle Cloud Always Free** | 0 ₽ навсегда | 200 ГБ постоянный | основной вариант «бесплатно и надолго»: 4 ARM-ядра, 24 ГБ RAM |
-| Railway | $5 пробно, далее от $5/мес | том подключается | быстро проверить «как в бою» по этой кнопке |
+| **Railway** | $5/мес (входит $5 кредита), пробный $5 на 30 дней | том подключается отдельно | самый быстрый запуск: `bash deploy/railway.sh` → адрес и пароль в конце. Пошагово — [`docs/RAILWAY.md`](docs/RAILWAY.md) |
+| **Oracle Cloud Always Free** | 0 ₽ навсегда | 200 ГБ постоянный | «бесплатно и надолго»: 4 ARM-ядра, 24 ГБ RAM |
+| Свой VPS + `--profile tls` | от ~$4–6/мес | есть | свой домен, HTTPS через Caddy, полный контроль |
 | Render / Koyeb free | 0 ₽ | **временный** | посмотреть интерфейс; данные исчезают после перезапуска |
-| Свой VPS | от ~$4–6/мес | есть | когда пошли первые деньги |
+
+**Railway одной командой** (CLI сам создаст проект, том и переменные):
+
+```bash
+bash deploy/railway.sh
+```
+
+**Два режима Docker Compose** — ровно два, без «зависит от настроения»:
+
+```bash
+docker compose up -d --build                     # локально/на VPS: http://localhost:8080
+docker compose --profile tls up -d --build       # + Caddy и HTTPS: https://PULSE_DOMAIN
+```
+
+Публичный адрес на Railway/Render/Fly подставляется сам (`RAILWAY_PUBLIC_DOMAIN` и аналоги):
+Instagram и TikTok скачивают видео по ссылке, и дублировать домен в `PULSE_PUBLIC_URL` не нужно.
+Проверить готовность хостинга можно в **Студии → «Хостинг и диск»** или через `GET /api/deploy/ready`:
+том, пароль, публичный адрес, ffmpeg, место на диске и автопилот — с подсказкой «что сделать».
 
 Одна команда на чистом сервере (Ubuntu/Debian, Oracle, VPS):
 
@@ -202,12 +231,16 @@ docker compose down                     # остановка (данные в ./
 docker compose exec pulse npm run backup  # консистентный бэкап базы в data/backups
 ```
 
-**HTTPS** (опционально, нужен домен):
+**HTTPS** (профиль `tls`, нужен домен с A-записью на сервер):
 
 ```bash
 echo "PULSE_DOMAIN=pulse.example.com" >> .env
-docker compose --profile tls up -d
+docker compose --profile tls up -d --build
 ```
+
+`PULSE_PUBLIC_URL` при этом можно не задавать: entrypoint соберёт его из `PULSE_DOMAIN`.
+Caddy сам получит сертификат, а Pulse отдаст медиа по `https://<домен>/media/...` — именно
+этот адрес забирает Instagram.
 
 ### Локально без Docker
 
@@ -320,6 +353,7 @@ pulse/
 │  └─ styles.css       # токены, тёмная/светлая тема, компоненты
 ├─ docs/
 │  ├─ START.md         # гайд: от пустого сервера до первых денег без вложений
+│  ├─ RAILWAY.md       # Railway: скрипт/дашборд, том, домен, откаты, сбои
 │  ├─ DEPLOY.md        # хостинг: Oracle Always Free, Railway, VPS, домен
 │  ├─ ARCHITECTURE.md  # архитектура, стек, безопасность, риски
 │  ├─ DATABASE.md      # схема БД, DDL Postgres, EF Core
@@ -328,10 +362,11 @@ pulse/
 ├─ deploy/
 │  ├─ Caddyfile        # HTTPS для docker compose --profile tls
 │  ├─ tunnel.sh        # бесплатный публичный https-адрес (Cloudflare Quick Tunnel)
+│  ├─ railway.sh       # Railway: проект, том, переменные, деплой одной командой
 │  └─ install.sh       # установка на чистый сервер одной командой
 ├─ Dockerfile · docker-compose.yml · .env.example
 ├─ railway.json · render.yaml · fly.toml   # конфиги площадок
-├─ .github/workflows/ci.yml                # сборка + 68 проверок smoke на каждый push
+├─ .github/workflows/ci.yml                # сборка + 73 проверки smoke на каждый push
 └─ data/               # SQLite, медиа, бэкапы (том контейнера, в git не попадает)
 ```
 
@@ -491,7 +526,7 @@ npm run smoke
 # ✓ деньги длинного формата (часы, RPM, путь к 4000 ч) · ✓ расписание серий без дублей
 ```
 
-Сейчас это **68 проверок**; падение любой — ненулевой код выхода, поэтому smoke можно ставить в CI.
+Сейчас это **73 проверки**; падение любой — ненулевой код выхода, поэтому smoke можно ставить в CI.
 
 **Отдельная проверка ИИ-контура** (локальный мок-провайдер, наружу ничего не уходит, ~1 секунда):
 
@@ -525,6 +560,7 @@ npm run test:ai
 | Документ | О чём |
 |----------|-------|
 | [`docs/START.md`](docs/START.md) | пошаговый старт без вложений: ключи, публичный адрес, площадки, автопилот, Telegram |
+| [`docs/RAILWAY.md`](docs/RAILWAY.md) | Railway по шагам: скрипт и дашборд, том, домен, переменные, откаты, разбор сбоев, цифры |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | где хостить (Oracle Always Free, Railway, VPS), домен, бэкапы, обновление |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | компоненты, поток данных, стек .NET, безопасность, антиблок, риски, интеллект (§12), рекламный контур (§13) |
 | [`docs/DATABASE.md`](docs/DATABASE.md) | схема, DDL Postgres, EF Core, партиционирование, миграция |

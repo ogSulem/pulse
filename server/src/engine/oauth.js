@@ -21,6 +21,7 @@ import { db, nowIso } from '../core/db.js';
 import { uid } from '../core/utils.js';
 import { encryptSecret, decryptSecret } from '../core/secrets.js';
 import { log } from '../core/logger.js';
+import { publicBase as publicBaseOf } from '../core/publicurl.js';
 
 const env = process.env;
 
@@ -77,7 +78,8 @@ const pkcePair = () => {
 };
 
 export function publicBase() {
-  return String(env.PULSE_PUBLIC_URL || '').replace(/\/+$/, '');
+  // адрес берётся из core/publicurl.js: явная переменная или домен платформы
+  return publicBaseOf(env);
 }
 
 export function redirectUri(platform, origin = null) {

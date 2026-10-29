@@ -4,6 +4,7 @@
 // demo-адаптеры работают без ключей, live-адаптеры вызывают реальные API.
 // ─────────────────────────────────────────────────────────────────────────────
 import { log } from '../core/logger.js';
+import { publicBase as publicBaseOf } from '../core/publicurl.js';
 import fs from 'node:fs';
 import { decryptSecret } from '../core/secrets.js';
 import tiktok from './social/tiktok.js';
@@ -230,7 +231,7 @@ const tts = {
 // поэтому здесь достаточно расшифровать то, что пришло.
 const tokenOf = (account) => (account?.access_token ? decryptSecret(account.access_token) : null);
 
-const publicUrl = () => String(env.PULSE_PUBLIC_URL || '').replace(/\/$/, '');
+const publicUrl = () => publicBaseOf(env);
 
 /**
  * Реальная публикация через официальные API площадок.
@@ -306,7 +307,7 @@ const publish = {
     const igUserId = account?.external_id;
     if (!igUserId) throw new Error('Instagram: у аккаунта не указан IG user id');
     const base = publicUrl();
-    if (!base) throw new Error('Instagram: задайте PULSE_PUBLIC_URL — площадка забирает видео по публичной ссылке');
+    if (!base) throw new Error('Instagram: нужен публичный адрес — площадка забирает видео по ссылке. На Railway он подставляется сам, локально запустите deploy/tunnel.sh');
     const fileName = String(videoPath).split('/').pop();
     const coverName = coverPath ? String(coverPath).split('/').pop() : null;
 

@@ -1,3 +1,19 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pulse — два режима запуска, один файл.
+#
+#   1) Локально / на VPS без домена:
+#        cp .env.example .env      # PULSE_PASSWORD, PULSE_SECRET, ключ ИИ
+#        docker compose up -d --build
+#      Панель: http://localhost:8080  (или http://IP:8080)
+#
+#   2) Свой сервер + HTTPS на домене (Caddy сам получает сертификат):
+#        PULSE_DOMAIN=pulse.example.com в .env
+#        docker compose --profile tls up -d --build
+#      Панель: https://pulse.example.com
+#
+# Всё состояние — в ./data (база, медиа, бэкапы, кэш ИИ). Перенос сервера —
+# это `cp -r data` на новую машину, больше ничего.
+# ─────────────────────────────────────────────────────────────────────────────
 services:
   pulse:
     build:
@@ -6,17 +22,23 @@ services:
     image: pulse:latest
     container_name: pulse
     restart: unless-stopped
+    # ffmpeg и рендер не любят SIGKILL: даём 30 секунд на корректное завершение
+    stop_grace_period: 30s
     env_file:
       - path: .env
         required: false
     environment:
+      # снаружи платформы порт задаётся здесь; в облаке используется PORT
       PULSE_PORT: 8080
       PULSE_DB_PATH: /app/data/pulse.db
+      PULSE_MODE: ${PULSE_MODE:-demo}
       PULSE_TZ: ${PULSE_TZ:-Europe/Moscow}
       TZ: ${PULSE_TZ:-Europe/Moscow}
       PULSE_RENDER_QUALITY: ${PULSE_RENDER_QUALITY:-high}
       PULSE_RENDER: ${PULSE_RENDER:-on}
+      # если задан PULSE_DOMAIN, entrypoint сам подставит https://<домен>
       PULSE_PUBLIC_URL: ${PULSE_PUBLIC_URL:-}
+      PULSE_DOMAIN: ${PULSE_DOMAIN:-}
     ports:
       - "${PULSE_PORT:-8080}:8080"
     volumes:
@@ -33,27 +55,34 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 25s
 
-  # ── HTTPS (опционально) ────────────────────────────────────────────────────
-  # Запуск: docker compose --profile tls up -d
-  # Требует домен, указывающий на сервер, и PULSE_DOMAIN в .env
+  # ── HTTPS (профиль tls) ────────────────────────────────────────────────────
+  # Запуск: PULSE_DOMAIN=pulse.example.com docker compose --profile tls up -d --build
+  # Требует: домен, A-запись на сервер, открытые 80 и 443.
   caddy:
     image: caddy:2-alpine
     container_name: pulse-caddy
     restart: unless-stopped
     profiles: ["tls"]
     depends_on:
-      - pulse
+      pulse:
+        condition: service_healthy
     environment:
       PULSE_DOMAIN: ${PULSE_DOMAIN:-localhost}
     ports:
       - "80:80"
       - "443:443"
+      - "443:443/udp"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   caddy_data:

@@ -1,8 +1,10 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DB_PATH, ensureDirs } from './paths.js';
 
-const DB_PATH = process.env.PULSE_DB_PATH || path.resolve(process.cwd(), 'data/pulse.db');
+// база, медиа и секрет живут в одном каталоге данных (см. core/paths.js)
+ensureDirs();
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 export const db = new Database(DB_PATH);
@@ -371,6 +373,8 @@ function ensureColumns() {
       promo: "TEXT DEFAULT 'none'",
       // паспорт креатива: хук, оценки, варианты — чтобы в карточке было видно, почему так
       creative: "TEXT DEFAULT '{}'",
+      // файл убран плановой уборкой диска: статистика осталась, mp4 можно пересобрать
+      media_pruned_at: 'TEXT',
     },
     accounts: {
       access_token: 'TEXT',

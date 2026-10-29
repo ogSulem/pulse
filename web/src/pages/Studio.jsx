@@ -14,6 +14,14 @@ const PROVIDER_KINDS = [
 
 const STEP_ICON = { account: 'at', topic: 'sparkles', product: 'package', content: 'film', live: 'rocket' };
 
+const HOSTING_LABEL = { railway: 'Railway', render: 'Render', fly: 'Fly.io', koyeb: 'Koyeb', 'self-hosted': 'свой сервер' };
+const formatMb = (bytes) => {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 ** 3) return `${Math.round((n / 1024 ** 3) * 10) / 10} ГБ`;
+  if (n >= 1024 ** 2) return `${Math.round(n / 1024 ** 2)} МБ`;
+  return `${Math.round(n / 1024)} КБ`;
+};
+
 export default function Studio() {
   const toast = useToast();
   const [data, setData] = useState(null);
@@ -23,6 +31,10 @@ export default function Studio() {
   const [checkingUrl, setCheckingUrl] = useState(false);
   const [urlCheck, setUrlCheck] = useState(null);
   const [blockers, setBlockers] = useState(null);
+  // готовность хостинга и диск: на Railway это первый вопрос при любом сбое
+  const [deploy, setDeploy] = useState(null);
+  const [storage, setStorage] = useState(null);
+  const [pruning, setPruning] = useState(false);
 
   const launch = async () => {
     setLaunching(true);
@@ -82,6 +94,25 @@ export default function Studio() {
     } catch (err) {
       setError(err.message);
     }
+    // вторичные блоки не должны ломать экран запуска
+    api.deployReady().then(setDeploy).catch(() => setDeploy(null));
+    api.storage().then(setStorage).catch(() => setStorage(null));
+  };
+
+  // Уборка медиа: на Railway том ограничен, и место кончается тихо.
+  const prune = async () => {
+    setPruning(true);
+    try {
+      const res = await api.storagePrune({});
+      setStorage(res);
+      toast.push({
+        tone: res.removed ? 'success' : 'info',
+        title: res.removed ? `Освобождено ${Math.round(res.freedBytes / 1024 ** 2)} МБ` : 'Убирать нечего',
+        text: res.removed ? `${res.removed} файлов старше ${res.keepDays} дн.` : `Все файлы свежее ${res.keepDays} дн.`,
+      });
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Уборка не удалась', text: err.message });
+    } finally { setPruning(false); }
   };
 
   useEffect(() => { load(); }, []);
@@ -341,6 +372,82 @@ export default function Studio() {
             ))}
           </div>
         </div>
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Хостинг и диск</div>
+              <div className="card-sub">Готовность платформы: том, пароль, адрес, место</div>
+            </div>
+            <Badge tone={!deploy ? 'muted' : deploy.counts.error ? 'danger' : deploy.counts.warn ? 'warn' : 'success'} dot>
+              {!deploy ? 'проверяем' : deploy.counts.error ? `${deploy.counts.error} блокер(ов)` : deploy.counts.warn ? `${deploy.counts.warn} замечаний` : 'всё в порядке'}
+            </Badge>
+          </div>
+          <div className="card-body col" style={{ gap: 9, fontSize: 12 }}>
+            {!deploy && <span className="muted" style={{ fontSize: 11.5 }}>Считаем состояние хостинга…</span>}
+            {deploy && (
+              <>
+                <div className="row-between">
+                  <span style={{ color: 'var(--muted)' }}>Платформа</span>
+                  <span>
+                    {HOSTING_LABEL[deploy.platform] || deploy.platform}
+                    {deploy.hosted ? '' : ' · локально'}
+                  </span>
+                </div>
+                <div className="row-between">
+                  <span style={{ color: 'var(--muted)' }}>Публичный адрес</span>
+                  <span className="mono" style={{ fontSize: 10.5, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {deploy.publicUrl || '—'}
+                  </span>
+                </div>
+                {/* Сначала то, что мешает: ошибки, потом замечания, потом «в порядке» одной строкой */}
+                {deploy.checks.filter((c) => c.level !== 'ok').map((c) => (
+                  <div key={c.id} style={{ padding: '9px 11px', borderRadius: 11, border: `1px solid ${c.level === 'error' ? 'rgba(251,113,133,.35)' : 'rgba(251,191,36,.28)'}`, background: c.level === 'error' ? 'rgba(251,113,133,.07)' : 'rgba(251,191,36,.06)' }}>
+                    <div className="row" style={{ gap: 7, alignItems: 'flex-start' }}>
+                      <Icon name={c.level === 'error' ? 'x' : 'alert'} size={12} style={{ marginTop: 2, color: c.level === 'error' ? 'var(--red)' : 'var(--amber)' }} />
+                      <div>
+                        <b style={{ fontSize: 11.5 }}>{c.title}</b>
+                        <div style={{ color: 'var(--muted)', fontSize: 11, lineHeight: 1.5, marginTop: 2 }}>{c.detail}</div>
+                        {c.fix && <div className="mono" style={{ fontSize: 10, color: 'var(--violet-3)', marginTop: 4, wordBreak: 'break-word' }}>{c.fix}</div>}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {deploy.checks.some((c) => c.level === 'ok') && (
+                  <div style={{ fontSize: 11, color: 'var(--green)' }}>
+                    <Icon name="check" size={11} style={{ marginRight: 5 }} />
+                    {deploy.checks.filter((c) => c.level === 'ok').map((c) => c.title.toLowerCase()).join(' · ')}
+                  </div>
+                )}
+
+                {storage && (
+                  <div style={{ marginTop: 4 }}>
+                    <div className="row-between" style={{ fontSize: 11.5 }}>
+                      <span style={{ color: 'var(--muted)' }}>Медиа на диске</span>
+                      <span>{formatMb(storage.bytes)}{storage.freeBytes ? ` · свободно ${Math.round(storage.freeBytes / 1024 ** 3 * 10) / 10} ГБ` : ''}</span>
+                    </div>
+                    <div style={{ height: 6, borderRadius: 99, background: 'rgba(255,255,255,.08)', marginTop: 6, overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%',
+                        width: `${storage.freeBytes ? Math.min(100, Math.round(storage.bytes / (storage.bytes + storage.freeBytes) * 100)) : 40}%`,
+                        background: 'linear-gradient(90deg,#7c3aed,#c4b5fd)',
+                      }} />
+                    </div>
+                    <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                      <button className="btn btn-soft btn-sm" onClick={prune} disabled={pruning}>
+                        <Icon name="trash" size={12} />{pruning ? 'Убираем…' : `Почистить старше ${storage.retentionDays} дн.`}
+                      </button>
+                      {storage.staleFiles > 0 && (
+                        <span className="muted" style={{ fontSize: 10.5, alignSelf: 'center' }}>
+                          {storage.staleFiles} файлов на {formatMb(storage.staleBytes)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       {secrets.passwordIsDefault && (
@@ -356,8 +463,18 @@ export default function Studio() {
         <div className="notice">
           <Icon name="info" size={14} />
           <span>
-            <code className="mono">PULSE_PUBLIC_URL</code> не задан: Instagram и TikTok требуют публичный адрес видео,
-            а OAuth — точный redirect URI. Укажите домен в настройках окружения.
+            Публичный адрес ещё не известен: Instagram и TikTok требуют адрес видео, а OAuth — точный redirect URI.
+            На Railway/Render/Fly он подставляется автоматически, локально — <code className="mono">bash deploy/tunnel.sh</code>.
+          </span>
+        </div>
+      )}
+      {secrets.publicUrl && secrets.publicHint?.source && secrets.publicHint.source !== 'PULSE_PUBLIC_URL' && (
+        <div className="notice">
+          <Icon name="check" size={14} style={{ color: 'var(--green)' }} />
+          <span>
+            Публичный адрес определён автоматически из <code className="mono">{secrets.publicHint.source}</code>:{' '}
+            <code className="mono">{secrets.publicUrl}</code>. Переопределить можно через{' '}
+            <code className="mono">PULSE_PUBLIC_URL</code>.
           </span>
         </div>
       )}

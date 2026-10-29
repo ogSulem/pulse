@@ -114,6 +114,9 @@ export const api = {
   checkPublicUrl: (url = null) => request('/launch/check-url', { method: 'POST', body: { url } }),
 
   // ИИ: статус мультироутера, живой тест ключа, пересборка текста серии
+  deployReady: () => request('/deploy/ready'),
+  storage: () => request('/storage'),
+  storagePrune: (payload = {}) => request('/storage/prune', { method: 'POST', body: payload }),
   aiStatus: () => request('/ai/status'),
   aiTest: () => request('/ai/test', { method: 'POST', body: {} }),
   composeSeriesEpisodeAi: (id) => request(`/series/episodes/${id}/ai`, { method: 'POST', body: {} }),

@@ -711,6 +711,18 @@ curl -s "http://localhost:8080/api/growth/hooks?topic=привычки&platform=
 Все числа берутся из `engine/limits.js` и `engine/compliance.js` — база знаний не может противоречить
 проверкам публикации.
 
+С v14 добавлены два блока, без которых база знаний отвечала «что можно», но не «когда и сколько это
+даёт»:
+
+- `platforms[].windows` — `{ best: ["19:00", "21:00", "12:00"], timezone, learned, basis }`.
+  Часы считает модель `engine/schedule.js`: приор площадки плюс фактические публикации аккаунтов;
+  когда наблюдений становится больше восьми, `learned = true` и окно смещается по своим данным.
+- `general.economics` — `{ label, range, note }` на площадку и канал: сколько реально приносит тысяча
+  просмотров (Shorts, длинный формат, TikTok Rewards, Reels, свой продукт по UTM). Диапазоны, а не
+  обещания: в РФ выплаты TikTok/Reels недоступны, поэтому старт — продукт и CPA.
+- `general.firstWeek` — чек-лист первого запуска (пароль и ИИ → аккаунты → продукт → уборка и
+  уведомления → разбор хуков), который виден прямо на экране «База знаний».
+
 ## 14. Студия: креатив под ключ (v7)
 
 ### `GET /api/studio/options`
@@ -921,9 +933,50 @@ plan, advice[]`.
 
 ### `GET /api/health`
 
-Добавлены блоки `frames` (`enabled, active, mode, minGapSec, cached`) — пойдёт нейро-ряд или
-процедурные плашки ещё до запуска серии — и `ai` (`enabled, active, configured`): видно, что модели
-реально подключены, даже если панель не открыта (удобно для внешнего мониторинга).
+Блоки `frames` (`enabled, active, mode, minGapSec, cached`) — пойдёт нейро-ряд или процедурные
+плашки ещё до запуска серии — и `ai` (`enabled, active, configured`): видно, что модели реально
+подключены, даже если панель не открыта (удобно для внешнего мониторинга).
+
+С версии v14 есть `hosting` (`hosted, publicUrl, publicSource`): одним запросом видно, распознана ли
+платформа (`railway` / `render` / `fly` / `koyeb` / `self`) и откуда взят публичный адрес —
+`RAILWAY_PUBLIC_DOMAIN`, `RENDER_EXTERNAL_URL`, `FLY_APP_NAME`, `PULSE_PUBLIC_URL` или `null`.
+`PULSE_PUBLIC_URL` больше не обязателен: на облаках адрес подставляется сам.
+
+### `GET /api/deploy/ready` — готовность хостинга
+
+Один запрос отвечает на вопрос «будет ли это работать на сервере», а не «запустилось ли»:
+
+```json
+{ "ok": false, "platform": "railway", "hosted": true,
+  "counts": { "ok": 3, "warn": 6, "error": 1 },
+  "blockers": [{ "id": "disk", "title": "Нет постоянного тома" }],
+  "publicUrl": "https://pulse.up.railway.app", "publicSource": "RAILWAY_PUBLIC_DOMAIN",
+  "dataDir": "/app/data", "storage": { "files": 42, "bytes": 812345678, "freeBytes": 3489 },
+  "checks": [{ "id": "disk", "level": "error", "title": "…", "detail": "…", "fix": "…" }] }
+```
+
+Проверки: `disk` (постоянный том; на Railway без `RAILWAY_VOLUME_MOUNT_PATH` — блокер), `auth`
+(дефолтный пароль), `public_url`, `mode` (demo/live), `render` (ffmpeg и пресет), `storage`
+(свободно < 500 МБ — блокер, > 20 устаревших файлов — предупреждение), `ai`, `telegram`,
+`autopilot`, `replicas` (SQLite не любит больше одной), `secret`. У каждой проблемы есть `fix` —
+готовая команда или экран. Тот же отчёт печатается в лог при старте и показывается в
+**Студия → «Хостинг и диск»**.
+
+### `GET /api/storage` и `POST /api/storage/prune` — диск под медиа
+
+```json
+GET  /api/storage
+{ "dir": "/app/data/media", "files": 128, "bytes": 4021, "videos": 96, "videoBytes": 3120,
+  "staleFiles": 40, "staleBytes": 2100, "retentionDays": 14, "freeBytes": 3489 }
+
+POST /api/storage/prune   { "days": 14, "dryRun": true }
+{ "ok": true, "dryRun": true, "keepDays": 14, "removed": 40, "freedBytes": 2100 }
+```
+
+Удаляются только файлы медиа старше `days` (по умолчанию `PULSE_MEDIA_RETENTION_DAYS`, 14 дней).
+Строки `episodes` и статистика остаются, ставится отметка `media_pruned_at` — поэтому история
+публикаций не ломается. Автоматически то же делает фоновая уборка раз в 6 часов; `includeAll`
+разрешает чистить и файлы, не привязанные к эпизоду.
 
 ### Аккаунты: тема и персона
 
