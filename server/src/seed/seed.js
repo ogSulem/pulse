@@ -103,7 +103,9 @@ const LOG_SEED = [
 ];
 
 function truncateAll() {
-  const tables = ['campaign_posts', 'campaigns', 'brands', 'metrics_daily', 'conversions', 'clicks', 'publications', 'episodes', 'scripts', 'ideas', 'products', 'accounts', 'projects', 'jobs', 'logs', 'accounts_daily'];
+  // Порядок важен: сначала зависимые таблицы. Сериалы и их серии забывались —
+  // каждый `npm run seed` оставлял ещё одну «Мёртвую станцию» в базе.
+  const tables = ['series_episodes', 'series', 'campaign_posts', 'campaigns', 'brands', 'metrics_daily', 'conversions', 'clicks', 'publications', 'episodes', 'scripts', 'ideas', 'products', 'accounts', 'projects', 'jobs', 'logs', 'accounts_daily'];
   for (const t of tables) db.prepare(`DELETE FROM ${t}`).run();
 }
 

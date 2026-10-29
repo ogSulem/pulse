@@ -426,6 +426,12 @@ export default function Settings({ refresh }) {
               onSave={(v) => patch({ cost_render: v })} />
           </div>
           <div className="hr" />
+          <Toggle
+            checked={String(settings.powered_by_me) === '1'}
+            onChange={(v) => patch({ powered_by_me: v ? '1' : '0' })}
+            label="Я плачу за инфраструктуру"
+            hint="Выключено: бесплатные провайдеры (Edge TTS, Flux через Pollinations, бесплатный ключ LLM) считаются как 0 ₽, и прибыль показывается по факту. Включите, если платите за GPU/озвучку и хотите видеть прайс из настроек."
+          />
           <Field label="Ключ postback" hint="Необязательно. Если задан, POST /api/postback требует заголовок x-pulse-key или ?key=.">
             <input className="input" defaultValue={settings.postback_key || ''} placeholder="например, 32 случайных символа"
               onBlur={(e) => e.target.value !== (settings.postback_key || '') && patch({ postback_key: e.target.value })} />

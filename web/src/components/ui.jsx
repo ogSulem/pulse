@@ -20,7 +20,7 @@ export function ToastProvider({ children }) {
       <div className="toasts">
         {items.map((t) => (
           <div key={t.id} className={`toast ${t.tone}`}>
-            <Icon name={t.tone === 'error' ? 'alert' : t.tone === 'success' ? 'check' : 'info'} size={16} style={{ marginTop: 1, color: t.tone === 'error' ? 'var(--red)' : t.tone === 'success' ? 'var(--green)' : 'var(--violet-2)' }} />
+            <Icon name={t.tone === 'error' || t.tone === 'warn' ? 'alert' : t.tone === 'success' ? 'check' : 'info'} size={16} style={{ marginTop: 1, color: t.tone === 'error' ? 'var(--red)' : t.tone === 'warn' ? 'var(--amber)' : t.tone === 'success' ? 'var(--green)' : 'var(--violet-2)' }} />
             <div>
               <div className="toast-title">{t.title}</div>
               {t.text && <div className="toast-text">{t.text}</div>}

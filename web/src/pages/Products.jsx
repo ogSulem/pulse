@@ -35,9 +35,29 @@ export default function Products() {
   const [busy, setBusy] = useState(false);
 
   const [clicks, setClicks] = useState(0);
+  // вердикт проверки ссылки: продукт → результат (null = проверяем)
+  const [links, setLinks] = useState({});
   useEffect(() => {
     api.analytics({ days: 30 }).then((o) => setClicks(o.totals?.clicks || 0)).catch(() => {});
   }, [data.products]);
+
+  // Проверка ссылки глазами зрителя. Битая ссылка = ролики выходят, денег нет,
+  // поэтому результат показываем прямо в карточке, а не в консоли.
+  const checkLink = async (product) => {
+    setLinks((m) => ({ ...m, [product.id]: null }));
+    try {
+      const res = await api.checkProductLink(product.id);
+      setLinks((m) => ({ ...m, [product.id]: res }));
+      toast.push({
+        tone: res.level === 'ok' ? 'success' : res.level === 'warn' ? 'warn' : 'error',
+        title: res.level === 'ok' ? 'Ссылка открывается' : res.level === 'warn' ? 'Ссылка работает с замечанием' : 'Ссылка не работает',
+        text: res.note,
+      });
+    } catch (err) {
+      setLinks((m) => ({ ...m, [product.id]: { level: 'error', note: err.message } }));
+      toast.push({ tone: 'error', title: 'Проверка не удалась', text: err.message });
+    }
+  };
 
   const create = async () => {
     if (!form.name || !form.url) { toast.push({ tone: 'error', title: 'Нужны название и ссылка' }); return; }
@@ -126,6 +146,21 @@ export default function Products() {
             <div className="divider" style={{ margin: '14px -18px' }} />
             <div style={{ fontSize: 10.5, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 600, marginBottom: 6 }}>ссылка для описания</div>
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--violet-3)', wordBreak: 'break-all', lineHeight: 1.6 }}>{utmPreview(p)}</div>
+
+            {links[p.id] && (
+              <div className="notice" style={{ marginTop: 10 }}>
+                <Icon
+                  name={links[p.id].level === 'ok' ? 'check' : links[p.id].level === 'warn' ? 'alert' : 'x'}
+                  size={14}
+                  style={{ color: links[p.id].level === 'ok' ? 'var(--green)' : links[p.id].level === 'warn' ? 'var(--amber)' : 'var(--red)' }}
+                />
+                <span>{links[p.id].note}</span>
+              </div>
+            )}
+
+            <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => checkLink(p)}>
+              <Icon name="link" size={12} />Проверить ссылку
+            </button>
 
             <div className="row" style={{ gap: 8, marginTop: 14 }}>
               <button className="btn btn-soft btn-sm grow" onClick={() => setEditing({ ...p })}>

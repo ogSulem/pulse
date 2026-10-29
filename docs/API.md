@@ -1085,7 +1085,41 @@ pin-комментария, `caption` — не пускает продукт в 
 
 ### Себестоимость в деньгах
 
-`GET /api/money` в блоке `income` отдаёт `costPerVideo` и `costNote`. Ставки берутся из настроек,
-но **обнуляются для бесплатных провайдеров**: Edge TTS (`TTS_PROVIDER=edge`), Flux через Pollinations,
-LLM по бесплатному ключу (NVIDIA / GitHub Models / Gemini / Groq / …). Флаг `powered_by_me = 1`
-отключает это поведение — если вы платите за инфраструктуру, считаем по прайсу.
+`GET /api/money` отдаёт два разных числа, и путать их нельзя:
+
+- `assumptions.costPerVideo` — **плановая** себестоимость следующего ролика по текущему стеку
+  (её и показывает интерфейс), рядом лежит `assumptions.costNote` — человеческое пояснение,
+  что сейчас бесплатно;
+- `income.costPerVideo` — **фактически** списанная себестоимость на уже опубликованный ролик.
+
+Ставки берутся из настроек (`cost_video`, `cost_tts`, `cost_llm`, `cost_render`), но **обнуляются
+для бесплатных провайдеров**: Edge TTS (`TTS_PROVIDER=edge`), Flux через Pollinations, LLM по
+бесплатному ключу (NVIDIA / GitHub Models / Gemini / Groq / …). Флаг `powered_by_me = 1`
+(`PATCH /api/settings`) отключает это поведение — если вы платите за инфраструктуру,
+считаем по прайсу.
+
+---
+
+## 18. Проверка ссылки продукта
+
+### `POST /api/products/{id}/check`
+
+Тело: `{ "url": "https://…", "timeoutMs": 8000 }` — оба поля необязательны, по умолчанию берётся
+ссылка продукта и таймаут 8 секунд. Сервер делает обычный `GET` с редиректами, то есть повторяет
+путь зрителя, и возвращает вердикт:
+
+```json
+{ "ok": false, "level": "error", "status": 404, "finalUrl": "https://shop.ru/p",
+  "redirected": false, "hostChanged": false, "https": true, "ms": 412,
+  "error": "not_found", "note": "Страница не найдена (404): трафик из роликов уходит в пустоту",
+  "productId": "pd_x", "link": "https://shop.ru/p?utm_source=reels&utm_medium=short&utm_campaign=pro",
+  "checkedAt": "2026-10-29T07:41:00.000Z" }
+```
+
+`level`: `ok` (открывается по https), `warn` (открывается, но есть замечание: http, редирект на
+другой домен, 3xx без перехода, 401/403/429), `error` (404/410, 5xx, таймаут, мусор в адресе).
+`error` уточняет причину: `invalid_url | bad_protocol | bad_host | not_found | forbidden |
+rate_limited | server_error | client_error | timeout | unreachable`.
+
+Смысл: битая ссылка — это ролики без денег, и увидеть её нужно до публикации, а не через месяц
+по нулям в статистике. Все проблемные проверки пишутся в журнал (`product.link_checked`).
