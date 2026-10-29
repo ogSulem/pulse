@@ -5,7 +5,13 @@ import Icon from '../components/Icons.jsx';
 import { Badge, Field, Modal, Confirm, Empty, useToast } from '../components/ui.jsx';
 import { PRODUCT_TEMPLATES, fmt } from '../lib/format.js';
 
-const blank = { name: '', url: '', pitch: '', proof: '', template: 'review', utm_source: 'reels', utm_medium: 'short', utm_campaign: '', active: true };
+const blank = { name: '', url: '', pitch: '', proof: '', template: 'review', utm_source: 'reels', utm_medium: 'short', utm_campaign: '', active: true, placement: 'both', always: false };
+
+const PLACEMENTS = [
+  { id: 'both', label: 'И в видео, и в описании' },
+  { id: 'video', label: 'Только в видео' },
+  { id: 'caption', label: 'Только в описании' },
+];
 
 const utmPreview = (p) => {
   try {
@@ -110,6 +116,8 @@ export default function Products() {
             )}
 
             <div className="row wrap" style={{ gap: 5, marginTop: 12 }}>
+              <span className="chip plain active">{PLACEMENTS.find((x) => x.id === (p.placement || 'both'))?.label}</span>
+              {p.always ? <span className="chip plain active"><Icon name="zap" size={11} style={{ verticalAlign: -1 }} /> в каждом ролике</span> : null}
               {PRODUCT_TEMPLATES.map((t) => (
                 <span key={t.id} className={`chip plain ${p.template === t.id ? 'active' : ''}`}>{t.label}</span>
               ))}
@@ -195,6 +203,15 @@ export default function Products() {
           <Field label="UTM medium">
             <input className="input" value={form.utm_medium} onChange={(e) => setForm({ ...form, utm_medium: e.target.value })} />
           </Field>
+          <Field label="Где показывать" hint="Описание — мягко и безопасно для рекомендаций. Видео — прямая интеграция в сценарий">
+            <select className="select" value={form.placement} onChange={(e) => setForm({ ...form, placement: e.target.value })}>
+              {PLACEMENTS.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+            </select>
+          </Field>
+          <label className="row" style={{ gap: 8, alignSelf: 'end', paddingBottom: 8, fontSize: 12, cursor: 'pointer' }}>
+            <input type="checkbox" checked={Boolean(form.always)} onChange={(e) => setForm({ ...form, always: e.target.checked })} />
+            В каждом ролике (без «дозирования»)
+          </label>
           <div className="span-2">
             <div className="notice"><Icon name="link" size={14} /><span className="mono" style={{ fontSize: 10.5, wordBreak: 'break-all' }}>{utmPreview(form)}</span></div>
           </div>
@@ -219,6 +236,15 @@ export default function Products() {
             </Field>
             <Field label="UTM source"><input className="input" value={editing.utm_source} onChange={(e) => setEditing({ ...editing, utm_source: e.target.value })} /></Field>
             <Field label="UTM campaign"><input className="input" value={editing.utm_campaign} onChange={(e) => setEditing({ ...editing, utm_campaign: e.target.value })} /></Field>
+            <Field label="Где показывать" span>
+              <select className="select" value={editing.placement || 'both'} onChange={(e) => setEditing({ ...editing, placement: e.target.value })}>
+                {PLACEMENTS.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+              </select>
+            </Field>
+            <label className="row" style={{ gap: 8, fontSize: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={Boolean(editing.always)} onChange={(e) => setEditing({ ...editing, always: e.target.checked })} />
+              Показывать в каждом ролике
+            </label>
             <div className="span-2">
               <div className="notice"><Icon name="link" size={14} /><span className="mono" style={{ fontSize: 10.5, wordBreak: 'break-all' }}>{utmPreview(editing)}</span></div>
             </div>

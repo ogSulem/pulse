@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
@@ -24,6 +24,33 @@ export default function Accounts() {
   const [busy, setBusy] = useState(false);
   const [connecting, setConnecting] = useState(null);
   const [tokenForm, setTokenForm] = useState({ token: '', externalId: '' });
+  const [oauth, setOauth] = useState(null);       // состояние OAuth-приложений
+  const [oauthBusy, setOauthBusy] = useState('');
+
+  // статус OAuth и результат возврата с площадки (?connected=… / ?error=…)
+  useEffect(() => {
+    api.oauthStatus().then(setOauth).catch(() => setOauth(null));
+    const q = new URLSearchParams(window.location.hash.split('?')[1] || '');
+    if (q.get('connected')) {
+      toast.push({ tone: 'success', title: 'Канал подключён', text: `@${q.get('handle') || ''} — токен сохранён и будет обновляться сам` });
+      refresh(); refreshLight();
+      window.history.replaceState(null, '', '#/accounts');
+    } else if (q.get('error')) {
+      toast.push({ tone: 'error', title: 'Подключение не удалось', text: q.get('error') });
+      window.history.replaceState(null, '', '#/accounts');
+    }
+  }, []);
+
+  const oauthConnect = async (platform, accountId = '') => {
+    setOauthBusy(platform);
+    try {
+      const { url } = await api.oauthStart(platform, accountId);
+      window.location.href = url;
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'OAuth не настроен', text: err.message });
+      setOauthBusy('');
+    }
+  };
 
   const accounts = data.accounts || [];
   const projects = data.projects || [];
@@ -145,8 +172,11 @@ export default function Accounts() {
                       {platformLabel(a.platform)} · {a.display_name} · качество {a.quality}
                       {a.project_id ? ` · ${projectName(a.project_id) || 'бренд'}` : ' · универсальный'}
                     </div>
-                    <div className="row" style={{ gap: 6, marginTop: 5 }}>
-                      <Badge tone={a.connected ? 'success' : 'muted'} dot>{a.connected ? 'API подключён' : 'без токена'}</Badge>
+                    <div className="row" style={{ gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+                      <Badge tone={a.connected ? (a.auth_state === 'expired' ? 'warn' : 'success') : 'muted'} dot>
+                        {a.connected ? (a.auth_state === 'expired' ? 'токен истёк — обновится' : (a.refreshable ? 'OAuth · автопродление' : 'API подключён')) : 'без токена'}
+                      </Badge>
+                      {a.topic ? <Badge tone="accent">{a.topic}</Badge> : <Badge tone="muted">тема не задана</Badge>}
                       {a.connected && a.external_id ? <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>id {a.external_id}</span> : null}
                     </div>
                   </div>
@@ -167,8 +197,11 @@ export default function Accounts() {
               </div>
 
               <div className="row wrap" style={{ gap: 7, marginTop: 14 }}>
-                <button className="btn btn-soft btn-sm" onClick={() => openConnect(a)}>
-                  <Icon name="link" size={12} />{a.connected ? 'Заменить токен' : 'Подключить API'}
+                <button className="btn btn-primary btn-sm" onClick={() => oauthConnect(a.platform, a.id)} disabled={oauthBusy === a.platform}>
+                  <Icon name="link" size={12} />{oauthBusy === a.platform ? 'Переход…' : a.connected ? 'Переподключить' : 'Войти и подключить'}
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => openConnect(a)}>
+                  <Icon name="copy" size={12} />Токен вручную
                 </button>
                 {a.connected && (
                   <button className="btn btn-ghost btn-sm" onClick={() => disconnect(a)}><Icon name="logout" size={12} />Отключить</button>
@@ -274,6 +307,34 @@ export default function Accounts() {
           <button className="btn btn-primary" disabled={busy} onClick={connect}><Icon name="check" size={14} />Подключить</button>
         </>}>
         <div className="col" style={{ gap: 14 }}>
+          {(() => {
+            const st = (oauth?.platforms || []).find((x) => x.id === connecting?.platform);
+            if (!st) return null;
+            return st.configured ? (
+              <div className="notice" style={{ borderColor: 'rgba(52,211,153,.35)' }}>
+                <Icon name="shield" size={15} />
+                <span>
+                  <b>Вход через {st.label} настроен.</b> Кнопка ниже откроет страницу площадки: вы подтверждаете права,
+                  Pulse сохраняет токен и продлевает его сам.
+                  <button className="btn btn-primary btn-sm" style={{ marginTop: 8 }} disabled={oauthBusy === st.id}
+                    onClick={() => oauthConnect(st.id, connecting?.id)}>
+                    <Icon name="arrowUpRight" size={12} />Войти через {st.label}
+                  </button>
+                </span>
+              </div>
+            ) : (
+              <div className="notice">
+                <Icon name="alert" size={15} />
+                <span>
+                  <b>OAuth для {st.label} не настроен.</b> Добавьте {st.missing.join(' и ')} в переменные окружения и
+                  укажите redirect URI <code className="mono">{st.redirectUri}</code> в кабинете площадки.
+                  <a href={st.docs} target="_blank" rel="noreferrer" className="link-btn" style={{ marginTop: 6 }}>Как зарегистрировать приложение</a>
+                  <br />
+                  <span className="muted">Пока можно вставить токен вручную ниже.</span>
+                </span>
+              </div>
+            );
+          })()}
           <div className="notice">
             <Icon name="shield" size={15} />
             <span>
@@ -326,6 +387,22 @@ export default function Accounts() {
                 <option value="">Универсальный</option>
                 {projects.filter((p) => !p.archived).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
+            </Field>
+            <Field label="Тема канала" span
+              hint="По ней пишется контент: «зомби-истории», «нейро-разборы», «мой продукт». Пусто — берётся тема проекта">
+              <input className="input" placeholder="например, зомби-истории по 15 минут"
+                value={editing.topic || ''} onChange={(e) => setEditing({ ...editing, topic: e.target.value })} />
+            </Field>
+            <Field label="Язык канала">
+              <select className="select" value={editing.language || 'ru'} onChange={(e) => setEditing({ ...editing, language: e.target.value })}>
+                <option value="ru">Русский</option>
+                <option value="en">English</option>
+                <option value="es">Español</option>
+              </select>
+            </Field>
+            <Field label="Визуальный стиль" hint="Для сериалов и обложек: палитра и «камера»">
+              <input className="input" placeholder="нуар, холодный свет, 35 мм"
+                value={editing.visual_style || ''} onChange={(e) => setEditing({ ...editing, visual_style: e.target.value })} />
             </Field>
             <Field label="Качество аккаунта (влияет на приоритет)" span>
               <input type="range" min="0" max="100" value={editing.quality} onChange={(e) => setEditing({ ...editing, quality: Number(e.target.value) })} />

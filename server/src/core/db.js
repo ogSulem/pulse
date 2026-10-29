@@ -383,6 +383,15 @@ function ensureColumns() {
       followers_source: "TEXT DEFAULT 'manual'",
       // бренд-привязка: аккаунт ведёт один проект. NULL — универсальный (можно всё)
       project_id: 'TEXT',
+      // OAuth: токен обновления, выданные права и способ подключения
+      refresh_token: 'TEXT',
+      token_scope: 'TEXT',
+      // персона канала: тема, лицо/подача, язык — по ним строится контент
+      topic: "TEXT DEFAULT ''",
+      persona: "TEXT DEFAULT '{}'",
+      language: "TEXT DEFAULT 'ru'",
+      // визуальный стиль канала (для сериалов и обложек): палитра + look
+      visual_style: "TEXT DEFAULT ''",
     },
     publications: {
       cover_path: 'TEXT',
@@ -396,6 +405,13 @@ function ensureColumns() {
     projects: {
       ai_generated: 'INTEGER DEFAULT 1',
     },
+
+    products: {
+      // где показывать продукт: video | caption | both
+      placement: "TEXT DEFAULT 'both'",
+      // как часто напоминать: 0 — только по правилу 80/20, 1 — в каждом ролике
+      always: 'INTEGER DEFAULT 0',
+    },
     series: {
       // сериал переиспользует проект-бренд, но может жить и без него
       project_id: 'TEXT',
@@ -405,6 +421,12 @@ function ensureColumns() {
       cadence: "TEXT DEFAULT ''",
       notes: "TEXT DEFAULT ''",
       updated_at: 'TEXT',
+      // автопилот сериала: сочинять серии заранее и собирать их без человека
+      auto_compose: 'INTEGER DEFAULT 1',
+      auto_render: 'INTEGER DEFAULT 0',
+      lookahead: 'INTEGER DEFAULT 3',
+      // источник фото-ряда: auto | neural | procedural
+      frame_mode: "TEXT DEFAULT 'auto'",
     },
     series_episodes: {
       audio_path: 'TEXT',
@@ -484,6 +506,13 @@ export const settingsDefaults = {
   series_episodes: '6',           // серий в сезоне
   series_max_sec: '1200',         // потолок рендера одной серии
   series_quality: 'high',         // качество рендера сериала (high|balanced|fast)
+  // фото-ряд сериала: auto — нейросетевые кадры, если провайдер доступен;
+  // neural — всегда (с откатом на плашки), procedural — только вектор
+  series_frames: 'auto',
+  series_image_max: '60',         // сколько уникальных кадров генерировать на серию
+  series_auto_compose: '1',       // серии сочиняются заранее по арке сезона
+  series_auto_render: '0',        // ...и собираются в видео автоматически (тяжело по CPU)
+  series_lookahead: '3',          // сколько серий держим готовыми впереди
   cost_tts_1000: '20',            // озвучка длинной серии, ₽ за 1000 знаков (ElevenLabs ~$0.22/1000)
   cost_render_min: '6',           // рендер 16:9, ₽ за минуту готового видео
   conv_rate: '1.6',               // % кликов, которые становятся покупкой

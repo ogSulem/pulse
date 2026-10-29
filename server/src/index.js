@@ -10,7 +10,7 @@ import { log } from './core/logger.js';
 import { seedIfEmpty } from './seed/seed.js';
 import './engine/pipeline.js'; // регистрирует обработчики конвейера
 import { collectAnalytics, sweepDueEpisodes, recoverEpisodeStates } from './engine/pipeline.js';
-import { refreshSeriesMetrics, sweepDueSeriesEpisodes } from './engine/series.js';
+import { refreshSeriesMetrics, sweepDueSeriesEpisodes, seriesAutopilot } from './engine/series.js';
 import { enqueue } from './core/queue.js';
 import { recordClick, simulateTraffic } from './engine/money.js';
 import { MEDIA_DIR } from './engine/render.js';
@@ -124,6 +124,11 @@ async function tick() {
       simulateTraffic({ budget: 250 });
       sweepDueEpisodes();
       sweepDueSeriesEpisodes();
+      // раз в 10 минут: держим серии сочинёнными на несколько выпусков вперёд
+      if (Date.now() - Number(globalThis.__lastSeriesAuto || 0) > 600000) {
+        globalThis.__lastSeriesAuto = Date.now();
+        try { seriesAutopilot(); } catch (err) { log({ level: 'warn', actor: 'series', action: 'autopilot.failed', message: String(err.message || err) }); }
+      }
       // сериалы считаются отдельно: у них свои метрики и своя ставка RPM
       await refreshSeriesMetrics().catch((err) => log({ level: 'warn', actor: 'series', action: 'metrics.failed', message: String(err.message || err) }));
     }

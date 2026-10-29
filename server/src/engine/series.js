@@ -18,10 +18,12 @@ import { db, getSettings, nowIso } from '../core/db.js';
 import { uid, num, clamp, parseJson, addDays } from '../core/utils.js';
 import { log } from '../core/logger.js';
 import { enqueue } from '../core/queue.js';
+import { ensureFreshToken } from './oauth.js';
 import { providers } from '../providers/index.js';
 import { SERIES_GENRES, SERIES_GENRES_LIST, buildBible, planSeason, buildEpisode, authenticityAudit, seriesEconomics, planCuts, revenueForecast } from './serial.js';
 import { planVoiceSections, renderSeriesEpisode, renderSeriesCut, seriesRenderInfo } from './serialrender.js';
 import { MEDIA_DIR } from './render.js';
+import { framesStatus } from './frames.js';
 import { createEpisode, touchEpisode, nextSlot } from './pipeline.js';
 import { decryptSecret } from '../core/secrets.js';
 
@@ -150,6 +152,20 @@ export function updateSeries(id, patch = {}) {
     sets.push('bible = ?');
     args.push(JSON.stringify(patch.bible));
   }
+  // автопилот сериала: сочинять серии заранее и (опционально) собирать видео без человека
+  for (const key of ['auto_compose', 'auto_render']) {
+    if (patch[key] === undefined) continue;
+    sets.push(`${key} = ?`);
+    args.push(patch[key] ? 1 : 0);
+  }
+  if (patch.lookahead !== undefined) {
+    sets.push('lookahead = ?');
+    args.push(clamp(num(patch.lookahead, 3), 1, 6));
+  }
+  if (patch.frame_mode !== undefined) {
+    sets.push('frame_mode = ?');
+    args.push(['auto', 'neural', 'procedural'].includes(patch.frame_mode) ? patch.frame_mode : 'auto');
+  }
   if (!sets.length) return getSeries(id);
   sets.push('updated_at = ?');
   args.push(nowIso(), id);
@@ -198,6 +214,9 @@ export function composeEpisode({ seriesId, episodeNo = 1, targetSec = null, vari
   const siblingScenes = siblings.flatMap((r) => parseJson(r.scenes, []).map((x) => x.text)).filter(Boolean);
 
   const ep = buildEpisode({ series: s, episodeNo, targetSec: targetSec || s.episode_sec, bible, seasonPlan: plan, variant });
+  // Свой продукт в описании серии: серия выходит раз в неделю, поэтому мягкое
+  // упоминание уместно всегда, а прямая ссылка — через выпуск.
+  ep.description = withProduct(ep.description, { episodeNo });
   const audit = authenticityAudit({
     series: s, bible, scenes: ep.scenes, episodeNo, plan: plan.episodes?.[episodeNo - 1],
     wpm: ep.wpm, durationSec: ep.durationSec, midRolls: ep.midRolls, siblingScenes,
@@ -346,6 +365,7 @@ export async function renderEpisodeById(id, { onProgress = null } = {}) {
       coverText: ep.thumb_text || series.title,
       workId: id,
       onProgress,
+      frameMode: series.frame_mode || null,
     });
     db.prepare(`UPDATE series_episodes SET video_path = ?, video_bytes = ?, render_ms = ?, cover_paths = ?, stage = 'review', error = NULL, updated_at = ? WHERE id = ?`)
       .run(out.videoPath, out.bytes, out.renderMs, JSON.stringify(out.coverPaths), nowIso(), id);
@@ -519,6 +539,78 @@ function publicUrl() {
  * публикации — это и есть «Shows»: серии идут по порядку, автоплей следующий.
  */
 /**
+ * Свой продукт в описании серии. Продукт с placement='video' в текст не
+ * попадает — он должен звучать в кадре; ссылка идёт с UTM, чтобы в «Деньгах»
+ * было видно, что привела именно серия.
+ */
+function withProduct(description, { episodeNo = 1 } = {}) {
+  const product = db.prepare(`SELECT * FROM products WHERE active = 1
+      ORDER BY CASE WHEN always = 1 THEN 0 ELSE 1 END, created_at DESC LIMIT 1`).get();
+  if (!product || (product.placement || 'both') === 'video') return description;
+  const link = Number(product.always) === 1 || episodeNo % 2 === 1;
+  const sep = product.url.includes('?') ? '&' : '?';
+  const utm = `${product.url}${sep}utm_source=youtube&utm_medium=series&utm_campaign=${encodeURIComponent(product.utm_campaign || 'pulse')}&utm_content=ep${episodeNo}`;
+  const line = link
+    ? `${product.name} — ${product.pitch || 'то, чем пользуюсь сам'}: ${utm}`
+    : `${product.name} — если захочется так же.`;
+  return `${description}\n\n———\n${line}`.trim();
+}
+
+/**
+ * Автопилот сериала: держит N серий готовыми впереди.
+ *
+ * Сочинять сценарий — секунды, собирать видео — десятки минут, поэтому шаги
+ * разделены: `series_auto_compose` (включено) пишет сценарии заранее,
+ * `series_auto_render` (выключено) дополнительно ставит сборку в очередь.
+ * Так на слабом сервере можно планировать сезон, а рендерить ночью.
+ */
+export function seriesAutopilot({ dryRun = false } = {}) {
+  const settings = getSettings();
+  if (num(settings.series_auto_compose, 1) !== 1) return { composed: 0, queued: 0, planned: [], dryRun };
+  const lookahead = clamp(num(settings.series_lookahead, 3), 1, 8);
+  const rows = db.prepare("SELECT * FROM series WHERE status IN ('draft','active') ORDER BY created_at ASC").all();
+  let composed = 0;
+  let queued = 0;
+  const planned = [];
+
+  for (const series of rows) {
+    if (num(series.auto_compose, 1) !== 1) continue;
+    const total = clamp(num(series.episodes_planned, 6), 3, 8);
+    const existing = db.prepare('SELECT episode_no, stage FROM series_episodes WHERE series_id = ?').all(series.id);
+    const ready = existing.filter((e) => ['script', 'voice', 'render', 'review', 'scheduled', 'published'].includes(e.stage)).length;
+    const target = Math.min(total, ready + lookahead);
+    for (let no = 1; no <= target; no += 1) {
+      if (existing.some((e) => e.episode_no === no)) continue;
+      if (dryRun) { planned.push({ seriesId: series.id, title: series.title, episodeNo: no }); continue; }
+      try {
+        composeEpisode({ seriesId: series.id, episodeNo: no });
+        composed += 1;
+      } catch (err) {
+        log({ level: 'warn', actor: 'series', action: 'autopilot.compose_failed', entityType: 'series', entityId: series.id, message: `Серия ${no} не сочинена: ${String(err.message || err).slice(0, 160)}` });
+      }
+    }
+
+    const wantsRender = num(series.auto_render, 0) === 1 || num(settings.series_auto_render, 0) === 1;
+    if (wantsRender) {
+      const scripts = db.prepare(`SELECT id, episode_no FROM series_episodes
+          WHERE series_id = ? AND stage = 'script' AND (error IS NULL OR error = '')
+            AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.status IN ('pending','running')
+              AND j.type = 'series.render' AND j.payload LIKE '%' || series_episodes.id || '%')
+          ORDER BY episode_no ASC LIMIT 1`).all(series.id);
+      for (const ep of scripts) {
+        if (dryRun) { planned.push({ seriesId: series.id, title: series.title, episodeNo: ep.episode_no, render: true }); continue; }
+        enqueue('series.render', { episodeId: ep.id }, { priority: 5, dedupeKey: `series-render:${ep.id}` });
+        queued += 1;
+      }
+    }
+  }
+  if (!dryRun && (composed || queued)) {
+    log({ level: 'info', actor: 'series', action: 'autopilot.series', entityType: 'system', message: `Автопилот сериалов: сочинено ${composed} серий, в сборку ${queued}` });
+  }
+  return { composed, queued, planned, dryRun };
+}
+
+/**
  * Ставим серию в расписание: серия должна быть собрана (есть файл), иначе
  * расписание бессмысленно — рендер идёт минутами и не может ждать дедлайна.
  */
@@ -575,7 +667,9 @@ export async function publishEpisodeToYoutube(id, { privacy = null } = {}) {
   const disclosure = ep.disclosure || 'Художественная история. Текст и озвучка созданы с помощью ИИ под редакцией автора; персонажи вымышлены.';
   const privacyStatus = privacy || (num(settings.youtube_audited, 0) ? 'public' : 'private');
 
-  const token = account.access_token ? decryptSecret(account.access_token) : null;
+  // токен OAuth обновляем перед загрузкой: серия идёт на YouTube минутами
+  const token = (await ensureFreshToken(account).catch(() => null))
+    || (account.access_token ? decryptSecret(account.access_token) : null);
   // В demo-режиме площадка не вызывается вообще: как и для коротких роликов,
   // провайдер возвращает правдоподобную заглушку. Иначе кнопка «Опубликовать»
   // падала бы у каждого, кто просто открыл панель и нажал её.
@@ -769,6 +863,15 @@ export function seriesOverview() {
     series: rows,
     genres: SERIES_GENRES_LIST,
     render: seriesRenderInfo(),
+    frames: framesStatus(),
+    autopilot: {
+      enabled: String(getSettings().series_auto_compose || '1') === '1',
+      render: rows.filter((r) => r.auto_render).map((r) => r.id),
+      lookahead: num(getSettings().series_lookahead, 3),
+      due: (() => {
+        try { return seriesAutopilot({ dryRun: true }); } catch { return null; }
+      })(),
+    },
     totals: {
       series: rows.length,
       episodes: episodes.length,

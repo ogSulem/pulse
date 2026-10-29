@@ -200,6 +200,10 @@ function timing(count, total, platform) {
 
 // ── Описание под площадку ────────────────────────────────────────────────────
 function captionFor(platform, { hook, texts, hashtags, product, productUrl, promo, topic, project }) {
+  // placement: video — продукт только в кадре, caption — только в описании,
+  // both — и там, и там. Раньше выбора не было и ссылка лезла везде.
+  const placement = product?.placement || 'both';
+  if (product && placement === 'video') product = null;
   const tags = hashtags.map((t) => `#${String(t).replace(/^#/, '')}`);
   const tight = { tiktok: tags.slice(0, 8), reels: tags.slice(0, 8), youtube: tags.slice(0, 5) };
   const link = product && productUrl && promo === 'direct' ? productUrl : '';
@@ -334,6 +338,8 @@ export function buildPackage({
   }
   const hashtags = packs[platform].tags;
   const productUrl = packs[platform].url;
+  // ссылка в описании — только если placement это разрешает
+  const captionProduct = product && (product.placement || 'both') !== 'video' ? product : null;
   const caption = packs[platform].caption;
 
   const title = titleFor(idea.title || hookPick.text, topic);
@@ -391,10 +397,10 @@ export function buildPackage({
     hashtagsByPlatform: { tiktok: packs.tiktok.tags, reels: packs.reels.tags, youtube: packs.youtube.tags },
     hashtags,
     coverText: hookPick.text.split(/\s+/).slice(0, 5).join(' '),
-    pinnedComment: product && promo === 'direct'
+    pinnedComment: captionProduct && promo === 'direct'
       ? `${product.name}: ${packs[platform].url || product.url}`.slice(0, PLATFORM_API_LIMITS.tiktok?.comment || 150)
       : null,
-    product: product ? { id: product.id, name: product.name, intensity: promo, url: productUrl || product.url || '' } : null,
+    product: product ? { id: product.id, name: product.name, intensity: promo, placement: product.placement || 'both', url: (captionProduct ? productUrl : '') || product.url || '' } : null,
     scores: {
       total: total_,
       hook: hookPick.score,
@@ -425,9 +431,12 @@ export function studio({
   project = {}, idea = {}, product = null, platform = 'reels',
   durationSec = null, promo = 'soft', count = 3, campaign = null,
 } = {}) {
+  // В кадре продукт появляется только если это разрешено настройкой продукта
+  // (placement: video | both). При «только в описании» сцены остаются чистыми.
+  const sceneProduct = product && (product.placement || 'both') !== 'caption' ? product : null;
   const packages = [];
   for (let attempt = 0; attempt < clamp(count, 1, 5); attempt++) {
-    packages.push(buildPackage({ project, idea, product, platform, durationSec, promo, attempt, campaign }));
+    packages.push(buildPackage({ project, idea, product: sceneProduct, platform, durationSec, promo, attempt, campaign }));
   }
   packages.sort((a, b) => b.scores.total - a.scores.total);
   const best = packages[0];
@@ -460,6 +469,11 @@ export function promotionDecision({ project, product = null, days = 14 } = {}) {
   if (!project?.id) return { intensity: 'none', product: null, reason: 'Проект не выбран', share: 0 };
   const prod = product || dbProduct(project.id);
   if (!prod) return { intensity: 'none', product: null, reason: 'У проекта нет активного продукта', share: 0 };
+  // «всегда» — осознанный выбор владельца (свой продукт/свой канал):
+  // правило 80/20 отключается, но маркировка рекламы остаётся обязательной.
+  if (Number(prod.always) === 1) {
+    return { intensity: 'direct', product: prod, share: 1, reason: 'Продукт помечен «в каждом ролике»', productId: prod.id };
+  }
 
   const since = new Date(Date.now() - days * 86400000).toISOString();
   const total = dbCount(`SELECT COUNT(*) n FROM episodes WHERE project_id = ? AND status = 'published' AND published_at >= ?`, project.id, since);

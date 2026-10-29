@@ -20,6 +20,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { buildSeriesPlate, buildSeriesCaption, buildSeriesCover, buildTextOverlay, splitCaptions, PALETTES, hash, sanitize } from './scene.js';
 import { MEDIA_DIR } from './render.js';
+import { framesForEpisode, framesStatus } from './frames.js';
 import { getSettings } from '../core/db.js';
 import { num } from '../core/utils.js';
 
@@ -63,6 +64,8 @@ export function seriesRenderInfo() {
     cutWidth: CUT_W,
     cutHeight: CUT_H,
     maxSec: 1200,
+    // нейро-кадры: провайдер, включены ли, сколько уже в кэше
+    frames: framesStatus(),
   };
 }
 
@@ -205,6 +208,7 @@ export async function renderSeriesEpisode({
   coverText = '',
   onProgress = null,
   workId = null,
+  frameMode = null,          // 'neural' | 'procedural' | null (= настройка/авто)
 }) {
   const info = seriesRenderInfo();
   if (!info.available) return { ok: false, reason: 'render_disabled' };
@@ -239,9 +243,45 @@ export async function renderSeriesEpisode({
   const episodeLabel = `Серия ${episode.episode_no || 1}${episode.title ? ` · ${episode.title}` : ''}`;
 
   // ── кадры фото-ряда ──────────────────────────────────────────────────────
+  // Сначала пробуем нейросетевой ряд (Flux и др.), затем — процедурные плашки.
+  // Отказ провайдера не должен ломать рендер: серия важнее картинки.
+  let neural = null;
+  const mode = frameMode || (() => { try { return getSettings().series_frames || 'auto'; } catch { return 'auto'; } })();
+  // auto = нейро-ряд, если провайдер доступен и включён (live или PULSE_IMAGES=on);
+  // в demo по умолчанию остаются процедурные плашки — быстро и без сети.
+  const wantNeural = mode === 'neural' || (mode === 'auto' && framesStatus().enabled);
+  if (wantNeural) {
+    const bible = (() => { try { return series.bible ? JSON.parse(series.bible) : {}; } catch { return {}; } })();
+    let maxFrames = 60;
+    try { maxFrames = num(getSettings().series_image_max, 60); } catch { /* default */ }
+    neural = await framesForEpisode({
+      scenes: kept,
+      look: bible?.visual?.look || '',
+      palette: bible?.visual?.palette || 'ash',
+      seed: `${series.id || ''}-${episode.episode_no || 1}`,
+      maxFrames,
+      width: SERIES_W,
+      height: SERIES_H,
+      variants: 2,
+      onProgress: (p) => onProgress && onProgress({ ...p, phase: 'frames' }),
+    });
+    if (neural.ok && onProgress) {
+      onProgress({ phase: 'frames', done: neural.unique, total: neural.unique, generated: neural.generated, cached: neural.cached });
+    }
+  }
+
   const plateFiles = [];
   for (const [i, sc] of kept.entries()) {
     const frame = (Array.isArray(frames) && frames[i]) || sc.frame || {};
+
+    // есть нейро-кадр под этот план — используем его
+    const neuralPath = neural?.files?.get(i) || null;
+    if (neuralPath) {
+      plateFiles.push(neuralPath);
+      if (onProgress && i % 12 === 0) onProgress({ phase: 'plates', done: i + 1, total: kept.length });
+      continue;
+    }
+
     const svg = buildSeriesPlate({
       palette,
       scenery: frame.scenery || sc.visual || 'room',

@@ -73,6 +73,11 @@ export const api = {
   connectAccount: (id, payload) => request(`/accounts/${id}/connect`, { method: 'POST', body: payload }),
   disconnectAccount: (id) => request(`/accounts/${id}/connect`, { method: 'DELETE' }),
   accountLimit: (id) => request(`/accounts/${id}/limit`),
+  // OAuth: вход в канал одной кнопкой вместо ручного токена
+  oauthStatus: () => request('/oauth/status'),
+  oauthStart: (platform, accountId = '') => request(`/oauth/${platform}/start${accountId ? `?accountId=${accountId}` : ''}`),
+  // Студия PulseStudio: чек-лист запуска и состояние интеграций
+  studioOverview: () => request('/studio/overview'),
   deleteAccount: (id) => request(`/accounts/${id}`, { method: 'DELETE' }),
 
   products: () => request('/products'),

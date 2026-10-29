@@ -34,6 +34,9 @@ import { buildEpisode } from '../engine/serial.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkPassword, issueToken, verifyToken } from './auth.js';
+import { oauthStatus, startFlow, finishFlow } from '../engine/oauth.js';
+import { boot } from '../core/boot.js';
+import { framesStatus } from '../engine/frames.js';
 
 export const api = express.Router();
 
@@ -70,7 +73,18 @@ function accountRow(a) {
   if (token) {
     try { hint = maskSecret(decryptSecret(token)); } catch { hint = '••••'; }
   }
-  a = { ...safe, has_token: Boolean(token), token_hint: hint, connected: Boolean(token) };
+  const expires = a.token_expires_at ? new Date(a.token_expires_at).getTime() : 0;
+  a = {
+    ...safe,
+    persona: parseJson(a.persona, {}),
+    has_token: Boolean(token),
+    token_hint: hint,
+    connected: Boolean(token),
+    // понятное состояние вместо «connected: true» и молчаливых 401
+    auth_state: !token ? 'none' : expires && expires < Date.now() ? 'expired' : 'ok',
+    refreshable: Boolean(a.refresh_token),
+    expires_at: a.token_expires_at || null,
+  };
   const day = nowIso().slice(0, 10);
   const used = db.prepare('SELECT used FROM accounts_daily WHERE account_id = ? AND day = ?').get(a.id, day)?.used || 0;
   const settings = getSettings();
@@ -136,6 +150,24 @@ api.post('/auth/login', (req, res) => {
   }
   loginAttempts.delete(ip);
   res.json({ token: issueToken(), user: { name: 'Owner', role: 'owner' } });
+});
+
+// ─── OAuth каналов ──────────────────────────────────────────────────────────
+// Колбэк вызывается браузером с площадки, поэтому он вне авторизации —
+// защита в state (одноразовый, 10 минут) и PKCE.
+api.get('/oauth/:platform/callback', async (req, res) => {
+  const platform = String(req.params.platform || '');
+  const origin = `${req.protocol}://${req.get('host')}`;
+  try {
+    const done = await finishFlow(platform, { code: req.query.code, state: req.query.state, origin });
+    log({ level: 'success', actor: 'oauth', action: 'account.connected', entityType: 'account', entityId: done.accountId, message: `@${done.handle} подключён через OAuth` });
+    const qs = new URLSearchParams({ connected: done.accountId, handle: String(done.handle || ''), platform });
+    return res.redirect(302, `/#/accounts?${qs.toString()}`);
+  } catch (err) {
+    log({ level: 'error', actor: 'oauth', action: 'oauth.failed', message: String(err.message || err).slice(0, 300) });
+    const qs = new URLSearchParams({ error: String(err.message || err).slice(0, 200), platform });
+    return res.redirect(302, `/#/accounts?${qs.toString()}`);
+  }
 });
 
 // ─── Всё ниже требует авторизации ──────────────────────────────────────────
@@ -523,6 +555,24 @@ api.post('/pipeline/requeue', (_req, res) => {
 });
 
 // ─── Аккаунты ───────────────────────────────────────────────────────────────
+api.get('/oauth/status', (req, res) => {
+  const origin = `${req.protocol}://${req.get('host')}`;
+  res.json({
+    configured: oauthStatus().some((p) => p.configured),
+    publicUrl: process.env.PULSE_PUBLIC_URL || '',
+    platforms: oauthStatus().map((p) => ({ ...p, redirectUri: p.redirectUri || `${origin}/api/oauth/${p.id}/callback` })),
+  });
+});
+
+api.get('/oauth/:platform/start', (req, res) => {
+  try {
+    const origin = `${req.protocol}://${req.get('host')}`;
+    res.json(startFlow(req.params.platform, { origin, accountId: req.query.accountId || null }));
+  } catch (err) {
+    res.status(400).json({ error: 'oauth_not_configured', message: String(err.message || err) });
+  }
+});
+
 api.get('/accounts', (_req, res) => {
   res.json(db.prepare('SELECT * FROM accounts ORDER BY platform, created_at').all().map(accountRow));
 });
@@ -584,7 +634,7 @@ api.patch('/accounts/:id', (req, res) => {
   const a = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not_found' });
   const patch = { updated_at: nowIso() };
-  for (const k of ['handle', 'display_name', 'status', 'daily_limit', 'min_gap_min', 'window_start', 'window_end', 'timezone', 'quality', 'notes', 'blocked_until']) {
+  for (const k of ['handle', 'display_name', 'status', 'daily_limit', 'min_gap_min', 'window_start', 'window_end', 'timezone', 'quality', 'notes', 'blocked_until', 'topic', 'language', 'visual_style']) {
     if (k in (req.body || {})) patch[k] = req.body[k];
   }
   // бренд-привязка: пустая строка = универсальный аккаунт, значение = конкретный проект
@@ -593,6 +643,7 @@ api.patch('/accounts/:id', (req, res) => {
     patch.project_id = pid && db.prepare('SELECT id FROM projects WHERE id = ?').get(pid) ? pid : null;
   }
   if ('platform' in (req.body || {}) && ['reels', 'tiktok', 'youtube'].includes(req.body.platform)) patch.platform = req.body.platform;
+  if ('persona' in (req.body || {})) patch.persona = JSON.stringify(req.body.persona || {});
   if (patch.status === 'blocked' && !patch.blocked_until) patch.blocked_until = addDays(nowIso(), 7);
   if (patch.status && patch.status !== 'blocked') patch.blocked_until = null;
   db.prepare(`UPDATE accounts SET ${Object.keys(patch).map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`).run({ ...patch, id: a.id });
@@ -617,11 +668,12 @@ api.post('/products', (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.url) return res.status(400).json({ error: 'validation', message: 'Нужны название и ссылка' });
   const id = uid('pd_');
-  db.prepare(`INSERT INTO products (id, name, url, pitch, proof, template, utm_source, utm_medium, utm_campaign, active, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+  const placement = ['video', 'caption', 'both'].includes(b.placement) ? b.placement : 'both';
+  db.prepare(`INSERT INTO products (id, name, url, pitch, proof, template, utm_source, utm_medium, utm_campaign, active, placement, always, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, b.name, b.url, String(b.pitch || ''), String(b.proof || ''), String(b.template || 'review'),
       String(b.utm_source || 'reels'), String(b.utm_medium || 'short'), String(b.utm_campaign || slugify(b.name) || 'pulse'),
-      b.active === false ? 0 : 1, nowIso());
+      b.active === false ? 0 : 1, placement, b.always ? 1 : 0, nowIso());
   log({ level: 'success', actor: 'user', action: 'product.added', entityType: 'product', entityId: id, message: `Продукт «${b.name}» добавлен в продвижение` });
   res.status(201).json(db.prepare('SELECT * FROM products WHERE id = ?').get(id));
 });
@@ -631,6 +683,10 @@ api.patch('/products/:id', (req, res) => {
   if (!p) return res.status(404).json({ error: 'not_found' });
   const patch = {};
   for (const k of ['name', 'url', 'pitch', 'proof', 'template', 'utm_source', 'utm_medium', 'utm_campaign']) if (k in (req.body || {})) patch[k] = req.body[k];
+  if ('placement' in (req.body || {})) {
+    patch.placement = ['video', 'caption', 'both'].includes(req.body.placement) ? req.body.placement : 'both';
+  }
+  if ('always' in (req.body || {})) patch.always = req.body.always ? 1 : 0;
   if ('active' in (req.body || {})) patch.active = req.body.active ? 1 : 0;
   if (Object.keys(patch).length) db.prepare(`UPDATE products SET ${Object.keys(patch).map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`).run({ ...patch, id: p.id });
   res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(p.id));
@@ -1211,11 +1267,96 @@ api.get('/accounts/:id/limit', async (req, res) => {
   res.json({ platform: account.platform, connected: true, limit, source: 'api' });
 });
 
+// ─── Студия: одно место, где видно «что настроено и что делать дальше» ─────
+// Это не дашборд ради дашборда: каждый пункт — действие, без которого контент
+// не выйдет или не заработает.
+api.get('/studio/overview', (req, res) => {
+  const settings = getSettings();
+  const mode = String(process.env.PULSE_MODE || 'demo') === 'live' ? 'live' : 'demo';
+  const accounts = db.prepare('SELECT * FROM accounts').all();
+  const connected = accounts.filter((a) => a.access_token);
+  const withTopic = accounts.filter((a) => a.topic);
+  const products = db.prepare('SELECT * FROM products WHERE active = 1').all();
+  const series = db.prepare("SELECT * FROM series WHERE status <> 'archived'").all();
+  const episodes = db.prepare('SELECT stage, COUNT(*) n FROM series_episodes GROUP BY stage').all();
+  const shorts = db.prepare("SELECT COUNT(*) n FROM episodes WHERE status = 'published'").get().n;
+  const oauth = oauthStatus();
+  const frames = framesStatus();
+
+  const steps = [
+    {
+      id: 'account', done: connected.length > 0, weight: 3,
+      title: 'Подключить канал',
+      text: 'YouTube, TikTok или Instagram. Вход через OAuth одной кнопкой — или вставить токен вручную.',
+      action: { label: 'Аккаунты', to: '#/accounts' },
+    },
+    {
+      id: 'topic', done: withTopic.length > 0, weight: 2,
+      title: 'Задать тему канала',
+      text: 'Тема — это лицо канала: «зомби-истории», «нейро-разборы», «мой продукт». Конвейер пишет под неё.',
+      action: { label: 'Открыть аккаунты', to: '#/accounts' },
+    },
+    {
+      id: 'product', done: products.length > 0, weight: 1,
+      title: 'Добавить свой продукт',
+      text: 'Ссылка, оффер и где показывать: в видео, в описании или везде. Маркировка рекламы ставится сама.',
+      action: { label: 'Продукты', to: '#/products' },
+    },
+    {
+      id: 'content', done: series.length > 0 || shorts > 0, weight: 2,
+      title: 'Запустить контент',
+      text: 'Сериал 8–20 минут с фото-рядом или короткие ролики с автопилотом — на выбор.',
+      action: { label: 'Сериалы', to: '#/series' },
+    },
+    {
+      id: 'live', done: mode === 'live', weight: 3,
+      title: 'Перейти в live',
+      text: 'В demo всё симулируется. Для реальных публикаций нужны PULSE_MODE=live, ключи провайдеров и OAuth-приложения площадок.',
+      action: { label: 'Настройки', to: '#/settings' },
+    },
+  ];
+  const totalWeight = steps.reduce((a, s2) => a + s2.weight, 0);
+  const doneWeight = steps.filter((s2) => s2.done).reduce((a, s2) => a + s2.weight, 0);
+
+  res.json({
+    mode,
+    progress: Math.round((doneWeight / totalWeight) * 100),
+    steps,
+    nextStep: steps.find((s2) => !s2.done) || null,
+    stats: {
+      accounts: accounts.length,
+      connected: connected.length,
+      withTopic: withTopic.length,
+      products: products.length,
+      series: series.length,
+      seriesEpisodes: episodes.reduce((a, r) => a + r.n, 0),
+      shortsPublished: shorts,
+    },
+    integrations: {
+      frames,
+      oauth,
+      providers: providers.status(),
+      render: renderInfo(),
+      settings: {
+        series_frames: settings.series_frames || 'auto',
+        series_auto_compose: settings.series_auto_compose ?? '1',
+        series_auto_render: settings.series_auto_render ?? '0',
+        series_autopublish: settings.series_autopublish ?? '1',
+      },
+    },
+    secrets: {
+      passwordIsDefault: !process.env.PULSE_PASSWORD && !boot.passwordCreated,
+      publicUrl: process.env.PULSE_PUBLIC_URL || '',
+    },
+  });
+});
+
 // ─── Прозрачность: что сделано, что ждёт человека, какие лимиты ─────────────
 api.get('/transparency', (_req, res) => {
   res.json({
     ...transparency(),
     render: renderInfo(),
+    frames: framesStatus(),
     platformRules: PLATFORM_RULES,
     endpoints: {
       click: '/t/:token',

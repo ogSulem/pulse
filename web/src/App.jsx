@@ -4,6 +4,7 @@ import Icon, { Logo } from './components/Icons.jsx';
 import { Badge, ToastProvider, useToast } from './components/ui.jsx';
 import { plural } from './lib/format.js';
 import Login from './pages/Login.jsx';
+import Studio from './pages/Studio.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Projects from './pages/Projects.jsx';
 import Queue from './pages/Queue.jsx';
@@ -22,6 +23,7 @@ import LaunchModal from './components/LaunchModal.jsx';
 
 const NAV = [
   { section: 'Производство' },
+  { id: 'studio', label: 'Студия', icon: 'rocket', hash: '#/studio' },
   { id: 'dashboard', label: 'Обзор', icon: 'grid', hash: '#/' },
   { id: 'queue', label: 'Очередь роликов', icon: 'film', hash: '#/queue', badge: 'active' },
   { id: 'series', label: 'Сериалы', icon: 'sparkles', hash: '#/series' },
@@ -42,6 +44,7 @@ const NAV = [
 ];
 
 const TITLES = {
+  studio: { title: 'PulseStudio', sub: 'Путь запуска: каналы, темы, продукты, сериалы — по шагам' },
   dashboard: { title: 'Обзор', sub: 'Конвейер, публикации и результат в одном экране' },
   queue: { title: 'Очередь роликов', sub: 'Каждый этап, статус и ручные правки' },
   series: { title: 'Сериалы', sub: 'Длинные истории: библия, сезон, фото-ряд, мид-роллы и плейлист' },
@@ -94,6 +97,7 @@ function Shell({ data, refresh, refreshLight, loading }) {
   const meta = TITLES[route] || TITLES.dashboard;
 
   const pages = {
+    studio: <Studio />,
     dashboard: <Dashboard onLaunch={() => setLaunch(true)} />,
     queue: <Queue onLaunch={() => setLaunch(true)} />,
     series: <Series />,
