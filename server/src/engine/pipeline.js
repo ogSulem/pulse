@@ -21,6 +21,7 @@ import { preferredVariant, evaluateAB } from './abtest.js';
 import { checkCompliance, disclosureText, saveCompliance, PLATFORM_RULES } from './compliance.js';
 import { scoreViral, saveViral, recalibrate } from './viral.js';
 import { studio, promotionDecision, enrichPackage } from './creative.js';
+import { effectiveCosts } from './costs.js';
 import * as aiContent from './ai.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -340,7 +341,9 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
       projectId: episode.project_id,
     });
 
-    const costRub = num(settings.cost_video, 45) + num(settings.cost_tts, 12) + num(settings.cost_llm, 8) + num(settings.cost_render, 1);
+    // себестоимость по факту провайдеров: бесплатные Edge/Flux/NVIDIA не должны
+    // превращаться в «убыток» из-за прайса платных сервисов в настройках
+    const costRub = effectiveCosts().perVideo;
     const costCents = Math.round(costRub * 100);
 
     saveCompliance(episodeId, compliance);

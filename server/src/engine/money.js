@@ -17,6 +17,7 @@ import { db, getSettings, nowIso } from '../core/db.js';
 import { uid, num, clamp, addDays, parseJson } from '../core/utils.js';
 import { log } from '../core/logger.js';
 import { PLATFORMS, PLATFORM_LABELS, PLATFORM_API_LIMITS, platformCap } from './limits.js';
+import { effectiveCosts } from './costs.js';
 
 const DAY = 86400000;
 const iso = (ms) => new Date(ms).toISOString();
@@ -322,7 +323,8 @@ export function moneySummary({ days = 30, projectId = null } = {}) {
       convRate: num(settings.conv_rate, 1.6),
       price: num(settings.product_price, 2490),
       margin: num(settings.product_margin, 0.55),
-      costPerVideo: round2(num(settings.cost_video, 0.9) + num(settings.cost_tts, 0.25) + num(settings.cost_llm, 0.1) + num(settings.cost_render, 0.05)),
+      costPerVideo: round2(effectiveCosts().perVideo),
+      costNote: effectiveCosts().note,
       note: 'RPM — доход площадки за 1000 просмотров; конверсии — по фактическим покупкам из postback; бренд-кампании — по факту выходов (фикс/CPM/CPA). Расход — себестоимость производства, без учёта времени.',
     },
   };
