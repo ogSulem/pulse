@@ -23,7 +23,7 @@ jobs:
       - name: "Сборка панели"
         run: npm run build
 
-      - name: "Smoke: 73 проверки (рендер, деньги, сериалы, деплой, ИИ)"
+      - name: "Smoke: 74 проверки (рендер, деньги, сериалы, деплой, ИИ)"
         run: npm run smoke
         env:
           PULSE_MODE: demo

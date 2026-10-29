@@ -131,9 +131,9 @@ export default function Growth() {
 
   const TABS = [
     { id: 'portfolio', label: 'Портфель', icon: 'at', badge: audit?.counts?.block || 0 },
-    { id: 'studio', label: 'Студия', icon: 'sparkles' },
+    { id: 'studio', label: 'Конструктор', icon: 'sparkles' },
     { id: 'plan', label: 'План на неделю', icon: 'calendar' },
-    { id: 'creative', label: 'Тренды и хуки', icon: 'zap' },
+    { id: 'creative', label: 'Тренды', icon: 'zap' },
     { id: 'money', label: 'Деньги', icon: 'coins' },
     { id: 'knowledge', label: 'База знаний', icon: 'info' },
   ];

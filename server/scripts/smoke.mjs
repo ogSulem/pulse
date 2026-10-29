@@ -1297,6 +1297,49 @@ try {
 } catch (err) { fail('каталог данных', err); }
 
 try {
+  // Навигация: пять разделов, у каждого — вкладки, и у каждой вкладки есть экран.
+  // Проверка ловит типичную ошибку рефакторинга: вкладку добавили в меню, а
+  // компонент не подключили — получается пустой экран без ошибки в консоли.
+  const nav = await import('../../web/src/lib/nav.js');
+  const appSource = fs.readFileSync(path.join(process.cwd(), 'web/src/App.jsx'), 'utf8');
+  if (nav.SECTIONS.length > 5) throw new Error(`разделов ${nav.SECTIONS.length} — меню снова разрастается`);
+
+  const ids = new Set();
+  for (const sec of nav.SECTIONS) {
+    if (ids.has(sec.id)) throw new Error(`раздел ${sec.id} повторяется`);
+    ids.add(sec.id);
+    if (!sec.tabs.length) throw new Error(`у раздела ${sec.id} нет вкладок`);
+    for (const tab of sec.tabs) {
+      const key = `${sec.id}/${tab.id}`;
+      if (!appSource.includes(`'${key}'`)) throw new Error(`вкладка ${key} есть в меню, но не подключена к экрану`);
+    }
+  }
+  // старые адреса обязаны продолжать работать: их помнят закладки и письма
+  for (const [legacy, [sec, tab]] of Object.entries(nav.LEGACY)) {
+    const r = nav.resolveRoute(`#/${legacy}`);
+    if (r.section !== sec || r.tab !== tab) throw new Error(`старый адрес #/${legacy} не разрешился`);
+  }
+  if (nav.resolveRoute('').section !== 'today') throw new Error('пустой адрес должен вести на «Сегодня»');
+  if (nav.resolveRoute('#/money/ads').tab !== 'ads') throw new Error('вложенный адрес не разобрался');
+  if (nav.resolveRoute('#/нет-такого').section !== 'today') throw new Error('мусорный адрес не должен ломать приложение');
+
+  // Переводы строк: CRLF в shell-скриптах даёт "No such file or directory" и код 127
+  // ещё до старта контейнера. Проверяем и файлы, и то, что Dockerfile это лечит.
+  for (const file of ['docker-entrypoint.sh', 'deploy/install.sh', 'deploy/railway.sh', 'deploy/tunnel.sh']) {
+    const body = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+    if (body.includes('\r')) throw new Error(`${file}: CRLF в shell-скрипте`);
+    if (!body.startsWith('#!')) throw new Error(`${file}: нет shebang`);
+  }
+  const dockerfile = fs.readFileSync(path.join(process.cwd(), 'Dockerfile'), 'utf8');
+  if (!dockerfile.includes("sed -i 's/\\r$//' /usr/local/bin/docker-entrypoint.sh")) {
+    throw new Error('Dockerfile не защищён от CRLF в entrypoint');
+  }
+  const attrs = fs.readFileSync(path.join(process.cwd(), '.gitattributes'), 'utf8');
+  if (!attrs.includes('*.sh text eol=lf')) throw new Error('.gitattributes не фиксирует LF для .sh');
+  ok('навигация и переводы строк', `${nav.SECTIONS.length} разделов, ${Object.keys(nav.LEGACY).length} старых адресов живы, LF в скриптах`);
+} catch (err) { fail('навигация и переводы строк', err); }
+
+try {
   // База знаний: у каждой площадки есть лимиты API, поля, алгоритм, часы, демоции
   // и путь к деньгам. Экран «База знаний» не должен показывать пустоту.
   const { platformKnowledge } = await import('../src/engine/growth.js');
