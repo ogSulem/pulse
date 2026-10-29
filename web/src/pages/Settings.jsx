@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon from '../components/Icons.jsx';
@@ -17,6 +17,119 @@ const NumberField = ({ label, hint, value, suffix, onSave, busy }) => {
     </Field>
   );
 };
+
+// Настоящий статус ИИ: не «включено/выключено», а кто отвечает, сколько бесплатных
+// запросов осталось и что именно нужно добавить в .env, чтобы модель заработала.
+function AiBrain({ onToast }) {
+  const [st, setSt] = useState(null);
+  const [testing, setTesting] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = async () => {
+    try { setSt(await api.aiStatus()); setError(''); } catch (err) { setError(err.message); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const test = async () => {
+    setTesting(true);
+    try {
+      const res = await api.aiTest();
+      onToast({ tone: 'success', title: `Модель ответила: ${res.provider}`, text: `${res.model} · ${res.ms} мс` });
+      load();
+    } catch (err) {
+      onToast({ tone: 'error', title: 'ИИ не ответил', text: err.message });
+    } finally { setTesting(false); }
+  };
+
+  const providers = st?.providers || [];
+  const ready = providers.filter((p) => p.configured);
+  const today = providers.reduce((a, p) => a + (p.callsToday || 0), 0);
+
+  return (
+    <div className="card pad-lg">
+      <div className="card-head">
+        <div>
+          <h2>ИИ-движок</h2>
+          <p>
+            Pulse перебирает провайдеров по цепочке и берёт первый доступный: сначала бесплатные,
+            платные — только если ключ есть. Один ключ уже включает ИИ везде: идеи, сценарии, описания,
+            библия сериала и режиссура кадра.
+          </p>
+        </div>
+        <Badge tone={st?.enabled ? 'success' : 'warn'} dot>
+          {st?.enabled ? `включён · ${st.active}` : 'выключен'}
+        </Badge>
+      </div>
+
+      {error && <div className="notice" style={{ marginBottom: 12 }}><Icon name="alert" size={14} /><span>{error}</span></div>}
+
+      <div className="grid-4" style={{ gap: 10, marginBottom: 12 }}>
+        {[
+          ['Готовы к работе', `${ready.length} / ${providers.length}`],
+          ['Бесплатных', String(ready.filter((p) => p.free).length)],
+          ['Запросов сегодня', String(today)],
+          ['Кэш ответов', `${st?.cached ?? 0}`],
+        ].map(([k, v]) => (
+          <div key={k} className="mini-kv" style={{ margin: 0 }}>
+            <div><span>{k}</span><b>{v}</b></div>
+          </div>
+        ))}
+      </div>
+
+      <div className="col" style={{ gap: 0 }}>
+        {providers.map((p) => (
+          <div key={p.id} className="row-between" style={{ padding: '9px 0', borderBottom: '1px solid var(--line)', gap: 12 }}>
+            <div className="row" style={{ gap: 9, minWidth: 0 }}>
+              <span style={{
+                width: 7, height: 7, borderRadius: 9, flex: 'none',
+                background: p.configured ? 'var(--green)' : p.free ? 'var(--violet-3)' : 'var(--muted)',
+                boxShadow: p.active ? '0 0 9px var(--green)' : 'none',
+              }} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, color: p.configured ? 'var(--text)' : 'var(--text-2)' }}>{p.label}</div>
+                <div className="mono truncate" style={{ fontSize: 10, color: 'var(--muted)' }}>{p.model || '—'}</div>
+              </div>
+            </div>
+            <div className="row" style={{ gap: 6, flex: 'none' }}>
+              {p.free && <Badge tone="accent">бесплатно</Badge>}
+              {p.active && <Badge tone="success">активен</Badge>}
+              {p.configured ? (
+                <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>
+                  {p.callsToday || 0}{p.rpd ? ` / ${p.rpd}` : ''} сегодня
+                </span>
+              ) : (
+                <span className="mono" style={{ fontSize: 9.5, color: 'var(--muted)' }}>{p.keyEnv || 'локально'}</span>
+              )}
+            </div>
+          </div>
+        ))}
+        {!providers.length && !error && <span className="muted" style={{ fontSize: 11.5 }}>Загружаем статус…</span>}
+      </div>
+
+      <div className="row" style={{ gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+        <button className="btn btn-primary btn-sm" onClick={test} disabled={testing}>
+          <Icon name="sparkles" size={13} />{testing ? 'Проверяем ключ…' : 'Проверить ИИ живым запросом'}
+        </button>
+        <a className="btn btn-soft btn-sm" href="https://build.nvidia.com" target="_blank" rel="noreferrer">
+          <Icon name="link" size={12} />Бесплатный ключ NVIDIA
+        </a>
+        <a className="btn btn-ghost btn-sm" href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">
+          <Icon name="link" size={12} />Gemini
+        </a>
+        <a className="btn btn-ghost btn-sm" href="https://console.groq.com/keys" target="_blank" rel="noreferrer">
+          <Icon name="link" size={12} />Groq
+        </a>
+      </div>
+
+      <p style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 12, lineHeight: 1.6 }}>
+        Цепочка: <span className="mono">ollama → nvidia → gemini → groq → cerebras → openrouter → mistral → openai</span>.
+        Ключи задаются в <span className="mono">.env</span> (<span className="mono">NVIDIA_API_KEY</span>,{' '}
+        <span className="mono">GEMINI_API_KEY</span>, …), включение — <span className="mono">PULSE_AI=on</span>.
+        Совсем без ключей: <span className="mono">PULSE_OLLAMA=on</span> и своя Ollama на VPS — тоже бесплатно.
+      </p>
+    </div>
+  );
+}
 
 export default function Settings({ refresh }) {
   const { data } = useApp();
@@ -263,9 +376,11 @@ export default function Settings({ refresh }) {
       <div className="page-grid grid-4">
         <ProviderList title="Видео-генерация" items={providers.video} hint="Движок меняется адаптером: NVIDIA NIM, Runway, Luma, Pika, Replicate — без переделки конвейера." />
         <ProviderList title="Озвучка (TTS)" items={providers.tts} hint="Поддерживается мультиязычный синтез и клонирование голоса." />
-        <ProviderList title="LLM" items={providers.llm} hint="Идеи, сценарии и описания. Без ключа работает встроенный Content Brain." />
+        <ProviderList title="LLM" items={providers.llm} hint="Идеи, сценарии, описания. Полный статус и тест — в блоке «ИИ-движок» ниже." />
         <ProviderList title="Публикация" items={providers.publish} hint="Meta Graph API для Reels и TikTok Content Posting API. Токены — только в секретах." />
       </div>
+
+      <AiBrain onToast={toast.push} />
 
       <div className="page-grid grid-2">
         <div className="card pad-lg">

@@ -15,6 +15,7 @@ import { nicheFor, hashtagsFor, buildUtmUrl, FORMAT_LABELS } from './brain.js';
 import { hookLab, retentionPlan, PLATFORM_PLAYBOOK } from './growth.js';
 import { scoreViral } from './viral.js';
 import { checkCompliance } from './compliance.js';
+import { log } from '../core/logger.js';
 
 const words = (s) => String(s || '').split(/\s+/).filter(Boolean).length;
 
@@ -427,6 +428,94 @@ export function buildPackage({
  * Студия: несколько кандидатов, отсортированных по итоговому скору.
  * Именно это вызывает автопилот и экран «Студия».
  */
+// ─────────────────────────────────────────────────────────────────────────────
+// ИИ-усиление готового пакета. Шаблон остаётся страховкой: модель приносит
+// только тексты (хук, сцены, теги), а тайминг, скоринг, комплаенс и правила
+// площадок считает движок. Если модель недоступна — возвращаем пакет как есть.
+// ─────────────────────────────────────────────────────────────────────────────
+export async function enrichPackage(pack, ctx = {}) {
+  if (!pack) return pack;
+  const {
+    project = {}, idea = {}, product = null, platform = pack.platform,
+    durationSec = pack.durationSec, promo = 'none', topic = pack.topic, persona = null,
+  } = ctx;
+
+  let ai = null;
+  try {
+    const mod = await import('./ai.js');
+    ai = await mod.shortPack({ project, idea, product, platform, durationSec, promo, topic, persona });
+  } catch (err) {
+    log({ level: 'warn', actor: 'ai', action: 'creative.enrich_failed', message: String(err.message || err) });
+    return pack;
+  }
+  if (!ai) return pack;
+
+  const pb = PLATFORM_PLAYBOOK[platform] || PLATFORM_PLAYBOOK.reels;
+  const total = Math.max(16, Number(durationSec) || pack.durationSec || 32);
+  const seconds = timing(ai.scenes.length, total, platform);
+  const niche = nicheFor(project);
+  const rnd = seededRandom(`${topic}-${platform}-ai-${idea.id || idea.title || ''}`);
+  const scenes = ai.scenes.map((s, i) => ({
+    n: i + 1,
+    role: i === 0 ? 'hook' : i === ai.scenes.length - 1 ? 'close' : 'body',
+    text: s.text,
+    seconds: seconds[i] || Math.max(3, Math.round(total / ai.scenes.length)),
+    visual: s.visual || pick(niche.visuals, rnd),
+  }));
+  const durationSecFinal = Math.round(scenes.reduce((a, s) => a + s.seconds, 0));
+  const hook = ai.hook || scenes[0].text;
+
+  const url = product?.url ? buildUtmUrl(product, platform, { source: platform, content: idea.id || 'pulse' }) : '';
+  const tags = ai.hashtags.length ? ai.hashtags : hashtagsFor(project, platform, { tags: idea.tags || niche.tags }, platform === 'youtube' ? 5 : 8);
+  const texts = scenes
+    .filter((sc) => !['hook', 'close'].includes(sc.role))
+    .map((sc) => sc.text.replace(/^\d+[.)]\s*/, '').trim())
+    .filter((t) => t.length > 12);
+  const caption = captionFor(platform, { hook, texts, hashtags: tags, product, productUrl: url, promo, topic, project });
+  const max = PLATFORM_API_LIMITS[platform]?.description || 2200;
+  const captionFinal = caption.length > max ? caption.slice(0, max).trimEnd() : caption;
+
+  const title = (ai.title && ai.title.length > 12 ? ai.title : titleFor(idea.title || hook, topic)).slice(0, 100);
+  const viral = scoreViral({
+    title, scenes: scenes.map((s) => ({ text: s.text, seconds: s.seconds })),
+    description: captionFinal, hashtags: tags, targetSec: durationSecFinal, topic, projectId: project.id,
+  });
+  const retention = retentionPlan({
+    scenes: scenes.map((s) => ({ text: s.text, seconds: s.seconds })),
+    title, description: captionFinal, platform, durationSec: durationSecFinal, hashtags: tags,
+  });
+  const compliance = checkCompliance({
+    title, description: captionFinal, scenes: scenes.map((s) => ({ text: s.text })), platform, hashtags: tags,
+  });
+  const retentionRatio = retention.targetCompletion > 0 ? retention.predictedCompletion / retention.targetCompletion : 0;
+  const complianceScore = compliance.blocking?.length ? 30 : (compliance.score ?? 90);
+  const total_ = Math.round(
+    clamp(pack.hookScore ?? 70, 0, 100) * 0.3
+    + clamp(viral.score, 0, 100) * 0.3
+    + clamp(retentionRatio * 100, 0, 100) * 0.25
+    + clamp(complianceScore, 0, 100) * 0.15,
+  );
+
+  return {
+    ...pack,
+    ai: { provider: ai.provider, model: ai.model, cached: ai.cached },
+    title,
+    hook,
+    scenes,
+    durationSec: durationSecFinal,
+    caption: captionFinal,
+    captions: { ...(pack.captions || {}), [platform]: captionFinal },
+    hashtags: tags,
+    hashtagsByPlatform: { ...(pack.hashtagsByPlatform || {}), [platform]: tags },
+    coverText: hook.split(/\s+/).slice(0, 5).join(' '),
+    scores: { ...(pack.scores || {}), total: total_, viral: viral.score, retention: retention.predictedCompletion, compliance: complianceScore },
+    warnings: [
+      ...(pack.warnings || []).filter((w) => w.severity !== 'warn' || !String(w.text || '').includes('Хук')),
+      ...(compliance.blocking || []).map((b) => ({ severity: 'block', text: b.reason })),
+    ],
+  };
+}
+
 export function studio({
   project = {}, idea = {}, product = null, platform = 'reels',
   durationSec = null, promo = 'soft', count = 3, campaign = null,

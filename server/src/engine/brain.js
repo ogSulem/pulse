@@ -264,7 +264,7 @@ export function generateIdeas(project, { count = 6, product = null, exclude = []
           format,
           tags: pickMany(niche.tags, 3),
           score: Math.min(99, score),
-          source: 'ai',
+          source: 'template',
         });
       }
     }

@@ -37,6 +37,7 @@ import { checkPassword, issueToken, verifyToken } from './auth.js';
 import { oauthStatus, startFlow, finishFlow } from '../engine/oauth.js';
 import { boot } from '../core/boot.js';
 import { framesStatus } from '../engine/frames.js';
+import { status as aiStatus } from '../providers/llm.js';
 
 export const api = express.Router();
 
@@ -308,7 +309,7 @@ api.get('/ideas', (req, res) => {
   res.json(rows.map(ideaRow));
 });
 
-api.post('/ideas/generate', (req, res) => {
+api.post('/ideas/generate', async (req, res) => {
   const { projectId, count = 6 } = req.body || {};
   const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
   if (!project) return res.status(404).json({ error: 'project_not_found' });
@@ -321,19 +322,55 @@ api.post('/ideas/generate', (req, res) => {
       JOIN episodes e ON e.id = pb.episode_id
       WHERE pb.project_id = ? AND e.topic <> ''
       GROUP BY e.topic ORDER BY v DESC LIMIT 3`).all(projectId).map((r) => r.topic);
-  const ideas = generateIdeas(project, { count: clamp(num(count, 6), 1, 20), product, exclude: existing, preferFormats, seedTopics });
+  const want = clamp(num(count, 6), 1, 20);
+  let ideas = null;
+  let source = 'template';
+  try {
+    const aiContent = await import('../engine/ai.js');
+    if (aiContent.available()) {
+      const account = db.prepare("SELECT topic, persona FROM accounts WHERE project_id = ? ORDER BY quality DESC LIMIT 1").get(projectId);
+      ideas = await aiContent.ideas({
+        project, product, count: want, exclude: existing,
+        topic: account?.topic || '', persona: account?.persona ? parseJson(account.persona, {}) : null,
+      });
+      if (ideas?.length) {
+        source = 'ai';
+        // те же оценки вирусности, что и у шаблонных тем: ИИ не должен попадать
+        // в список «без скора», иначе сортировка в UI теряет смысл
+        ideas = ideas.map((i) => ({
+          ...i,
+          score: Math.max(50, Math.min(98, Math.round(60 + (i.hook?.length || 40) / 3 + (i.tags?.length || 0) * 2))),
+        }));
+      }
+    }
+  } catch (err) {
+    log({ level: 'warn', actor: 'ai', action: 'ideas.ai_failed', message: String(err.message || err).slice(0, 200) });
+  }
+  if (!ideas?.length) {
+    ideas = generateIdeas(project, { count: want, product, exclude: existing, preferFormats, seedTopics });
+  }
   const ins = db.prepare(`INSERT INTO ideas (id, project_id, title, hook, angle, format, tags, score, source, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ai', 'new', ?)`);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)`);
   const ts = nowIso();
-  for (const i of ideas) ins.run(uid('id_'), projectId, i.title, i.hook, i.angle, i.format, JSON.stringify(i.tags), i.score, ts);
+  const ids = [];
+  for (const i of ideas) {
+    const id = uid('id_');
+    ids.push(id);
+    ins.run(id, projectId, i.title, i.hook, i.angle, i.format, JSON.stringify(i.tags), i.score, source, ts);
+  }
+  // отдаём ровно то, что легло в базу: с id, статусом и нормализованными тегами.
+  // Иначе UI получал объекты без id и React ругался на ключи списка.
+  const created = ids.length
+    ? db.prepare(`SELECT * FROM ideas WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY score DESC`).all(...ids).map(ideaRow)
+    : [];
   log({
     level: 'info', actor: 'engine', action: 'ideas.generated', entityType: 'project', entityId: projectId,
     message: preferFormats.length
       ? `Сгенерировано ${ideas.length} тем — с упором на форматы-лидеры: ${preferFormats.map((f) => FORMAT_LABELS[f] || f).join(', ')}`
       : `Сгенерировано ${ideas.length} новых тем`,
-    meta: { count: ideas.length, preferFormats, seedTopics },
+    meta: { count: ideas.length, preferFormats, seedTopics, source },
   });
-  res.json({ created: ideas.length, ideas: ideas.map((i) => ideaRow(i)) });
+  res.json({ created: created.length, source, ideas: created });
 });
 
 api.patch('/ideas/:id', (req, res) => {
@@ -1276,6 +1313,35 @@ api.get('/accounts/:id/limit', async (req, res) => {
   res.json({ platform: account.platform, connected: true, limit, source: 'api' });
 });
 
+// ─── ИИ: кто пишет тексты, ключ живой или нет ───────────────────────────────
+api.get('/ai/status', async (_req, res) => {
+  const llm = await import('../providers/llm.js');
+  res.json(llm.status());
+});
+
+api.post('/ai/test', async (_req, res) => {
+  try {
+    const llm = await import('../providers/llm.js');
+    const result = await llm.selfTest();
+    res.status(result.ok ? 200 : 400).json(result);
+  } catch (err) {
+    res.status(400).json({ ok: false, reason: String(err.message || err) });
+  }
+});
+
+// Пересобрать тексты серии моделью: сцены, тайминг и фото-ряд не меняются,
+// меняется только нарратив — поэтому это безопасная операция «в один клик».
+api.post('/series/episodes/:id/ai', async (req, res) => {
+  try {
+    const { aiComposeEpisode } = await import('../engine/series.js');
+    const result = await aiComposeEpisode(req.params.id);
+    if (!result) return res.status(409).json({ error: 'ai_unavailable', message: 'ИИ недоступен: нет ключа провайдера или выключен PULSE_AI' });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: 'ai_compose_failed', message: String(err.message || err) });
+  }
+});
+
 // ─── Студия: одно место, где видно «что настроено и что делать дальше» ─────
 // Это не дашборд ради дашборда: каждый пункт — действие, без которого контент
 // не выйдет или не заработает.
@@ -1344,6 +1410,9 @@ api.get('/studio/overview', (req, res) => {
     integrations: {
       frames,
       oauth,
+      ai: (() => {
+        try { return aiStatus(); } catch { return { enabled: false, providers: [] }; }
+      })(),
       providers: providers.status(),
       render: renderInfo(),
       settings: {
@@ -1506,7 +1575,7 @@ api.get('/backup', (_req, res) => {
 // ─── Демо-утилиты (полезны на стенде) ───────────────────────────────────────
 api.post('/demo/reseed', async (_req, res) => {
   const { reseed } = await import('../seed/seed.js');
-  reseed();
+  await reseed();
   res.json({ ok: true, message: 'Демо-данные пересозданы' });
 });
 
@@ -1553,9 +1622,20 @@ api.patch('/series/:id', (req, res) => {
   }
 });
 
-api.post('/series/:id/bible', (req, res) => {
+api.post('/series/:id/bible', async (req, res) => {
   try {
-    res.json(rebuildBible(req.params.id, { variant: num(req.body?.variant, 0) }));
+    // AI=off в теле — принудительно шаблонная библия (например, для сравнения)
+    const useAi = req.body?.ai !== false;
+    const rebuilt = rebuildBible(req.params.id, { variant: num(req.body?.variant, 0) });
+    if (useAi) {
+      const { aiBible } = await import('../engine/series.js');
+      const enriched = await aiBible(req.params.id).catch((err) => {
+        log({ level: 'warn', actor: 'ai', action: 'series.bible_failed', message: String(err.message || err).slice(0, 200) });
+        return null;
+      });
+      if (enriched) return res.json(enriched);
+    }
+    res.json(rebuilt);
   } catch (err) {
     res.status(400).json({ error: 'bible_failed', message: String(err.message || err) });
   }

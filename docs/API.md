@@ -943,3 +943,67 @@ pin-комментария, `caption` — не пускает продукт в 
 и `frame_mode` (`auto | neural | procedural`). `GET /api/series` отдаёт `frames` и `autopilot`
 (`enabled, render[], lookahead, due{composed, queued, planned}`) — `due` считается в режиме
 `dryRun` и не меняет данные.
+
+---
+
+## 15. ИИ: статус, живой тест и пересборка текста
+
+### `GET /api/ai/status`
+
+Показывает реальную цепочку, а не «включено/выключено»:
+
+```json
+{ "enabled": true, "mode": "live", "active": "nvidia", "cached": 12,
+  "providers": [
+    { "id": "nvidia", "label": "NVIDIA NIM", "model": "meta/llama-3.3-70b-instruct",
+      "keyEnv": "NVIDIA_API_KEY", "configured": true, "free": true,
+      "rpm": 40, "rpd": null, "callsToday": 7, "active": true,
+      "note": "100+ открытых моделей, 40 запросов/мин, карта не нужна",
+      "docs": "build.nvidia.com → Get API Key (nvapi-…)" }
+  ] }
+```
+
+`configured` — есть ли ключ (для локальной Ollama — включена ли она), `free` — есть ли бесплатный
+уровень, `callsToday` — расход суточной квоты из `data/ai-cache/usage.json`.
+
+### `POST /api/ai/test`
+
+Живой запрос к первому доступному провайдеру. Успех — `200`:
+
+```json
+{ "ok": true, "provider": "nvidia", "model": "meta/llama-3.3-70b-instruct", "ms": 812, "text": "{\"ok\":true}" }
+```
+
+Ошибка — `400` с `{ "ok": false, "reason": "…" }`. Кнопка в UI — «Настройки → ИИ-движок».
+Результат не кэшируется: проверяется именно канал связи и ключ.
+
+### `POST /api/series/episodes/{id}/ai`
+
+Пересобрать текст серии моделью: нарратив режется по уже существующим сценам (пропорционально
+секундам), чистит остатки шаблона, пересчитывает WPM и заново прогоняет аудит оригинальности.
+Сцены, тайминг фото-ряда и обложки не меняются — операция безопасная.
+
+```json
+{ "ok": true, "words": 1056, "wpm": 133, "audit": { "score": 88, "similarity": 12 },
+  "episode": { "id": "se_…", "title": "Мёртвая станция · Серия 1" } }
+```
+
+`409 ai_unavailable` — нет ключа или `PULSE_AI=off`; `400 ai_compose_failed` — модель ответила,
+но текста меньше 60 % от нужного объёма (серия не портится, остаётся прежняя версия).
+
+### `POST /api/series/{id}/bible`
+
+Пересобрать библию сериала (мир, герои, визуальный стиль). С `{ "ai": false }` — только шаблонный
+движок, без запросов к модели. Ответ содержит `bible.ai` (`provider`, `model`), если сработал ИИ.
+
+### `POST /api/ideas/generate`
+
+Теперь отдаёт источник:
+
+```json
+{ "created": 4, "source": "ai",
+  "ideas": [{ "title": "…", "hook": "…", "format": "talking_head", "tags": ["…"], "score": 82, "source": "ai" }] }
+```
+
+`source = "template"` — модель недоступна, сработал встроенный Content Brain. Оценка вирусности
+считается в обоих случаях, поэтому сортировка в интерфейсе не ломается.
