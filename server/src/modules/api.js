@@ -1342,6 +1342,43 @@ api.post('/series/episodes/:id/ai', async (req, res) => {
   }
 });
 
+// ─── Запуск на деньги: одна кнопка и честная проверка адреса ────────────────
+// Не «мастер настройки на пять экранов», а две операции, которые действительно
+// отделяют «панель показывает данные» от «контент выходит и приносит деньги».
+api.post('/launch/start', async (req, res) => {
+  try {
+    const { startAutopilot } = await import('../engine/launch.js');
+    const result = startAutopilot({
+      render: req.body?.render === true,
+      review: req.body?.review === true,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: 'launch_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/launch/stop', async (_req, res) => {
+  try {
+    const { stopAutopilot } = await import('../engine/launch.js');
+    res.json(stopAutopilot());
+  } catch (err) {
+    res.status(400).json({ error: 'launch_failed', message: String(err.message || err) });
+  }
+});
+
+// Проверяем именно сетевой ответ, а не наличие переменной: Instagram тянет
+// видео по этому адресу, и «локально открывается» здесь не считается.
+api.post('/launch/check-url', async (req, res) => {
+  try {
+    const { publicUrlCheck } = await import('../engine/launch.js');
+    const result = await publicUrlCheck({ url: req.body?.url || null });
+    res.status(result.ok ? 200 : 400).json(result);
+  } catch (err) {
+    res.status(400).json({ ok: false, reason: String(err.message || err) });
+  }
+});
+
 // ─── Студия: одно место, где видно «что настроено и что делать дальше» ─────
 // Это не дашборд ради дашборда: каждый пункт — действие, без которого контент
 // не выйдет или не заработает.
@@ -1420,6 +1457,12 @@ api.get('/studio/overview', (req, res) => {
         series_auto_compose: settings.series_auto_compose ?? '1',
         series_auto_render: settings.series_auto_render ?? '0',
         series_autopublish: settings.series_autopublish ?? '1',
+        // состояние «включено ли зарабатывание»: без этих ключей студия врала,
+        // показывая чек-лист, но не показывая, идёт ли автопилот прямо сейчас
+        autopilot_global: settings.autopilot_global ?? '0',
+        manual_review: settings.manual_review ?? '0',
+        ads_enabled: settings.ads_enabled ?? '1',
+        min_viral_score: settings.min_viral_score ?? '70',
       },
     },
     secrets: {

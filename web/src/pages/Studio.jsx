@@ -19,6 +19,46 @@ export default function Studio() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [testing, setTesting] = useState(false);
+  const [launching, setLaunching] = useState(false);
+  const [checkingUrl, setCheckingUrl] = useState(false);
+  const [urlCheck, setUrlCheck] = useState(null);
+  const [blockers, setBlockers] = useState(null);
+
+  const launch = async () => {
+    setLaunching(true);
+    try {
+      const res = await api.launchStart({ render: false });
+      setBlockers(res.blockers || []);
+      toast.push({
+        tone: res.changes.length ? 'success' : 'info',
+        title: res.changes.length ? 'Автопилот включён' : 'Автопилот уже работал',
+        text: res.changes.length
+          ? res.changes.slice(0, 3).join(' · ')
+          : 'Все нужные настройки уже включены',
+      });
+      load();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Не удалось включить автопилот', text: err.message });
+    } finally { setLaunching(false); }
+  };
+
+  const checkUrl = async () => {
+    setCheckingUrl(true);
+    setUrlCheck(null);
+    try {
+      const res = await api.checkPublicUrl();
+      setUrlCheck(res);
+      toast.push({
+        tone: res.ok ? 'success' : 'error',
+        title: res.ok ? 'Адрес открывается снаружи' : 'Адрес недоступен',
+        text: res.ok ? res.url : (res.reason || res.hint),
+      });
+    } catch (err) {
+      const payload = err.payload || {};
+      setUrlCheck({ ok: false, reason: payload.reason || err.message, hint: payload.hint });
+      toast.push({ tone: 'error', title: 'Адрес недоступен', text: payload.reason || err.message });
+    } finally { setCheckingUrl(false); }
+  };
 
   const testAi = async () => {
     setTesting(true);
@@ -189,6 +229,58 @@ export default function Studio() {
                 </div>
               );
             })}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">Заработать без вложений</div>
+              <div className="card-sub">Две вещи, которые отделяют панель от реальных денег</div>
+            </div>
+            <Badge tone={String(integrations.settings.autopilot_global) === '1' ? 'success' : 'warn'} dot>
+              {String(integrations.settings.autopilot_global) === '1' ? 'автопилот идёт' : 'автопилот выключен'}
+            </Badge>
+          </div>
+          <div className="card-body col" style={{ gap: 10, fontSize: 12 }}>
+            <div>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <button className="btn btn-primary btn-sm" onClick={launch} disabled={launching}>
+                  <Icon name="rocket" size={13} />
+                  {launching ? 'Включаем…' : String(integrations.settings.autopilot_global) === '1' ? 'Проверить автопилот' : 'Включить полный автопилот'}
+                </button>
+                <button className="btn btn-soft btn-sm" onClick={checkUrl} disabled={checkingUrl}>
+                  <Icon name="link" size={13} />{checkingUrl ? 'Проверяем…' : 'Проверить публичный адрес'}
+                </button>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 7, lineHeight: 1.55 }}>
+                Автопилот = ролики каждый день, серии по расписанию, раздача кампаний и маркировка.
+                Публичный адрес нужен Instagram: площадка скачивает видео по ссылке, а не файлом.
+                {!secrets.publicUrl && ' Бесплатный адрес даёт deploy/tunnel.sh — домен не нужен.'}
+              </div>
+            </div>
+            {blockers?.length > 0 && (
+              <div className="col" style={{ gap: 6 }}>
+                <span style={{ fontSize: 11, color: 'var(--muted)' }}>Автопилот включён, но деньги пока не пойдут:</span>
+                {blockers.map((b) => (
+                  <a key={b.id} href={b.action} className="row-between"
+                    style={{ padding: '7px 10px', borderRadius: 10, background: 'rgba(251,191,36,.07)', border: '1px solid rgba(251,191,36,.22)', fontSize: 11.5, textDecoration: 'none', color: 'inherit' }}>
+                    <span>{b.text}</span>
+                    <Icon name="chevronRight" size={12} />
+                  </a>
+                ))}
+              </div>
+            )}
+            {urlCheck && (
+              <div className="notice" style={{ margin: 0, alignItems: 'flex-start' }}>
+                <Icon name={urlCheck.ok ? 'check' : 'alert'} size={14} />
+                <span style={{ fontSize: 11.5 }}>
+                  {urlCheck.ok
+                    ? `${urlCheck.url} — панель и медиа отдаются наружу (${urlCheck.ms} мс)`
+                    : [urlCheck.reason, urlCheck.hint].filter(Boolean).join('. ')}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
