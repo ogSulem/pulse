@@ -40,6 +40,20 @@ try {
   ok('демо-данные');
 } catch (err) { fail('демо-данные', err); }
 
+try {
+  // Пересоздание демо-данных — идемпотентное: сериалы и их серии тоже чистятся,
+  // иначе каждый `npm run seed` оставлял в базе ещё одну копию демо-сериала
+  const { reseed } = await import('../src/seed/seed.js');
+  const { db } = await import('../src/core/db.js');
+  await reseed();
+  await reseed();
+  const series = db.prepare('SELECT COUNT(*) n FROM series').get().n;
+  const episodes = db.prepare('SELECT COUNT(*) n FROM series_episodes').get().n;
+  if (series !== 1) throw new Error(`после двух пересозданий сериалов ${series}, ожидался 1`);
+  if (episodes < 1) throw new Error('серии демо-сериала не создались');
+  ok('демо-данные без дублей', `сериалов ${series}, серий ${episodes}`);
+} catch (err) { fail('демо-данные без дублей', err); }
+
 // ── рендер ──────────────────────────────────────────────────────────────────
 const info = renderInfo();
 if (!info.available) fail('рендер доступен', `ffmpeg=${info.ffmpeg} sharp=${info.sharp} fonts=${info.fonts}`);
@@ -1176,6 +1190,85 @@ try {
   if (broken.ok || !/ETIMEDOUT/.test(broken.reason)) throw new Error('ошибка сети не отловлена');
   ok('Telegram-сводка', `блокеров ${data.blockers.length}, отправка и ошибки обработаны`);
 } catch (err) { fail('Telegram-сводка', err); }
+
+try {
+  // Ссылка продукта — единственное место, где трафик превращается в деньги.
+  // Проверяем на своём локальном сервере: 200, 404, редирект на другой хост, мусор.
+  const http = await import('node:http');
+  const { checkLink, withUtm } = await import('../src/engine/linkcheck.js');
+  const site = http.createServer((req, res) => {
+    if (req.url === '/go') { res.writeHead(302, { location: `http://localhost:${site.address().port}/ok` }); return res.end(); }
+    if (req.url === '/ok') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<h1>ok</h1>'); }
+    res.writeHead(404, { 'content-type': 'text/plain' }); res.end('нет такой страницы');
+  });
+  await new Promise((r) => site.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${site.address().port}`;
+
+  const live = await checkLink(`${base}/ok`);
+  if (!live.ok || live.status !== 200) throw new Error(`живая ссылка не распознана: ${live.note}`);
+  if (live.level === 'ok' && live.https) throw new Error('http-ссылка названа https');
+
+  const dead = await checkLink(`${base}/missing`);
+  if (dead.ok || dead.error !== 'not_found' || !/не найдена/.test(dead.note)) throw new Error('404 не отловлен');
+
+  const moved = await checkLink(`${base}/go`);
+  if (!moved.ok || !moved.redirected) throw new Error('редирект не отслежен');
+
+  const junk = await checkLink('не ссылка вовсе');
+  if (junk.ok || junk.error !== 'invalid_url') throw new Error('мусор принят за ссылку');
+
+  const timeout = await checkLink('http://10.255.255.1/', { timeoutMs: 1200 });
+  if (timeout.ok) throw new Error('недоступный адрес считается живым');
+
+  const tagged = withUtm('https://example.com/p?x=1', { source: 'reels', medium: 'short', campaign: 'pro launch' });
+  const parsed = new URL(tagged);
+  if (parsed.searchParams.get('utm_source') !== 'reels' || parsed.searchParams.get('utm_campaign') !== 'pro launch') throw new Error('UTM собраны неверно');
+  if (parsed.searchParams.get('x') !== '1') throw new Error('UTM затирают существующие параметры');
+
+  site.close();
+  ok('проверка ссылки продукта', 'живая / 404 / редирект / мусор / таймаут / UTM');
+} catch (err) { fail('проверка ссылки продукта', err); }
+
+try {
+  // ИИ-роутер: живой HTTP к OpenAI-совместимому провайдеру, кэш и деградация.
+  const http = await import('node:http');
+  const llm = await import('../src/providers/llm.js');
+  let hits = 0;
+  const mock = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      hits += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        model: 'mock-70b',
+        choices: [{ message: { content: JSON.stringify({ scenes: [{ text: 'раз' }, { text: 'два' }] }) } }],
+      }));
+    });
+  });
+  await new Promise((r) => mock.listen(0, '127.0.0.1', r));
+  process.env.PULSE_AI = 'on';
+  process.env.NVIDIA_API_KEY = 'smoke-key';
+  process.env.NVIDIA_BASE_URL = `http://127.0.0.1:${mock.address().port}/v1`;
+  process.env.NVIDIA_MODEL = 'mock-70b';
+
+  const status = llm.status();
+  if (!status.providers.some((p) => p.id === 'nvidia' && p.configured)) throw new Error('ключ не виден роутеру');
+  if (status.chain[0] !== 'nvidia' && !status.chain.includes('nvidia')) throw new Error('провайдер не попал в цепочку');
+  if (JSON.stringify(status).includes('smoke-key')) throw new Error('ключ утёк в статус');
+
+  const first = await llm.completeJson({ prompt: 'смоук: верни сцены', maxTokens: 50 });
+  if (!first.ok || first.data?.scenes?.length !== 2) throw new Error(`роутер не разобрал ответ: ${first.reason || 'нет данных'}`);
+  const before = hits;
+  const again = await llm.completeJson({ prompt: 'смоук: верни сцены', maxTokens: 50 });
+  if (!again.cached || hits !== before) throw new Error('кэш не сработал: бесплатная квота тратится повторно');
+
+  mock.close();
+  delete process.env.NVIDIA_API_KEY;
+  delete process.env.NVIDIA_BASE_URL;
+  delete process.env.NVIDIA_MODEL;
+  if (llm.enabled()) throw new Error('без ключа ИИ остался включённым');
+  ok('ИИ-роутер', `${first.provider}/${first.model}, кэш и деградация работают`);
+} catch (err) { fail('ИИ-роутер', err); }
 
 fs.rmSync(tmp, { recursive: true, force: true });
 

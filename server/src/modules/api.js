@@ -38,6 +38,7 @@ import { oauthStatus, startFlow, finishFlow } from '../engine/oauth.js';
 import { boot } from '../core/boot.js';
 import { framesStatus } from '../engine/frames.js';
 import { status as aiStatus } from '../providers/llm.js';
+import { checkLink, withUtm } from '../engine/linkcheck.js';
 
 export const api = express.Router();
 
@@ -748,6 +749,31 @@ api.patch('/products/:id', (req, res) => {
 api.delete('/products/:id', (req, res) => {
   db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
+});
+
+// Проверка ссылки глазами зрителя: GET с сервера, редиректы, таймаут 8 с.
+// Возвращает 200 всегда, когда проверка состоялась: «ссылка битая» — это результат,
+// а не ошибка запроса. Панель показывает вердикт и ссылку с UTM.
+api.post('/products/:id/check', async (req, res) => {
+  const p = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not_found' });
+  const target = String(req.body?.url || p.url || '').trim();
+  if (!target) return res.status(400).json({ error: 'validation', message: 'У продукта нет ссылки' });
+  const result = await checkLink(target, { timeoutMs: num(req.body?.timeoutMs, 8000) });
+  const link = withUtm(target, { source: p.utm_source, medium: p.utm_medium, campaign: p.utm_campaign });
+  // вердикт остаётся в карточке продукта: не нужно проверять заново, чтобы вспомнить,
+  // что ссылка сломана — и видно, когда её проверяли в последний раз
+  db.prepare('UPDATE products SET link_checked_at = ?, link_status = ?, link_level = ?, link_note = ? WHERE id = ?')
+    .run(nowIso(), result.status, result.level, String(result.note || ''), p.id);
+  if (result.level !== 'ok') {
+    log({
+      level: result.level === 'warn' ? 'warn' : 'error', actor: 'user', action: 'product.link_checked',
+      entityType: 'product', entityId: p.id,
+      message: `Ссылка «${p.name}»: ${result.note}`,
+      meta: { status: result.status, level: result.level, ms: result.ms },
+    });
+  }
+  res.json({ ...result, productId: p.id, link, checkedAt: nowIso() });
 });
 
 // ─── Реклама: бренды, кампании, маркировка и деньги ─────────────────────────
@@ -1573,6 +1599,8 @@ api.patch('/settings', (req, res) => {
     // деньги и себестоимость
     'currency', 'rpm_reels', 'rpm_tiktok', 'rpm_youtube', 'conv_rate', 'ctr_estimate', 'product_price', 'product_margin',
     'cost_video', 'cost_tts', 'cost_llm', 'cost_render', 'postback_key',
+    // честная себестоимость: '1' — считаем по прайсу из настроек, '0' — по факту провайдеров
+    'powered_by_me',
   ];
   const patch = {};
   for (const k of allowed) if (k in (req.body || {})) patch[k] = String(req.body[k]);

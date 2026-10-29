@@ -84,6 +84,7 @@ export const api = {
   createProduct: (payload) => request('/products', { method: 'POST', body: payload }),
   updateProduct: (id, payload) => request(`/products/${id}`, { method: 'PATCH', body: payload }),
   deleteProduct: (id) => request(`/products/${id}`, { method: 'DELETE' }),
+  checkProductLink: (id, url = '') => request(`/products/${id}/check`, { method: 'POST', body: { url } }),
 
   growthOverview: (params = {}) => request(`/growth/overview?${new URLSearchParams(params)}`),
   growthTrends: (params = {}) => request(`/growth/trends?${new URLSearchParams(params)}`),

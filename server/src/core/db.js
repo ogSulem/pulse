@@ -411,6 +411,11 @@ function ensureColumns() {
       placement: "TEXT DEFAULT 'both'",
       // как часто напоминать: 0 — только по правилу 80/20, 1 — в каждом ролике
       always: 'INTEGER DEFAULT 0',
+      // последняя проверка ссылки глазами зрителя: видно в карточке до публикации
+      link_checked_at: 'TEXT',
+      link_status: 'INTEGER',
+      link_level: 'TEXT',
+      link_note: "TEXT DEFAULT ''",
     },
     series: {
       // сериал переиспользует проект-бренд, но может жить и без него

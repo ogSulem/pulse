@@ -3,7 +3,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon from '../components/Icons.jsx';
 import { Badge, Field, Modal, Confirm, Empty, useToast } from '../components/ui.jsx';
-import { PRODUCT_TEMPLATES, fmt } from '../lib/format.js';
+import { PRODUCT_TEMPLATES, fmt, relative } from '../lib/format.js';
 
 const blank = { name: '', url: '', pitch: '', proof: '', template: 'review', utm_source: 'reels', utm_medium: 'short', utm_campaign: '', active: true, placement: 'both', always: false };
 
@@ -35,9 +35,37 @@ export default function Products() {
   const [busy, setBusy] = useState(false);
 
   const [clicks, setClicks] = useState(0);
+  // вердикт проверки ссылки: продукт → результат (null = проверяем)
+  const [links, setLinks] = useState({});
   useEffect(() => {
     api.analytics({ days: 30 }).then((o) => setClicks(o.totals?.clicks || 0)).catch(() => {});
   }, [data.products]);
+
+  // Свежая проверка важнее сохранённой: после «Проверить ссылку» показываем её,
+  // до проверки — последний вердикт из базы (и когда он был).
+  const verdict = (p) => links[p.id] || {
+    level: p.link_level || 'error',
+    note: p.link_note || 'Ссылка ещё не проверялась',
+    checkedAt: p.link_checked_at,
+  };
+
+  // Проверка ссылки глазами зрителя. Битая ссылка = ролики выходят, денег нет,
+  // поэтому результат показываем прямо в карточке, а не в консоли.
+  const checkLink = async (product) => {
+    setLinks((m) => ({ ...m, [product.id]: null }));
+    try {
+      const res = await api.checkProductLink(product.id);
+      setLinks((m) => ({ ...m, [product.id]: res }));
+      toast.push({
+        tone: res.level === 'ok' ? 'success' : res.level === 'warn' ? 'warn' : 'error',
+        title: res.level === 'ok' ? 'Ссылка открывается' : res.level === 'warn' ? 'Ссылка работает с замечанием' : 'Ссылка не работает',
+        text: res.note,
+      });
+    } catch (err) {
+      setLinks((m) => ({ ...m, [product.id]: { level: 'error', note: err.message } }));
+      toast.push({ tone: 'error', title: 'Проверка не удалась', text: err.message });
+    }
+  };
 
   const create = async () => {
     if (!form.name || !form.url) { toast.push({ tone: 'error', title: 'Нужны название и ссылка' }); return; }
@@ -126,6 +154,28 @@ export default function Products() {
             <div className="divider" style={{ margin: '14px -18px' }} />
             <div style={{ fontSize: 10.5, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 600, marginBottom: 6 }}>ссылка для описания</div>
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--violet-3)', wordBreak: 'break-all', lineHeight: 1.6 }}>{utmPreview(p)}</div>
+
+            {links[p.id] === null ? (
+              <div className="notice" style={{ marginTop: 10 }}>
+                <Icon name="refresh" size={13} /><span>Проверяем ссылку…</span>
+              </div>
+            ) : (links[p.id] || p.link_level) ? (
+              <div className="notice" style={{ marginTop: 10 }}>
+                <Icon
+                  name={verdict(p).level === 'ok' ? 'check' : verdict(p).level === 'warn' ? 'alert' : 'x'}
+                  size={14}
+                  style={{ color: verdict(p).level === 'ok' ? 'var(--green)' : verdict(p).level === 'warn' ? 'var(--amber)' : 'var(--red)' }}
+                />
+                <span>
+                  {verdict(p).note}
+                  {verdict(p).checkedAt ? <span style={{ color: 'var(--muted)' }}> · проверено {relative(verdict(p).checkedAt)}</span> : null}
+                </span>
+              </div>
+            ) : null}
+
+            <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => checkLink(p)}>
+              <Icon name="link" size={12} />Проверить ссылку
+            </button>
 
             <div className="row" style={{ gap: 8, marginTop: 14 }}>
               <button className="btn btn-soft btn-sm grow" onClick={() => setEditing({ ...p })}>

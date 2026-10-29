@@ -15,6 +15,7 @@
     "dev:web": "npm --workspace web run dev",
     "seed": "node server/src/seed/reset.js",
     "smoke": "node server/scripts/smoke.mjs",
+    "test:ai": "node server/scripts/test-ai.mjs",
     "backup": "node server/scripts/backup.mjs"
   },
   "engines": {

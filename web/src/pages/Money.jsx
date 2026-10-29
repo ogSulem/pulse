@@ -179,7 +179,17 @@ export default function Money() {
             <div><span>Цена продукта</span><b>{money(money_?.assumptions?.price, currency)}</b></div>
             <div><span>Маржа с продажи</span><b>{money((money_?.assumptions?.price || 0) * (money_?.assumptions?.margin || 0), currency)}</b></div>
             <div><span>Конверсия клик → покупка</span><b>{pct(money_?.assumptions?.convRate, 1)}</b></div>
+            <div>
+              <span>Себестоимость ролика</span>
+              <b>{money(money_?.assumptions?.costPerVideo, currency, 2)}</b>
+            </div>
           </div>
+          {money_?.assumptions?.costNote && (
+            <p style={{ fontSize: 10.5, color: 'var(--muted)', margin: '8px 0 0', lineHeight: 1.55 }}>
+              {money_?.assumptions?.costNote}. Ставки берутся из настроек, но бесплатные провайдеры
+              (Edge TTS, Flux, бесплатный ключ LLM) в расчёте обнуляются — прибыль считается по факту.
+            </p>
+          )}
         </div>
       </div>
 
