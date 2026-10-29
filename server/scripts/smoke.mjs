@@ -1270,6 +1270,141 @@ try {
   ok('ИИ-роутер', `${first.provider}/${first.model}, кэш и деградация работают`);
 } catch (err) { fail('ИИ-роутер', err); }
 
+try {
+  // Один каталог данных: если задан только PULSE_DATA_DIR (так написано в .env.example),
+  // база и медиа обязаны оказаться внутри него — иначе на Railway они вне тома
+  // и исчезают после перезапуска.
+  const saved = { data: process.env.PULSE_DATA_DIR, db: process.env.PULSE_DB_PATH, media: process.env.PULSE_MEDIA_DIR };
+  const probeDir = path.join(tmp, 'paths-probe');
+  process.env.PULSE_DATA_DIR = probeDir;
+  delete process.env.PULSE_DB_PATH;
+  delete process.env.PULSE_MEDIA_DIR;
+  const probe = await import('../src/core/paths.js?probe=1');
+  if (probe.DATA_DIR !== probeDir) throw new Error(`DATA_DIR ${probe.DATA_DIR}`);
+  if (probe.DB_PATH !== path.join(probeDir, 'pulse.db')) throw new Error(`DB_PATH ${probe.DB_PATH} вне каталога данных`);
+  if (probe.MEDIA_DIR !== path.join(probeDir, 'media')) throw new Error(`MEDIA_DIR ${probe.MEDIA_DIR} вне каталога данных`);
+  probe.ensureDirs();
+  if (!fs.existsSync(path.join(probeDir, 'media'))) throw new Error('каталог медиа не создан');
+
+  // явные переменные главнее: раздельный том должен работать
+  process.env.PULSE_MEDIA_DIR = path.join(tmp, 'media-elsewhere');
+  process.env.PULSE_DB_PATH = path.join(tmp, 'db-elsewhere.db');
+  const probe2 = await import('../src/core/paths.js?probe=2');
+  if (probe2.MEDIA_DIR !== path.join(tmp, 'media-elsewhere')) throw new Error('PULSE_MEDIA_DIR не учтён');
+  if (probe2.DB_PATH !== path.join(tmp, 'db-elsewhere.db')) throw new Error('PULSE_DB_PATH не учтён');
+  process.env.PULSE_DATA_DIR = saved.data; process.env.PULSE_DB_PATH = saved.db; process.env.PULSE_MEDIA_DIR = saved.media;
+  ok('каталог данных', 'база и медиа внутри PULSE_DATA_DIR, явные пути главнее');
+} catch (err) { fail('каталог данных', err); }
+
+try {
+  // База знаний: у каждой площадки есть лимиты API, поля, алгоритм, часы, демоции
+  // и путь к деньгам. Экран «База знаний» не должен показывать пустоту.
+  const { platformKnowledge } = await import('../src/engine/growth.js');
+  const k = platformKnowledge();
+  if (k.platforms.length !== 3) throw new Error(`площадок ${k.platforms.length}, ожидалось 3`);
+  for (const pl of k.platforms) {
+    if (!pl.api?.per24h) throw new Error(`${pl.platform}: нет лимита API`);
+    if (!pl.fields?.captionMax) throw new Error(`${pl.platform}: нет лимита описания`);
+    if (!pl.algorithm?.idealSec?.length) throw new Error(`${pl.platform}: нет идеальной длины`);
+    if (!pl.demotions?.length) throw new Error(`${pl.platform}: нет списка демоций`);
+    if (!pl.windows?.best?.length) throw new Error(`${pl.platform}: нет лучших часов`);
+    if (!pl.api.official?.startsWith('https://')) throw new Error(`${pl.platform}: нет ссылки на документацию`);
+  }
+  if (!k.monetization.length) throw new Error('нет программ монетизации');
+  for (const m of k.monetization) if (!m.changes) throw new Error(`${m.id}: не описаны ограничения`);
+  if (!k.general?.economics?.length) throw new Error('нет экономики тысячи просмотров');
+  if (!k.general?.firstWeek?.length) throw new Error('нет чек-листа первой недели');
+  if (!k.general?.truth?.length) throw new Error('нет честных границ');
+  ok('база знаний', `${k.platforms.length} площадки · ${k.monetization.length} программ · ${k.general.economics.length} строк экономики`);
+} catch (err) { fail('база знаний', err); }
+
+try {
+  // Готовность хостинга: без тома на Railway — блокер, с томом и паролем — чисто.
+  // Публичный адрес должен подхватываться из RAILWAY_PUBLIC_DOMAIN без настроек.
+  const { deployReadiness, hostingPlatform, readinessLine } = await import('../src/engine/deploy.js');
+  const { publicBase, publicHint, isHosted } = await import('../src/core/publicurl.js');
+
+  if (publicBase({ RAILWAY_PUBLIC_DOMAIN: 'pulse-prod.up.railway.app' }) !== 'https://pulse-prod.up.railway.app') {
+    throw new Error('адрес Railway не подхватился');
+  }
+  if (publicHint({ RAILWAY_PUBLIC_DOMAIN: 'x.up.railway.app' }).source !== 'RAILWAY_PUBLIC_DOMAIN') throw new Error('источник адреса не определён');
+  if (publicBase({ RENDER_EXTERNAL_URL: 'https://pulse.onrender.com/' }) !== 'https://pulse.onrender.com') throw new Error('адрес Render не подхватился');
+  if (publicBase({ FLY_APP_NAME: 'pulse' }) !== 'https://pulse.fly.dev') throw new Error('адрес Fly не подхватился');
+  if (publicBase({}) !== '') throw new Error('без платформы адрес должен быть пустым');
+
+  const bare = deployReadiness({ env: { RAILWAY_ENVIRONMENT: 'production', RAILWAY_PUBLIC_DOMAIN: 'x.up.railway.app', PULSE_MODE: 'live' } });
+  if (hostingPlatform({ RAILWAY_ENVIRONMENT: 'production' }) !== 'railway') throw new Error('платформа Railway не распознана');
+  if (!bare.blockers.some((b) => b.id === 'disk')) throw new Error('отсутствие тома не помечено блокером');
+
+  const ready = deployReadiness({
+    env: {
+      RAILWAY_ENVIRONMENT: 'production', RAILWAY_PUBLIC_DOMAIN: 'x.up.railway.app',
+      RAILWAY_VOLUME_MOUNT_PATH: path.join(tmp, 'data'), PULSE_DATA_DIR: process.env.PULSE_DATA_DIR,
+      PULSE_MODE: 'live', PULSE_PASSWORD: 'strong-password-123',
+    },
+  });
+  if (ready.platform !== 'railway') throw new Error('платформа не Railway');
+  if (ready.publicUrl !== 'https://x.up.railway.app') throw new Error(`публичный адрес ${ready.publicUrl}`);
+  if (!ready.checks.length) throw new Error('список проверок пуст');
+  if (!/Хостинг/.test(readinessLine(ready))) throw new Error('строка для лога не собралась');
+  ok('готовность хостинга', `${ready.counts.ok} ок · ${ready.counts.warn} предупр. · ${ready.counts.error} блокеров, адрес из платформы`);
+} catch (err) { fail('готовность хостинга', err); }
+
+try {
+  // Конфиги развёртывания согласованы с кодом: healthcheck существует, порт берётся
+  // из окружения, том монтируется, секреты не попадают в образ, оба режима compose на месте
+  const root = process.cwd();
+  const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+  const railway = JSON.parse(read('railway.json'));
+  const compose = read('docker-compose.yml');
+  const dockerfile = read('Dockerfile');
+  const ignore = read('.dockerignore');
+
+  if (railway.build?.builder !== 'DOCKERFILE') throw new Error('railway.json: builder не DOCKERFILE');
+  if (railway.deploy?.healthcheckPath !== '/api/health') throw new Error('railway.json: healthcheck не /api/health');
+  if (railway.deploy?.numReplicas !== 1) throw new Error('railway.json: должно быть ровно 1 реплика (SQLite)');
+  if (!/api\.get\('\/health'/.test(read('server/src/modules/api.js'))) throw new Error('маршрута /api/health нет в api.js');
+
+  for (const token of ['ffmpeg', 'tini', 'tzdata', 'HEALTHCHECK', 'EXPOSE 8080', 'docker-entrypoint.sh']) {
+    if (!dockerfile.includes(token)) throw new Error(`Dockerfile: нет «${token}»`);
+  }
+  for (const token of ['node_modules', 'data', '.env']) {
+    if (!ignore.split('\n').includes(token)) throw new Error(`.dockerignore: не исключён «${token}»`);
+  }
+  if (!compose.includes('profiles: ["tls"]')) throw new Error('compose: нет профиля tls');
+  if (!compose.includes('./data:/app/data')) throw new Error('compose: том данных не смонтирован');
+  if (!compose.includes('stop_grace_period')) throw new Error('compose: нет grace period для ffmpeg');
+  if (!/api\.get\('\/deploy\/ready'/.test(read('server/src/modules/api.js'))) throw new Error('нет маршрута /api/deploy/ready');
+  ok('конфиги развёртывания', 'railway.json · Dockerfile · compose (local + tls) · .dockerignore');
+} catch (err) { fail('конфиги развёртывания', err); }
+
+try {
+  // Уборка медиа: старое удаляется, свежее остаётся, dryRun ничего не трогает
+  const { MEDIA_DIR } = await import('../src/engine/render.js');
+  const { pruneMedia, storageUsage } = await import('../src/engine/housekeeping.js');
+  fs.mkdirSync(MEDIA_DIR, { recursive: true });
+  const oldFile = path.join(MEDIA_DIR, 'old-smoke.mp4');
+  const newFile = path.join(MEDIA_DIR, 'new-smoke.mp4');
+  fs.writeFileSync(oldFile, Buffer.alloc(2048));
+  fs.writeFileSync(newFile, Buffer.alloc(1024));
+  const old = new Date(Date.now() - 40 * 86400000);
+  fs.utimesSync(oldFile, old, old);
+
+  const usage = storageUsage();
+  if (!usage.files) throw new Error('файлы не посчитались');
+  if (!usage.staleFiles) throw new Error('старый файл не попал в «устаревшие»');
+
+  const dry = pruneMedia({ days: 14, dryRun: true });
+  if (!dry.removed || !fs.existsSync(oldFile)) throw new Error('dryRun удалил файл');
+
+  const done = pruneMedia({ days: 14 });
+  if (fs.existsSync(oldFile)) throw new Error('старый файл не удалён');
+  if (!fs.existsSync(newFile)) throw new Error('свежий файл удалён по ошибке');
+  if (!done.freedBytes) throw new Error('не посчитан освобождённый объём');
+  fs.rmSync(newFile, { force: true });
+  ok('уборка медиа', `старое удалено (${Math.round(done.freedBytes / 1024)} КБ), свежее на месте`);
+} catch (err) { fail('уборка медиа', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

@@ -46,7 +46,10 @@ const AUDIO_BITRATE = process.env.PULSE_RENDER_AUDIO || QP.audio;
 const MAX_TOTAL_SEC = Number(process.env.PULSE_RENDER_MAX_SEC || 42);
 const RENDER_ENABLED = String(process.env.PULSE_RENDER || 'auto') !== 'off';
 
-export const MEDIA_DIR = process.env.PULSE_MEDIA_DIR || path.resolve(process.cwd(), 'data/media');
+// медиа лежит в общем каталоге данных (core/paths.js): на Railway это значит
+// «внутри тома», даже если задан только PULSE_DATA_DIR
+import { MEDIA_DIR } from '../core/paths.js';
+export { MEDIA_DIR };
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
 export function renderAvailable() {

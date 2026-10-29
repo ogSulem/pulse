@@ -15,18 +15,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { isHosted } from './publicurl.js';
+import { DATA_DIR } from './paths.js';
 
-export const DATA_DIR = process.env.PULSE_DATA_DIR || path.resolve(process.cwd(), 'data');
+// каталог данных — единый для базы, медиа и секрета (core/paths.js)
+export { DATA_DIR };
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// Платформы, где сервис заведомо доступен из интернета.
-const HOSTED = Boolean(
-  process.env.RAILWAY_ENVIRONMENT
-  || process.env.RENDER
-  || process.env.FLY_APP_NAME
-  || process.env.KOYEB_APP_NAME
-  || process.env.PULSE_PUBLIC_URL,
-);
+// Платформы, где сервис заведомо доступен из интернета (один список на весь
+// проект — в core/publicurl.js, чтобы «облако» не определялось по-разному).
+const HOSTED = isHosted(process.env);
 
 const SECRET_FILE = path.join(DATA_DIR, '.pulse-secret');
 const PASSWORD_FILE = path.join(DATA_DIR, 'first-login.txt');

@@ -17,6 +17,7 @@ import path from 'node:path';
 import { db, getSettings, nowIso } from '../core/db.js';
 import { uid, num, clamp, parseJson, addDays } from '../core/utils.js';
 import { log } from '../core/logger.js';
+import { publicBase as publicBaseOf } from '../core/publicurl.js';
 import { effectiveCosts } from './costs.js';
 import { enqueue } from '../core/queue.js';
 import { ensureFreshToken } from './oauth.js';
@@ -707,7 +708,7 @@ function youtubeAccount(projectId = null) {
 }
 
 function publicUrl() {
-  return String(process.env.PULSE_PUBLIC_URL || '').replace(/\/$/, '');
+  return publicBaseOf(process.env);
 }
 
 /**

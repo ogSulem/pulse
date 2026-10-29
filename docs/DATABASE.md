@@ -104,11 +104,17 @@ episodes 1─* jobs (через payload)     logs — независимый а�
 | promo | text | решение о продаже на момент сценария: `direct` / `soft` / `none` |
 | caption_platform | text | под какую площадку написан текст |
 | creative | jsonb | паспорт креатива: хук, оценки, предупреждения, альтернативы, описания по площадкам, обложка, закреплённый комментарий |
+| media_pruned_at | timestamptz | когда файл ролика удалён уборкой; запись и её статистика при этом остаются |
 
 Индексы: `(status, scheduled_at)`, `(project_id, created_at desc)`.
 
-Колонки `promo`, `caption_platform`, `creative` добавлены миграцией (`ensureColumns`) — существующие
-базы обновляются на старте без потери данных.
+Колонки `promo`, `caption_platform`, `creative`, `media_pruned_at` добавлены миграцией
+(`ensureColumns`) — существующие базы обновляются на старте без потери данных.
+
+> **Уборка медиа.** `engine/housekeeping.js` раз в 6 часов удаляет файлы старше
+> `PULSE_MEDIA_RETENTION_DAYS` (по умолчанию 14 дней) и ставит `media_pruned_at`. Удаляются только
+> `.mp4/.webm/.mov/.m4a/.mp3/.wav`; публикации, метрики и тексты остаются, поэтому отчёты и деньги
+> не ломаются. Ручной запуск: `POST /api/storage/prune` (с `dryRun` для проверки).
 
 ### publications — факт публикации (и A/B-вариант)
 | Поле | Тип | Смысл |

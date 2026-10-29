@@ -796,6 +796,13 @@ function KnowledgeTab({ knowledge, playbook }) {
               <div style={{ fontSize: 10.5, color: 'var(--muted)', lineHeight: 1.55 }}>
                 {pl.api.note}. Поля: описание ≤ {pl.fields.captionMax}{pl.fields.captionMaxBytes ? ' байт' : ''}{pl.fields.titleMax ? `, заголовок ≤ ${pl.fields.titleMax}` : ''}, тегов {pl.fields.tagRange[0]}–{pl.fields.tagRange[1]} (потолок площадки — {pl.fields.hashtagsMax}). Видео ≤ {Math.round(pl.fields.videoMaxSec / 60)} мин.
               </div>
+              {pl.windows?.best?.length > 0 && (
+                <div className="row wrap" style={{ gap: 6, marginTop: 8, alignItems: 'center' }}>
+                  <span style={{ fontSize: 10, color: 'var(--muted)' }}>Лучшие часы:</span>
+                  {pl.windows.best.map((h) => <Badge key={h} tone="accent">{h}</Badge>)}
+                  <span style={{ fontSize: 9.5, color: 'var(--muted)' }}>{pl.windows.timezone} · {pl.windows.learned ? 'по своим данным' : 'приор площадки'}</span>
+                </div>
+              )}
               <div className="card-sub" style={{ margin: '9px 0 5px' }}>Демотивируется</div>
               <div className="col" style={{ gap: 4 }}>
                 {pl.demotions.map((d) => (
@@ -857,6 +864,26 @@ function KnowledgeTab({ knowledge, playbook }) {
         </div>
       )}
 
+      {(knowledge.general.economics || []).length > 0 && (
+        <div className="card pad-lg">
+          <div className="card-head">
+            <div><h2>Экономика тысячи просмотров</h2><p>Честные диапазоны: сколько приносит охват на каждой площадке и где деньги на старте</p></div>
+            <Badge tone="muted">{knowledge.general.economics.length} строк</Badge>
+          </div>
+          <div className="col" style={{ gap: 8 }}>
+            {knowledge.general.economics.map((e) => (
+              <div key={e.id} className="row-between wrap" style={{ gap: 10, padding: '9px 11px', border: '1px solid var(--line)', borderRadius: 10, alignItems: 'flex-start' }}>
+                <div style={{ flex: '1 1 320px', minWidth: 220 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700 }}>{e.label}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--muted)', lineHeight: 1.55, marginTop: 2 }}>{e.note}</div>
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 760, color: 'var(--accent)', whiteSpace: 'nowrap' }}>{e.range}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="page-grid grid-2">
         <div className="card pad-lg">
           <div className="card-head"><div><h2>Лимиты Pulse против лимитов API</h2><p>Мы всегда ниже технического потолка — это часть стратегии роста</p></div></div>
@@ -878,6 +905,18 @@ function KnowledgeTab({ knowledge, playbook }) {
                 <Icon name="info" size={12} style={{ marginTop: 2, flex: 'none' }} />{t}
               </div>
             ))}
+            {(knowledge.general.firstWeek || []).length > 0 && (
+              <div style={{ marginTop: 6, paddingTop: 8, borderTop: '1px solid var(--line)' }}>
+                <div className="card-sub" style={{ marginBottom: 5 }}>Первая неделя</div>
+                <div className="col" style={{ gap: 4 }}>
+                  {knowledge.general.firstWeek.map((f) => (
+                    <div key={f} className="row" style={{ gap: 6, fontSize: 10.5, color: 'var(--text-2)', lineHeight: 1.5 }}>
+                      <Icon name="check" size={11} style={{ color: 'var(--green)', marginTop: 2, flex: 'none' }} />{f}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 4, lineHeight: 1.55 }}>{knowledge.general.marking.ru}</div>
             <div style={{ fontSize: 10.5, color: 'var(--muted)', lineHeight: 1.55 }}>{knowledge.general.marking.ai}</div>
           </div>

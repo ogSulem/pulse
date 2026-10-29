@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { db, getSettings, setSettings, nowIso } from '../core/db.js';
 import { log } from '../core/logger.js';
+import { publicBase as publicBaseOf } from '../core/publicurl.js';
 import { DATA_DIR } from '../core/boot.js';
 
 const MEDIA_DIR = process.env.PULSE_MEDIA_DIR || path.join(DATA_DIR, 'media');
@@ -112,13 +113,13 @@ export function stopAutopilot() {
  * а реальный ответ по сети.
  */
 export async function publicUrlCheck({ url = null, timeoutMs = 8000, fetchImpl = fetch } = {}) {
-  const base = String(url || process.env.PULSE_PUBLIC_URL || '').trim().replace(/\/+$/, '');
+  const base = String(url || publicBaseOf(process.env) || '').trim().replace(/\/+$/, '');
   if (!base) {
     return {
       ok: false,
       url: '',
-      reason: 'PULSE_PUBLIC_URL не задан',
-      hint: 'Бесплатный вариант: deploy/tunnel.sh (Cloudflare Quick Tunnel) — публичный https-адрес без домена и оплаты.',
+      reason: 'публичный адрес не задан и платформа его не сообщила',
+      hint: 'На Railway/Render/Fly адрес подставляется сам (RAILWAY_PUBLIC_DOMAIN и аналоги). Локально: deploy/tunnel.sh — бесплатный https без домена.',
     };
   }
   if (!/^https?:\/\//i.test(base)) {
@@ -170,7 +171,7 @@ export async function publicUrlCheck({ url = null, timeoutMs = 8000, fetchImpl =
       : null,
     reason: problems.length ? problems.join('; ') : null,
     hint: problems.length
-      ? 'Instagram/TikTok не смогут забрать видео по этому адресу. Проверьте проксирование /media и PULSE_PUBLIC_URL.'
+      ? 'Instagram/TikTok не смогут забрать видео по этому адресу. Проверьте проксирование /media и публичный адрес.'
       : 'Адрес открывается снаружи — Reels и TikTok смогут забрать видео по ссылке.',
     checkedAt: nowIso(),
   };

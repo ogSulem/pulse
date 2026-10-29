@@ -38,7 +38,11 @@ import { oauthStatus, startFlow, finishFlow } from '../engine/oauth.js';
 import { boot } from '../core/boot.js';
 import { framesStatus } from '../engine/frames.js';
 import { status as aiStatus } from '../providers/llm.js';
+import * as publicUrl from '../core/publicurl.js';
 import { checkLink, withUtm } from '../engine/linkcheck.js';
+
+// адрес панели считается в одном месте (core/publicurl.js)
+const { publicBase, publicHint, mediaBase } = publicUrl;
 
 export const api = express.Router();
 
@@ -110,6 +114,14 @@ api.get('/health', (_req, res) => {
         const st = aiStatus();
         return { enabled: st.enabled, active: st.active, configured: st.providers.filter((p) => p.configured).length };
       } catch { return { enabled: false, active: null, configured: 0 }; }
+    })(),
+    // hosting в healthcheck: на Railway по одному curl видно, откуда публичный
+    // адрес и не подключён ли сервис без тома (данные живут до перезапуска)
+    hosting: (() => {
+      try {
+        const { publicBase, publicSource, isHosted } = publicUrl;
+        return { hosted: isHosted(), publicUrl: publicBase(), publicSource: publicSource() || null };
+      } catch { return { hosted: false, publicUrl: '', publicSource: null }; }
     })(),
     version: '1.0.0',
   });
@@ -613,7 +625,7 @@ api.get('/oauth/status', (req, res) => {
   const origin = `${req.protocol}://${req.get('host')}`;
   res.json({
     configured: oauthStatus().some((p) => p.configured),
-    publicUrl: process.env.PULSE_PUBLIC_URL || '',
+    publicUrl: publicBase(),
     platforms: oauthStatus().map((p) => ({ ...p, redirectUri: p.redirectUri || `${origin}/api/oauth/${p.id}/callback` })),
   });
 });
@@ -1346,6 +1358,28 @@ api.get('/accounts/:id/limit', async (req, res) => {
   res.json({ platform: account.platform, connected: true, limit, source: 'api' });
 });
 
+// ─── Диск: сколько занято и уборка старых файлов ───────────────────────────
+// На Railway том ограничен, поэтому место — такая же метрика, как очередь и деньги.
+api.get('/storage', async (_req, res) => {
+  const { storageUsage } = await import('../engine/housekeeping.js');
+  res.json(storageUsage());
+});
+
+api.post('/storage/prune', async (req, res) => {
+  const { pruneMedia } = await import('../engine/housekeeping.js');
+  const days = num(req.body?.days, 0) || null;
+  const dryRun = req.body?.dryRun === true;
+  res.json(pruneMedia({ days, dryRun, includeAll: req.body?.includeAll === true }));
+});
+
+// ─── Готовность хостинга: диск, пароль, адрес, рендер, ИИ ────────────────────
+// Тот же расчёт, что печатается в лог при старте, но с деталями для панели:
+// на Railway это отвечает на вопрос «почему после рестарта пусто».
+api.get('/deploy/ready', async (_req, res) => {
+  const { deployReadiness } = await import('../engine/deploy.js');
+  res.json(deployReadiness());
+});
+
 // ─── ИИ: кто пишет тексты, ключ живой или нет ───────────────────────────────
 api.get('/ai/status', async (_req, res) => {
   const llm = await import('../providers/llm.js');
@@ -1533,7 +1567,9 @@ api.get('/studio/overview', (req, res) => {
     },
     secrets: {
       passwordIsDefault: !process.env.PULSE_PASSWORD && !boot.passwordCreated,
-      publicUrl: process.env.PULSE_PUBLIC_URL || '',
+      publicUrl: publicBase(),
+      publicHint: publicHint(),
+      mediaUrl: mediaBase(),
     },
   });
 });
