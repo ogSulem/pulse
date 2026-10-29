@@ -877,6 +877,108 @@ try {
   ok('деплой: бэкап базы', `${files.length} копия, ${projects} проектов внутри`);
 } catch (err) { fail('деплой: бэкап базы', err); }
 
+// ── итерация 13: реальные аккаунты, нейро-кадры, реклама своих продуктов ────
+try {
+  const { oauthStatus, startFlow, redirectUri } = await import('../src/engine/oauth.js');
+  const list = oauthStatus();
+  if (list.length !== 3) throw new Error(`ожидались 3 площадки, получено ${list.length}`);
+  for (const p of list) {
+    const uri = redirectUri(p.id, 'https://pulse.example.com');
+    if (!uri.endsWith(`/api/oauth/${p.id}/callback`)) throw new Error(`redirect URI для ${p.id}: ${uri}`);
+    if (!Array.isArray(p.missing)) throw new Error(`нет списка нехватающих переменных для ${p.id}`);
+  }
+  // без ключей вход не начинается, но и не падает необъяснимо
+  let message = '';
+  try { startFlow('youtube', { origin: 'https://pulse.example.com' }); } catch (err) { message = String(err.message || err); }
+  if (process.env.YOUTUBE_CLIENT_ID) { ok('oauth: площадки и redirect URI', '3 площадки, ключи заданы'); }
+  else {
+    if (!/YOUTUBE_CLIENT_ID/.test(message)) throw new Error(`неинформативная ошибка: ${message}`);
+    ok('oauth: площадки и redirect URI', '3 площадки, 2 ключа на каждую');
+  }
+} catch (err) { fail('oauth: площадки и redirect URI', err); }
+
+try {
+  process.env.PULSE_IMAGES = 'on';
+  const { framesStatus, imagePromptFor } = await import('../src/engine/frames.js');
+  const st = framesStatus();
+  if (!st.providers?.length) throw new Error('нет провайдеров картинок');
+  const prompt = imagePromptFor({ text: 'мёртвый город в тумане', visual: 'city', palette: 'ash' }, { look: 'нуар, 35 мм' });
+  if (typeof prompt !== 'string' || prompt.length < 40) throw new Error('промпт кадра не собирается');
+  const { seriesRenderInfo } = await import('../src/engine/serialrender.js');
+  const info = seriesRenderInfo();
+  if (!info.frames || !['auto', 'neural', 'procedural'].includes(info.frames.mode)) throw new Error('режим кадров не отдаётся в UI');
+  ok('кадры: провайдер, промпт, режим', `${st.active} · ${st.minGapSec} с · ${info.frames.mode}`);
+} catch (err) { fail('кадры: провайдер, промпт, режим', err); }
+
+try {
+  const { db } = await import('../src/core/db.js');
+  const cols = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  // дубль ключа в ensureColumns молча затирает колонки — проверяем обе группы
+  const series = cols('series');
+  for (const c of ['project_id', 'season_plan', 'playlist_id', 'show_id', 'notes', 'auto_compose', 'auto_render', 'lookahead', 'frame_mode']) {
+    if (!series.includes(c)) throw new Error(`в series нет колонки ${c}`);
+  }
+  const accounts = cols('accounts');
+  for (const c of ['refresh_token', 'token_scope', 'topic', 'persona', 'language', 'visual_style']) {
+    if (!accounts.includes(c)) throw new Error(`в accounts нет колонки ${c}`);
+  }
+  const products = cols('products');
+  for (const c of ['placement', 'always']) if (!products.includes(c)) throw new Error(`в products нет колонки ${c}`);
+  ok('схема: колонки итерации 13', 'series, accounts, products целы');
+} catch (err) { fail('схема: колонки итерации 13', err); }
+
+try {
+  const { promotionDecision, studio } = await import('../src/engine/creative.js');
+  const { db } = await import('../src/core/db.js');
+  const project = db.prepare('SELECT * FROM projects ORDER BY created_at LIMIT 1').get();
+  const base = { id: 'smoke-p1', name: 'Pulse Pro', url: 'https://pulse.studio/pro', pitch: 'студия в один клик' };
+
+  // «в каждом ролике» — осознанный выбор владельца, правило 80/20 отключается
+  const always = promotionDecision({ project, product: { ...base, always: 1 } });
+  if (always.intensity !== 'direct' || always.share !== 1) throw new Error(`always=1 не даёт прямой показ: ${JSON.stringify(always)}`);
+
+  // только видео: ссылки в описании нет — иначе площадка считает это спамом
+  const vid = studio({ project, product: { ...base, placement: 'video' }, platform: 'tiktok', durationSec: 30, promo: 'direct', count: 1 }).best;
+  if (String(vid.captions.tiktok).includes('pulse.studio')) throw new Error('при placement=video ссылка попала в описание');
+
+  // только описание: продукта нет в сценах — кадр остаётся чистым
+  const cap = studio({ project, product: { ...base, placement: 'caption' }, platform: 'reels', durationSec: 30, promo: 'direct', count: 1 }).best;
+  const sceneText = JSON.stringify(cap.scenes || []);
+  if (sceneText.includes('Pulse Pro')) throw new Error('при placement=caption продукт попал в сцены');
+  ok('реклама: режимы показа продукта', 'video → без ссылки, caption → без сцены, always → прямой показ');
+} catch (err) { fail('реклама: режимы показа продукта', err); }
+
+try {
+  const { seriesAutopilot, createSeries, seriesOverview } = await import('../src/engine/series.js');
+  const { db, setSettings } = await import('../src/core/db.js');
+  setSettings({ series_auto_compose: '1', series_lookahead: '2' });
+  const created = createSeries({ title: 'Smoke: мёртвая станция', genre: 'zombie', episodesPlanned: 3, episodeSec: 600 });
+  db.prepare('UPDATE series SET auto_compose = 1, lookahead = 2 WHERE id = ?').run(created.id);
+  const before = db.prepare('SELECT COUNT(*) c FROM series_episodes WHERE series_id = ?').get(created.id).c;
+  const dry = seriesAutopilot({ dryRun: true });
+  const after = db.prepare('SELECT COUNT(*) c FROM series_episodes WHERE series_id = ?').get(created.id).c;
+  if (after !== before) throw new Error('dryRun сочинил серии — GET не должен менять данные');
+  const real = seriesAutopilot();
+  const grown = db.prepare('SELECT COUNT(*) c FROM series_episodes WHERE series_id = ?').get(created.id).c;
+  if (!real.composed && grown === before) throw new Error('автопилот не сочинил ни одной серии');
+  const view = seriesOverview();
+  if (!view.autopilot || !view.frames) throw new Error('обзор сериалов не отдаёт автопилот и кадры');
+  db.prepare('DELETE FROM series_episodes WHERE series_id = ?').run(created.id);
+  db.prepare('DELETE FROM series WHERE id = ?').run(created.id);
+  ok('автопилот сериала', `dryRun без записи, реальный прогон +${grown - before} серий`);
+} catch (err) { fail('автопилот сериала', err); }
+
+try {
+  // студия: чек-лист запуска считается из реальных данных
+  const { oauthStatus } = await import('../src/engine/oauth.js');
+  const { framesStatus } = await import('../src/engine/frames.js');
+  const { providers } = await import('../src/providers/index.js');
+  const status = { frames: framesStatus(), oauth: { platforms: oauthStatus() }, providers: providers.status() };
+  if (!status.providers.llm?.length) throw new Error('провайдеры не отдают список моделей');
+  if (!status.oauth.platforms.length) throw new Error('oauth-платформы не отдаются студии');
+  ok('студия: состояние интеграций', `${status.oauth.platforms.length} площадки · ${status.frames.providers.length} картинок · ${status.providers.publish.length} публикаций`);
+} catch (err) { fail('студия: состояние интеграций', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

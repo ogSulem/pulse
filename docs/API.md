@@ -872,3 +872,74 @@ scenes, captions, audio, renderMs }`.
 Экономика: `totalViews, totalRevenueRub, watchHours, ypp{hoursLeft}, target{viewsNeeded,
 episodesNeeded}, costRub, profitRub, margin, perEpisodeCost, breakevenViews, rpm, forecast,
 plan, advice[]`.
+
+## 16. Студия, OAuth и нейро-кадры (v9)
+
+### `GET /api/oauth/status`
+
+Что настроено из OAuth и какой redirect URI вставлять в кабинет площадки:
+
+```json
+{ "configured": false, "publicUrl": "",
+  "platforms": [{ "id": "youtube", "label": "YouTube", "configured": false,
+    "redirectUri": "https://pulse.example.com/api/oauth/youtube/callback",
+    "scopes": ["youtube.upload", "youtube.readonly"],
+    "missing": ["YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET"],
+    "docs": "https://console.cloud.google.com/apis/credentials" }] }
+```
+
+Без `PULSE_PUBLIC_URL` в `redirectUri` подставляется origin запроса. `missing` — точные имена
+переменных, которых не хватает (их видно в интерфейсе, не нужно гадать).
+
+### `GET /api/oauth/{platform}/start[?accountId=…]`
+
+`platform ∈ youtube | tiktok | reels`. Возвращает `{ url, state, platform, redirectUri }` —
+фронтенд делает `location.href = url`. Без ключей приложения — `400 oauth_not_configured`
+с текстом, какие переменные добавить. `accountId` — привязать вход к уже созданной карточке
+аккаунта, иначе аккаунт заведётся сам по профилю канала.
+
+### `GET /api/oauth/{platform}/callback?code=…&state=…`
+
+Публичный (до auth-middleware). Обменивает код, тянет профиль канала, шифрует токены и
+редиректит на `/#/accounts?connected=1` либо `/#/accounts?error=<причина>`.
+
+### `GET /api/studio/overview`
+
+Чек-лист запуска и состояние интеграций:
+
+```json
+{ "mode": "live", "progress": 64, "nextStep": { "id": "product", "title": "Добавить свой продукт" },
+  "steps": [{ "id": "account", "done": true, "weight": 3, "title": "…", "text": "…",
+              "action": { "label": "Аккаунты", "to": "#/accounts" } }],
+  "stats": { "accounts": 3, "connected": 2, "withTopic": 2, "products": 1, "series": 1,
+             "seriesEpisodes": 4, "shortsPublished": 37 },
+  "integrations": { "frames": { "enabled": true, "active": "pollinations", "mode": "auto", "minGapSec": 15, "cached": 42 },
+                    "oauth": { "platforms": ["…"] }, "providers": { "…": ["…"] },
+                    "render": { "available": true }, "settings": { "series_frames": "auto" } },
+  "secrets": { "passwordIsDefault": false, "publicUrl": "https://pulse.example.com" } }
+```
+
+### `GET /api/health`
+
+Добавлен блок `frames` (`enabled, active, mode, minGapSec, cached`): по нему видно, пойдёт
+нейро-ряд или процедурные плашки, ещё до запуска серии.
+
+### Аккаунты: тема и персона
+
+`PATCH /api/accounts/{id}` принимает `topic, language, visual_style, persona` (объект: тон,
+обращение, чего не говорить). `GET /api/accounts` отдаёт `auth_state` (`ok | expired | none`),
+`refreshable`, `expires_at` и распарсенный `persona`.
+
+### Продукты: где показывать
+
+`POST /api/products` и `PATCH /api/products/{id}` принимают `placement` (`video | caption | both`,
+по умолчанию `both`) и `always` (0/1). `placement = video` убирает ссылку из описания и
+pin-комментария, `caption` — не пускает продукт в сцены, `always = 1` даёт прямой CTA в каждом
+ролике (маркировка рекламы сохраняется).
+
+### Сериалы: автопилот и фото-ряд
+
+`PATCH /api/series/{id}` дополнительно принимает `auto_compose`, `auto_render`, `lookahead` (1–6)
+и `frame_mode` (`auto | neural | procedural`). `GET /api/series` отдаёт `frames` и `autopilot`
+(`enabled, render[], lookahead, due{composed, queued, planned}`) — `due` считается в режиме
+`dryRun` и не меняет данные.

@@ -125,6 +125,8 @@ const tts = {
 
 // ── Публикация ──────────────────────────────────────────────────────────────
 // Meta Graph API (Reels) / TikTok Content Posting API.
+// Готовый к публикации токен. Публикация получает уже обновлённый (см. oauth.ensureFreshToken),
+// поэтому здесь достаточно расшифровать то, что пришло.
 const tokenOf = (account) => (account?.access_token ? decryptSecret(account.access_token) : null);
 
 const publicUrl = () => String(env.PULSE_PUBLIC_URL || '').replace(/\/$/, '');

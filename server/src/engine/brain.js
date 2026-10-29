@@ -411,7 +411,10 @@ export function platformCaption(script, platform, product = null) {
       // у Shorts ссылка в описании кликабельна, а «до конца» — главный сигнал удержания
       ? 'Ссылка ниже · досмотри до конца, там развязка'
       : 'Ссылка в описании · сохрани пост';
-  const productLine = product?.url ? `\n\n${product.name}: ${buildUtmUrl(product, platform)}` : '';
+  // placement=video → продукт живёт в кадре, описание остаётся чистым
+  const productLine = product?.url && (product.placement || 'both') !== 'video'
+    ? `\n\n${product.name}: ${buildUtmUrl(product, platform)}`
+    : '';
   // YouTube: 3–5 тегов, остальное — шум; TikTok/Reels держим до 8
   const tagLine = (platform === 'youtube' ? tags.slice(0, 5) : tags).join(' ');
   // YouTube обрезает описание по 5000 байт — держим запас, чтобы не потерять маркировку

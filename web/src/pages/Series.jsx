@@ -544,6 +544,64 @@ export default function Series() {
 
       {detail && (
         <>
+          {/* Автопилот: серии пишутся и собираются сами, человек только смотрит */}
+          <div className="card">
+            <div className="card-head">
+              <div>
+                <div className="card-title">Автопилот сериала</div>
+                <div className="card-sub">
+                  {overview?.autopilot?.due?.planned?.length
+                    ? `В плане ещё ${overview.autopilot.due.planned.length} серий — сочинятся в ближайшие 10 минут`
+                    : 'Серии сочиняются заранее на несколько выпусков вперёд'}
+                </div>
+              </div>
+              <Badge tone={overview?.frames?.enabled ? 'success' : 'muted'}>
+                {overview?.frames?.enabled ? `нейро-кадры: ${overview.frames.active || 'on'}` : 'кадры процедурные'}
+              </Badge>
+            </div>
+            <div className="card-body col" style={{ gap: 14 }}>
+              <div className="row wrap" style={{ gap: 10 }}>
+                <button className={`chip ${detail.auto_compose ? 'active' : ''}`}
+                  onClick={() => run('autocompose', () => api.updateSeries(detail.id, { auto_compose: !detail.auto_compose }), 'Автопилот обновлён')}>
+                  <Icon name="sparkles" size={12} style={{ verticalAlign: -2 }} /> писать серии заранее
+                </button>
+                <button className={`chip ${detail.auto_render ? 'active' : ''}`}
+                  onClick={() => run('autorender', () => api.updateSeries(detail.id, { auto_render: !detail.auto_render }), 'Автопилот обновлён')}>
+                  <Icon name="film" size={12} style={{ verticalAlign: -2 }} /> собирать видео без меня
+                </button>
+                <span className="muted" style={{ fontSize: 11.5 }}>
+                  {detail.auto_compose ? 'сервер дописывает серии сам' : 'серии только по кнопке'} ·{' '}
+                  {detail.auto_render ? 'рендер идёт в очереди' : 'рендер вручную'}
+                </span>
+              </div>
+              <div className="form-grid">
+                <Field label="Ряд вперёд" hint="Сколько серий держать готовыми к публикации (1–6)">
+                  <select className="select" value={detail.lookahead || 3}
+                    onChange={(e) => run('lookahead', () => api.updateSeries(detail.id, { lookahead: Number(e.target.value) }))}>
+                    {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n} серии</option>)}
+                  </select>
+                </Field>
+                <Field label="Фото-ряд" hint="Нейро-кадры дороже по времени, но выглядят как кино">
+                  <select className="select" value={detail.frame_mode || 'auto'}
+                    onChange={(e) => run('framemode', () => api.updateSeries(detail.id, { frame_mode: e.target.value }), 'Фото-ряд обновлён')}>
+                    <option value="auto">Авто (нейро, если доступно)</option>
+                    <option value="neural">Всегда нейро-кадры</option>
+                    <option value="procedural">Процедурные плашки</option>
+                  </select>
+                </Field>
+              </div>
+              {!overview?.frames?.enabled && (
+                <div className="notice">
+                  <Icon name="info" size={14} />
+                  <span>
+                    Нейро-кадры выключены: провайдер не активен. В live-режиме Pulse берёт бесплатный Flux (ключ не нужен),
+                    в demo нужен <code className="mono">PULSE_IMAGES=on</code>. Пока серия соберётся на процедурных плашках.
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+
           <div className="card">
             <div className="card-head">
               <div>

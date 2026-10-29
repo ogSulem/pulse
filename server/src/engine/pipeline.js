@@ -5,6 +5,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { db, nowIso, getSettings } from '../core/db.js';
 import { enqueue, registerHandler } from '../core/queue.js';
+import { ensureFreshToken } from './oauth.js';
 import { log } from '../core/logger.js';
 import { uid, parseJson, clamp, addMinutes, addDays, num, pick } from '../core/utils.js';
 import { buildScript, hashtagsFor, platformCaption, riskScore, generateIdeas, buildUtmUrl, nicheFor } from './brain.js';
@@ -43,9 +44,13 @@ function activeProduct(projectId) {
 }
 
 // ── Создание эпизода ────────────────────────────────────────────────────────
-export function createEpisode({ projectId, ideaId = null, scriptId = null, productId = null, accountId = null, scheduledAt = null, autopilot = 1, title = null }) {
+export function createEpisode({ projectId, ideaId = null, scriptId = null, productId = null, accountId = null, scheduledAt = null, autopilot = 1, title = null, topic = null }) {
   const project = getProject(projectId);
   if (!project) throw new Error('Проект не найден');
+  // Персона канала: тема аккаунта важнее темы проекта. Так один проект может
+  // вести «зомби-сериал» на YouTube и «полезные советы» в Reels.
+  const channel = accountId ? db.prepare('SELECT * FROM accounts WHERE id = ?').get(accountId) : null;
+  if (channel?.topic && !topic) topic = channel.topic;
   const idea = ideaId ? db.prepare('SELECT * FROM ideas WHERE id = ?').get(ideaId) : null;
   const script = scriptId ? db.prepare('SELECT * FROM scripts WHERE id = ?').get(scriptId) : null;
   const product = productId ? getProduct(productId) : activeProduct(projectId);
@@ -57,7 +62,12 @@ export function createEpisode({ projectId, ideaId = null, scriptId = null, produ
   let format = idea?.format || project.format;
 
   if (!resolvedTitle) {
-    const [generated] = generateIdeas(project, { count: 1, product });
+    // в тему канала: generateIdeas получает проект с подменённой нишей/темой,
+    // иначе у всех аккаунтов одного бренда выходят одинаковые ролики
+    const scoped = channel?.topic
+      ? { ...project, niche: channel.topic, description: `${project.description || ''} ${channel.topic}`.trim() }
+      : project;
+    const [generated] = generateIdeas(scoped, { count: 1, product });
     resolvedTitle = generated.title;
     format = generated.format;
   }
@@ -70,7 +80,7 @@ export function createEpisode({ projectId, ideaId = null, scriptId = null, produ
       id, project_id: projectId, idea_id: ideaId, script_id: scriptId, product_id: product?.id || null,
       account_id: accountId, title: resolvedTitle, description,
       hashtags: JSON.stringify(hashtags), scenes: JSON.stringify(scenes || []),
-      cover_seed: `${id}-${resolvedTitle}`, topic: resolvedTitle, format,
+      cover_seed: `${id}-${resolvedTitle}`, topic: topic || resolvedTitle, format,
       autopilot, ab_test: project.ab_tests ? 1 : 0, scheduled_at: scheduledAt, ts,
     });
 
@@ -455,6 +465,14 @@ export function consumeQuota(accountId) {
               ON CONFLICT(account_id, day) DO UPDATE SET used = used + 1`).run(accountId, day);
 }
 
+// ── Сборка серии сериала: озвучка → кадры → видео ───────────────────────────
+// Задача тяжёлая (десятки минут), поэтому живёт в очереди, а не в тике.
+registerHandler('series.render', async ({ episodeId }) => {
+  const { synthesizeEpisode, renderEpisodeById } = await import('./series.js');
+  await synthesizeEpisode(episodeId);
+  return renderEpisodeById(episodeId);
+});
+
 // ── Публикация серии сериала (16:9) ─────────────────────────────────────────
 // Длинную серию нельзя публиковать внутри тика: загрузка файла идёт минутами.
 // Поэтому планировщик сериалов ставит задачу в ту же очередь, что и короткие
@@ -568,9 +586,13 @@ registerHandler('episode.publish', async ({ episodeId }) => {
         productName: product?.name,
       }));
       const caption = campaign ? decorateCaption(marked, campaign) : marked;
+      // Токен OAuth живёт час: обновляем заранее, иначе загрузка длинного
+      // ролика оборвётся на середине с 401.
+      const freshToken = await ensureFreshToken(account).catch(() => null);
+      const liveAccount = freshToken ? { ...account, access_token: freshToken } : account;
       const result = await providers.publish.send({
         platform,
-        account,
+        account: liveAccount,
         description: caption,
         title: episode.title,
         hashtags,
@@ -708,6 +730,25 @@ function buildCaption({ episode, project, product, platform, variant, hashtags }
   }, platform, product);
 }
 
+/**
+ * Какой канал возьмёт следующий ролик: сначала свой аккаунт проекта, затем
+ * универсальный. Перегруженные (квота выбрана) и заблокированные пропускаем,
+ * иначе планировщик поставит ролик в аккаунт, который сегодня уже не может.
+ */
+function pickAccountFor(projectId) {
+  const rows = db.prepare(`SELECT * FROM accounts
+      WHERE status IN ('healthy','warmup') AND (project_id IS NULL OR project_id = ?)
+      ORDER BY quality DESC, created_at ASC`).all(projectId);
+  const day = nowIso().slice(0, 10);
+  const settings = getSettings();
+  for (const a of rows) {
+    const used = db.prepare('SELECT used FROM accounts_daily WHERE account_id = ? AND day = ?').get(a.id, day)?.used || 0;
+    const cap = Math.min(a.daily_limit, num(settings.max_daily_per_account, 3));
+    if (used < cap) return a;
+  }
+  return null;
+}
+
 function pickPlatforms(project) {
   // Площадка участвует, только если есть аккаунт, который реально может
   // публиковать И ведёт этот бренд. Иначе ролик FitFlow бесконечно ждал бы
@@ -796,7 +837,15 @@ registerHandler('autopilot.tick', async () => {
 
     const plan = nextSlotPlan(project.id);
     const idea = db.prepare("SELECT * FROM ideas WHERE project_id = ? AND status = 'new' ORDER BY score DESC, created_at ASC LIMIT 1").get(project.id);
-    const ep = createEpisode({ projectId: project.id, ideaId: idea?.id || null, scheduledAt: plan.at });
+    // Аккаунт выбираем до генерации: у него может быть своя тема (персона),
+    // и тогда ролик пишется под неё, а не под «общую нишу проекта».
+    const channel = pickAccountFor(project.id);
+    const ep = createEpisode({
+      projectId: project.id,
+      ideaId: channel?.topic ? null : (idea?.id || null),
+      accountId: channel?.id || null,
+      scheduledAt: plan.at,
+    });
     log({
       level: 'info', actor: 'autopilot', action: 'autopilot.fill', entityType: 'episode', entityId: ep.id,
       message: `Автопилот добавил в конвейер: «${ep.title}» — ${plan.reason}`,
