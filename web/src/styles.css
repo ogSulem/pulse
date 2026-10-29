@@ -1089,3 +1089,109 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .step-card.done .step-num { background: rgba(52, 211, 153, .2); color: var(--green); border-color: rgba(52, 211, 153, .32); }
 .step-label { display: block; font-size: 12px; font-weight: 650; line-height: 1.35; }
 .step-hint { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Паспорт ролика: кто сделал каждый шаг. Тонкая вертикальная линия и точки —
+   чтобы читалось как маршрут, а не как таблица.
+   ───────────────────────────────────────────────────────────────────────────── */
+.passport-step {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 0 9px 0; position: relative;
+}
+.passport-step + .passport-step { border-top: 1px solid var(--line); }
+.passport-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex: none; border-radius: 8px;
+  background: rgba(139, 92, 246, .14); color: var(--violet-3);
+  border: 1px solid rgba(167, 139, 250, .22);
+}
+.passport-dot.on { background: rgba(52, 211, 153, .14); color: var(--green); border-color: rgba(52, 211, 153, .28); }
+.passport-dot.human { background: rgba(103, 232, 249, .12); color: var(--cyan); border-color: rgba(103, 232, 249, .26); }
+
+/* Автор текста в строке очереди: маленькая метка, не спорит с бейджами статусов */
+.ep-author {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  padding: 2px 7px; border-radius: 99px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, .03);
+  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* «Как это работает» — свёрнутый блок на первом экране: один раз нужно, но
+   каждый день перед глазами держать не обязательно */
+.how-card {
+  border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--surface); padding: 0 18px;
+}
+.how-card > summary {
+  display: flex; align-items: center; gap: 9px;
+  padding: 14px 0; cursor: pointer; list-style: none;
+  font-size: 12.5px; font-weight: 600; color: var(--text-2);
+}
+.how-card > summary::-webkit-details-marker { display: none; }
+.how-card[open] > summary { border-bottom: 1px solid var(--line); color: var(--text); }
+.how-card[open] > summary .icon:last-child { transform: rotate(180deg); }
+.how-card > summary .icon:last-child { transition: transform .18s ease; }
+.how-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 16px 0 18px; }
+@media (max-width: 1100px) { .how-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .how-grid { grid-template-columns: minmax(0, 1fr); } }
+.how-step { padding-left: 10px; border-left: 1px solid var(--line); }
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   Полировка (v16): то, что отличает «сделано на скорую руку» от продукта —
+   ровные цифры, спокойные акценты, одинаковые отступы и предсказуемый фокус.
+   Ничего не переопределяет по смыслу, только доводит форму.
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+/* Цифры в одну ширину: колонки сумм и KPI не «прыгают» при обновлении */
+.kpi-value, .money-band-value, .hr-stat .v, .stage-num, .money-band-stats b,
+.quota span, .reel-metric, .suffix, .mono, table td, table th {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' on, 'ss01' on;
+}
+
+/* Заголовки карточек: чуть строже иерархия, воздух между уровнями */
+.card-head { margin-bottom: 18px; }
+.card-head h2 { font-size: 17px; font-weight: 720; letter-spacing: -0.028em; line-height: 1.25; }
+.card-head p { font-size: 12.5px; line-height: 1.5; margin-top: 5px; max-width: 62ch; }
+.card-title h3 { font-size: 14.5px; font-weight: 680; }
+.card-title .sub { font-size: 11.5px; }
+.card { border-radius: var(--r-lg); }
+
+/* Фокус: видно, где ты, если ходишь табом. Раньше было просто «нет фокуса» */
+:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, .6);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+::selection { background: rgba(139, 92, 246, .32); color: var(--text); }
+
+/* Полоса демо-режима: спокойная, не кричит с каждого экрана */
+.demo-strip {
+  border-color: rgba(167, 139, 250, .18);
+  background: linear-gradient(90deg, rgba(124, 58, 237, .09), rgba(124, 58, 237, .02));
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+/* Скроллбар: тонкий, в цвет темы, не системный «серый кирпич» */
+* { scrollbar-width: thin; scrollbar-color: rgba(167, 139, 250, .28) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(167, 139, 250, .22);
+  border-radius: 99px; border: 3px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(167, 139, 250, .38); background-clip: content-box; }
+
+/* Таблицы и строки: чуть больше воздуха — плотность читается как «сложно» */
+.episode-row { padding: 12px 14px; }
+.episode-row:hover { background: rgba(255, 255, 255, .045); }
+
+/* Плашка режима в сайдбаре: спокойнее и честнее */
+.mode-card { border-radius: var(--r-md); }
+.mode-line b { font-variant-numeric: tabular-nums; }
+
+/* Кнопки и чипы: одинаковая геометрия на всех экранах */
+.chip { border-radius: 10px; }
+.badge { padding: 3px 9px; }

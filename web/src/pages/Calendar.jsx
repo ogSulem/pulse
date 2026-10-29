@@ -254,7 +254,7 @@ export default function Calendar() {
         </div>
 
         <div className="card">
-          <div className="card-title"><h3>Скоро выйдут</h3><a className="link-btn" href="#/queue">в очередь <Icon name="chevronRight" size={12} /></a></div>
+          <div className="card-title"><h3>Скоро выйдут</h3><a className="link-btn" href="#/create/queue">в очередь <Icon name="chevronRight" size={12} /></a></div>
           <div className="col" style={{ gap: 8 }}>
             {episodes.filter((e) => e.status === 'scheduled' && e.scheduled_at).sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at)).slice(0, 5).map((e) => (
               <button key={e.id} onClick={() => setSelected(e.id)} className="row" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', gap: 10, textAlign: 'left' }}>

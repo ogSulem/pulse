@@ -355,7 +355,7 @@ export default function Money() {
               <div className="card-title">Спонсорские кампании</div>
               <div className="card-sub">начисления по выходам внутри периода · оплаты — накопительно</div>
             </div>
-            <a className="btn btn-ghost btn-sm" href="#/ads"><Icon name="megaphone" size={14} /> Реклама</a>
+            <a className="btn btn-ghost btn-sm" href="#/money/ads"><Icon name="megaphone" size={14} /> Реклама</a>
           </div>
           <div className="col" style={{ gap: 8 }}>
             {money_.sponsor.map((c) => {
@@ -395,7 +395,7 @@ export default function Money() {
               <div className="card-title">Длинные серии</div>
               <div className="card-sub">{money_.longform.note}</div>
             </div>
-            <a className="btn btn-ghost btn-sm" href="#/series"><Icon name="film" size={14} /> Сериалы</a>
+            <a className="btn btn-ghost btn-sm" href="#/create/series"><Icon name="film" size={14} /> Сериалы</a>
           </div>
           <div className="col" style={{ gap: 10 }}>
             <div className="grid-4">
@@ -440,7 +440,7 @@ export default function Money() {
             <div className="card-title">Из чего считается доход</div>
             <div className="card-sub">все ставки — в настройках, меняются без перезапуска</div>
           </div>
-          <a className="btn btn-ghost btn-sm" href="#/settings"><Icon name="settings" size={14} /> Настроить</a>
+          <a className="btn btn-ghost btn-sm" href="#/settings/main"><Icon name="settings" size={14} /> Настроить</a>
         </div>
         <div className="assumption-grid">
           <div><span>RPM Reels</span><b>{money(money_?.assumptions?.rpmReels, currency)}</b><em>за 1000 просмотров</em></div>

@@ -34,10 +34,10 @@ export default function Accounts() {
     if (q.get('connected')) {
       toast.push({ tone: 'success', title: 'Канал подключён', text: `@${q.get('handle') || ''} — токен сохранён и будет обновляться сам` });
       refresh(); refreshLight();
-      window.history.replaceState(null, '', '#/accounts');
+      window.history.replaceState(null, '', '#/channels/accounts');
     } else if (q.get('error')) {
       toast.push({ tone: 'error', title: 'Подключение не удалось', text: q.get('error') });
-      window.history.replaceState(null, '', '#/accounts');
+      window.history.replaceState(null, '', '#/channels/accounts');
     }
   }, []);
 
@@ -358,7 +358,7 @@ export default function Accounts() {
               ? 'Без аудита клиента TikTok публикует только в приватный аккаунт (SELF_ONLY) — Pulse выставит это автоматически.'
               : connecting?.platform === 'youtube'
                 ? 'Без аудита проекта Google загрузки уходят приватно; после аудита включите публичность в настройках. Отдельного Shorts API нет — вертикальное видео ≤ 3 минут считается автоматически.'
-                : 'Instagram забирает видео по публичному адресу: задайте PULSE_PUBLIC_URL в .env (например, https://pulse.example.com).'}
+                : 'Instagram забирает видео по публичному адресу. На Railway/Render/Fly он подставляется сам, локально — bash deploy/tunnel.sh.'}
           </div>
         </div>
       </Modal>

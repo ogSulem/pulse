@@ -1297,6 +1297,44 @@ try {
 } catch (err) { fail('каталог данных', err); }
 
 try {
+  // Паспорт ролика: после шага «сценарий» в базе видно, кто его написал —
+  // модель или шаблон. Раньше это было только в журнале, и в карточке нельзя
+  // было ответить на вопрос «этот текст ИИ писал?».
+  const { createEpisode } = await import('../src/engine/pipeline.js');
+  const { enqueue, drain } = await import('../src/core/queue.js');
+  const { aiPassport, scriptAuthor, markAi } = await import('../src/engine/aimeta.js');
+  const { db } = await import('../src/core/db.js');
+
+  const project = db.prepare('SELECT id FROM projects LIMIT 1').get();
+  const ep = createEpisode({ projectId: project.id, autopilot: 0 }).id;
+  enqueue('episode.prepare', { episodeId: ep });
+  await drain(6);
+
+  const row = db.prepare('SELECT ai_meta, scenes FROM episodes WHERE id = ?').get(ep);
+  const passport = aiPassport(row.ai_meta);
+  const author = scriptAuthor(row.ai_meta);
+  if (!passport.steps.length) throw new Error('паспорт пуст после шага «сценарий»');
+  if (!author) throw new Error('автор сценария не определён');
+  // в CI ключей нет: должен быть честный шаблон, а не выдуманная модель
+  if (author.ai) throw new Error('без ключей автор сценария не может быть моделью');
+  if (author.label !== 'шаблон Content Brain') throw new Error(`автор сценария: ${author.label}`);
+  if (author.short !== 'шаблон') throw new Error('для строки очереди нужна короткая подпись автора');
+  if (!passport.steps.some((s) => s.id === 'script')) throw new Error('шага «сценарий» нет в паспорте');
+
+  // остальные шаги пишутся тем же механизмом: голос, кадры, монтаж, публикация
+  markAi(ep, 'voice', { provider: 'edge', model: 'ru-RU-DmitryNeural', note: '31 с' });
+  markAi(ep, 'render', { provider: 'ffmpeg', model: '1080×1920 @ 30 fps', ms: 2400 });
+  const full = aiPassport(db.prepare('SELECT ai_meta FROM episodes WHERE id = ?').get(ep).ai_meta);
+  for (const step of ['script', 'voice', 'render']) {
+    if (!full.steps.some((x) => x.id === step)) throw new Error(`шаг ${step} не попал в паспорт`);
+  }
+  if (!full.models.includes('ru-RU-DmitryNeural')) throw new Error('модель озвучки не попала в сводку');
+  if (full.steps.find((x) => x.id === 'render').ms !== 2400) throw new Error('время рендера потерялось');
+  db.prepare('DELETE FROM episodes WHERE id = ?').run(ep);
+  ok('паспорт ролика', `${full.steps.length} шага: ${full.summary || 'шаблон'}`);
+} catch (err) { fail('паспорт ролика', err); }
+
+try {
   // Навигация: пять разделов, у каждого — вкладки, и у каждой вкладки есть экран.
   // Проверка ловит типичную ошибку рефакторинга: вкладку добавили в меню, а
   // компонент не подключили — получается пустой экран без ошибки в консоли.

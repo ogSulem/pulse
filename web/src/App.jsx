@@ -25,7 +25,7 @@ import LaunchModal from './components/LaunchModal.jsx';
 
 // Пятнадцать пунктов в сайдбаре — это не удобство, а ежедневный поиск «где что
 // лежит». Меню теперь из пяти разделов (см. lib/nav.js), внутри раздела —
-// вкладки. Старые адреса вроде #/analytics работают: они разрешаются в пару
+// вкладки. Старые адреса вроде #/money/analytics работают: они разрешаются в пару
 // «раздел/вкладка», поэтому ссылки и закладки не ломаются.
 const ROUTE_TITLES = {
   'today/today': ['Сегодня', 'Один следующий шаг, деньги и то, что мешает зарабатывать'],
@@ -95,8 +95,8 @@ function Shell({ data, refresh, refreshLight, loading }) {
   const activeCount = (data.pipeline?.queued || 0) + (data.pipeline?.generating || 0);
   const reviewCount = data.pipeline?.review || 0;
   const badgeValue = (kind) => (kind === 'review' ? reviewCount : kind === 'active' ? activeCount : 0);
-  const [title, sub] = ROUTE_TITLES[`${route.section}/${route.tab}`] || [section.title, section.sub];
-  const meta = { title, sub };
+  // заголовок вкладки; описание раздела живёт в самом экране, а не в шапке
+  const meta = { title: (ROUTE_TITLES[`${route.section}/${route.tab}`] || [section.title])[0] };
 
   // Один экран на пару «раздел/вкладка». Ничего не грузится заранее: вкладка
   // открывается по клику, поэтому первый экран остаётся быстрым.
@@ -221,15 +221,16 @@ function Shell({ data, refresh, refreshLight, loading }) {
         )}
 
         <header className="topbar">
+          {/* Одна строка: где я и что происходит. Подзаголовок раздела убран —
+              он дублировал вкладки и заголовок самого экрана. */}
           <div>
             <div className="topbar-title">{meta.title}</div>
             <div className="topbar-sub">
-              <span>{meta.sub}</span>
-              <span style={{ opacity: 0.4 }}>·</span>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                 <span style={{ width: 5, height: 5, borderRadius: 9, background: activeCount ? 'var(--violet-2)' : 'var(--green)', boxShadow: `0 0 8px ${activeCount ? 'var(--violet-2)' : 'var(--green)'}` }} />
                 {activeCount ? `${activeCount} ${plural(activeCount, 'ролик', 'ролика', 'роликов')} в работе` : 'конвейер свободен'}
               </span>
+              {reviewCount > 0 && <span>· {reviewCount} ждут подтверждения</span>}
             </div>
           </div>
           <div className="topbar-actions">
@@ -258,10 +259,10 @@ function Shell({ data, refresh, refreshLight, loading }) {
           <div className="demo-strip">
             <Icon name="info" size={14} />
             <span>
-              <b>Демо-режим.</b> Ролики, просмотры и доход симулируются — реальных выплат здесь нет.
-              Для заработка переключите <code>PULSE_MODE=live</code>, подключите аккаунты и ключи провайдеров.
+              <b>Демо-режим.</b> Ролики и доход симулируются. Для заработка: <code>PULSE_MODE=live</code>,
+              каналы и ключи — дальше всё считает автопилот.
             </span>
-            <a className="link-btn" href="#/settings">Настройки <Icon name="arrowUpRight" size={11} /></a>
+            <a className="link-btn" href="#/settings/main">Настройки <Icon name="arrowUpRight" size={11} /></a>
           </div>
         )}
 
@@ -275,7 +276,7 @@ function Shell({ data, refresh, refreshLight, loading }) {
         )}
       </div>
 
-      <LaunchModal open={launch} onClose={() => setLaunch(false)} onDone={() => { refresh(); window.location.hash = '#/queue'; }} />
+      <LaunchModal open={launch} onClose={() => setLaunch(false)} onDone={() => { refresh(); window.location.hash = '#/create/queue'; }} />
     </div>
   );
 }

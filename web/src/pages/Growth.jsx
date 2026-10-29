@@ -151,14 +151,14 @@ export default function Growth() {
             <h2 style={{ fontSize: 22, fontWeight: 790, letterSpacing: '-0.035em', marginTop: 10 }}>
               Аккаунты, которые растут
             </h2>
-            <p className="dim" style={{ fontSize: 12.5, marginTop: 8, lineHeight: 1.6, maxWidth: 570 }}>
-              Reels, TikTok и Shorts в одном портфеле: у каждого аккаунта свой темп, окно публикаций и план прогрева.
-              Pulse считает удержание по площадкам, подсказывает хуки под алгоритм и показывает, сколько осталось до монетизации.
+            <p className="dim" style={{ fontSize: 12.5, marginTop: 8, lineHeight: 1.6, maxWidth: 540 }}>
+              У каждого аккаунта свой темп и окно публикаций. Удержание, хуки и путь до монетизации считаются
+              по вашим данным, а не по общим советам.
             </p>
             <div className="row wrap" style={{ gap: 8, marginTop: 14 }}>
-              <a className="btn btn-primary" href="#/accounts"><Icon name="at" size={15} />Аккаунты и квоты</a>
-              <a className="btn btn-ghost" href="#/ads"><Icon name="megaphone" size={14} />Реклама</a>
-              <a className="btn btn-ghost" href="#/money"><Icon name="target" size={14} />Деньги</a>
+              <a className="btn btn-primary" href="#/channels/accounts"><Icon name="at" size={15} />Аккаунты</a>
+              <a className="btn btn-ghost" href="#/money/ads"><Icon name="megaphone" size={14} />Реклама</a>
+              <a className="btn btn-ghost" href="#/money/totals"><Icon name="target" size={14} />Деньги</a>
             </div>
           </div>
           <div className="row wrap" style={{ gap: 26 }}>
@@ -267,7 +267,7 @@ export default function Growth() {
 
         {!loading && !accounts.length && (
           <Empty icon="at" title="Аккаунтов пока нет" text="Добавьте первый аккаунт — Pulse построит для него план прогрева и темп."
-            action={<a className="btn btn-primary btn-sm" href="#/accounts"><Icon name="plus" size={14} />Добавить</a>} />
+            action={<a className="btn btn-primary btn-sm" href="#/channels/accounts"><Icon name="plus" size={14} />Добавить</a>} />
         )}
 
         <div className="page-grid grid-2" style={{ marginBottom: 14 }}>

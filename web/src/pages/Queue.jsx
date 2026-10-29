@@ -1,9 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
-import Icon, { PlatformIcon } from '../components/Icons.jsx';
+import Icon from '../components/Icons.jsx';
 import { Badge, Progress, Empty, useToast } from '../components/ui.jsx';
-import { platformLabel } from '../lib/format.js';
 import EpisodeDrawer from '../components/EpisodeDrawer.jsx';
 import { fmt, dateTime, relative, STATUS_META, FORMAT_LABELS, plural } from '../lib/format.js';
 
@@ -109,6 +108,12 @@ export default function Queue({ onLaunch }) {
                     <span className="hide-md" style={{ opacity: 0.5 }}>·</span>
                     <span className="hide-md">{FORMAT_LABELS[e.format] || e.format}</span>
                     {e.viral > 0 && <Badge tone={e.viral >= 65 ? 'success' : e.viral >= 45 ? 'warn' : 'danger'}>скор {e.viral}</Badge>}
+                    {/* автор текста: видно, писал модель или шаблон — без открытия карточки */}
+                    {e.author && (
+                      <span className="ep-author" title={`Сценарий: ${e.author.model || e.author.label}`}>
+                        <Icon name="sparkles" size={9} />{e.author.short || e.author.label}
+                      </span>
+                    )}
                     {e.campaign_name && <Badge tone="accent"><Icon name="megaphone" size={10} /> {e.campaign_brand || 'реклама'}</Badge>}
                     {e.compliance && !e.compliance.ok && <Badge tone="danger"><Icon name="shield" size={10} /> правила</Badge>}
                     {e.risk >= 55 && <Badge tone={e.risk >= 70 ? 'danger' : 'warn'}>риск {e.risk}</Badge>}
@@ -151,7 +156,7 @@ export default function Queue({ onLaunch }) {
         </div>
       </div>
 
-      <div className="page-grid grid-3">
+      <div className="page-grid grid-2">
         <div className="card">
           <div className="card-title"><h3>Как читать статусы</h3><Icon name="info" size={14} style={{ color: 'var(--muted)' }} /></div>
           <div className="col" style={{ gap: 9 }}>
@@ -187,33 +192,6 @@ export default function Queue({ onLaunch }) {
             onClick={async () => { const r = await api.requeue(); toast.push({ title: 'Очередь восстановлена', text: `Перезапущено: ${r.requeued}, восстановлено: ${r.stale + r.swept + r.revived}`, tone: 'success' }); refreshLight(); }}>
             <Icon name="refresh" size={13} />Восстановить очередь
           </button>
-        </div>
-        <div className="card">
-          <div className="card-title"><h3>Площадки</h3></div>
-          <div className="col" style={{ gap: 10 }}>
-            {['reels', 'tiktok', 'youtube'].map((platform) => {
-              const list = (data.accounts || []).filter((a) => a.platform === platform);
-              const cap = list.reduce((a, x) => a + x.cap, 0);
-              const used = list.reduce((a, x) => a + x.used_today, 0);
-              return (
-                <div key={platform} className="card flat" style={{ padding: 12 }}>
-                  <div className="row-between" style={{ marginBottom: 8 }}>
-                    <span className="row" style={{ gap: 7, fontSize: 12.5, fontWeight: 650 }}>
-                      <PlatformIcon platform={platform} size={14} />{platformLabel(platform)}
-                    </span>
-                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>{list.length} акк.</span>
-                  </div>
-                  <div className="quota">
-                    <div className="quota-bar"><i style={{ width: `${cap ? Math.min(100, (used / cap) * 100) : 0}%` }} /></div>
-                    <span style={{ fontSize: 10.5, color: 'var(--muted)' }}>{used}/{cap}</span>
-                  </div>
-                </div>
-              );
-            })}
-            <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.55 }}>
-              Лимиты на публикации в день и минимальный интервал защищают аккаунты от перегрузки.
-            </div>
-          </div>
         </div>
       </div>
 

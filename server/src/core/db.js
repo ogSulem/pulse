@@ -375,6 +375,9 @@ function ensureColumns() {
       creative: "TEXT DEFAULT '{}'",
       // файл убран плановой уборкой диска: статистика осталась, mp4 можно пересобрать
       media_pruned_at: 'TEXT',
+      // паспорт ролика: кто сделал каждый шаг (модель сценария, голос, кадры,
+      // монтаж, публикация) — см. engine/aimeta.js
+      ai_meta: "TEXT DEFAULT '{}'",
     },
     accounts: {
       access_token: 'TEXT',

@@ -1017,8 +1017,37 @@ pin-комментария, `caption` — не пускает продукт в 
   ] }
 ```
 
+### Паспорт в выдаче эпизодов
+
+Каждый эпизод в `GET /api/episodes` и `GET /api/episodes/{id}` несёт два поля:
+
+```json
+{ "ai": { "steps": [ { "id": "voice", "label": "Озвучка", "provider": "edge",
+                       "providerLabel": "Edge TTS", "model": "ru-RU-DmitryNeural",
+                       "note": "31 с", "ms": null, "demo": false, "at": "…" } ],
+          "aiSteps": 3, "models": ["ru-RU-DmitryNeural"], "summary": "Edge TTS · ffmpeg" },
+  "author": { "label": "шаблон Content Brain", "short": "шаблон", "model": null, "ai": false } }
+```
+
+`author.ai: false` означает, что сценарий собран шаблонами, а не моделью — это видно и в списке
+очереди (короткая метка), и в карточке ролика (вкладка «Как сделано»).
+
 `configured` — есть ли ключ (для локальной Ollama — включена ли она), `free` — есть ли бесплатный
 уровень, `callsToday` — расход суточной квоты из `data/ai-cache/usage.json`.
+
+### `GET /api/ai/chain`
+
+Вся цепочка «как это делается» одним ответом — для блока «Как это работает» и вкладки
+«Как сделано» в карточке ролика. Восемь шагов, у каждого: `by` (кто делает), `tool` (чем
+сейчас), `live` (подключено ли по-настоящему), `fallback` (что будет без ключа), `human`.
+
+```json
+{ "steps": [
+    { "id": "script", "label": "Сценарий и описание", "by": "языковая модель",
+      "tool": "Content Brain — детерминированные шаблоны", "live": false,
+      "fallback": "без ключа текст шаблонный — проще и суше", "human": false }
+  ], "automated": 7, "human": 1 }
+```
 
 ### `POST /api/ai/test`
 

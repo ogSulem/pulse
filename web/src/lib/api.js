@@ -118,6 +118,7 @@ export const api = {
   storage: () => request('/storage'),
   storagePrune: (payload = {}) => request('/storage/prune', { method: 'POST', body: payload }),
   aiStatus: () => request('/ai/status'),
+  aiChain: () => request('/ai/chain'),
   aiTest: () => request('/ai/test', { method: 'POST', body: {} }),
   composeSeriesEpisodeAi: (id) => request(`/series/episodes/${id}/ai`, { method: 'POST', body: {} }),
 
