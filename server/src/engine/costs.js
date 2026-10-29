@@ -29,7 +29,8 @@ export function freeStack() {
   try {
     llmProvider = llm.current();
     const info = llm.status().providers.find((p) => p.id === llmProvider);
-    llmFree = Boolean(info?.free);
+    // нет ни одного ключа → работает встроенный Content Brain: платить не за что
+    llmFree = !llmProvider || Boolean(info?.free);
   } catch { /* пустой статус не ломает расчёт */ }
 
   return {
