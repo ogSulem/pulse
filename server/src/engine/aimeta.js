@@ -44,6 +44,10 @@ const PROVIDER_LABELS = {
   piper: 'Piper (локально)',
   edge: 'Edge TTS',
   ffmpeg: 'ffmpeg',
+  'platform-api': 'API площадки',
+  'instagram-api': 'Instagram API',
+  'tiktok-api': 'TikTok API',
+  'youtube-api': 'YouTube API',
 };
 
 /**
