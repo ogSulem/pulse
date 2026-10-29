@@ -3,7 +3,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon from '../components/Icons.jsx';
 import { Badge, Field, Modal, Confirm, Empty, useToast } from '../components/ui.jsx';
-import { PRODUCT_TEMPLATES, fmt } from '../lib/format.js';
+import { PRODUCT_TEMPLATES, fmt, relative } from '../lib/format.js';
 
 const blank = { name: '', url: '', pitch: '', proof: '', template: 'review', utm_source: 'reels', utm_medium: 'short', utm_campaign: '', active: true, placement: 'both', always: false };
 
@@ -40,6 +40,14 @@ export default function Products() {
   useEffect(() => {
     api.analytics({ days: 30 }).then((o) => setClicks(o.totals?.clicks || 0)).catch(() => {});
   }, [data.products]);
+
+  // Свежая проверка важнее сохранённой: после «Проверить ссылку» показываем её,
+  // до проверки — последний вердикт из базы (и когда он был).
+  const verdict = (p) => links[p.id] || {
+    level: p.link_level || 'error',
+    note: p.link_note || 'Ссылка ещё не проверялась',
+    checkedAt: p.link_checked_at,
+  };
 
   // Проверка ссылки глазами зрителя. Битая ссылка = ролики выходят, денег нет,
   // поэтому результат показываем прямо в карточке, а не в консоли.
@@ -147,16 +155,23 @@ export default function Products() {
             <div style={{ fontSize: 10.5, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 600, marginBottom: 6 }}>ссылка для описания</div>
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--violet-3)', wordBreak: 'break-all', lineHeight: 1.6 }}>{utmPreview(p)}</div>
 
-            {links[p.id] && (
+            {links[p.id] === null ? (
+              <div className="notice" style={{ marginTop: 10 }}>
+                <Icon name="refresh" size={13} /><span>Проверяем ссылку…</span>
+              </div>
+            ) : (links[p.id] || p.link_level) ? (
               <div className="notice" style={{ marginTop: 10 }}>
                 <Icon
-                  name={links[p.id].level === 'ok' ? 'check' : links[p.id].level === 'warn' ? 'alert' : 'x'}
+                  name={verdict(p).level === 'ok' ? 'check' : verdict(p).level === 'warn' ? 'alert' : 'x'}
                   size={14}
-                  style={{ color: links[p.id].level === 'ok' ? 'var(--green)' : links[p.id].level === 'warn' ? 'var(--amber)' : 'var(--red)' }}
+                  style={{ color: verdict(p).level === 'ok' ? 'var(--green)' : verdict(p).level === 'warn' ? 'var(--amber)' : 'var(--red)' }}
                 />
-                <span>{links[p.id].note}</span>
+                <span>
+                  {verdict(p).note}
+                  {verdict(p).checkedAt ? <span style={{ color: 'var(--muted)' }}> · проверено {relative(verdict(p).checkedAt)}</span> : null}
+                </span>
               </div>
-            )}
+            ) : null}
 
             <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => checkLink(p)}>
               <Icon name="link" size={12} />Проверить ссылку

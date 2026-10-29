@@ -761,6 +761,10 @@ api.post('/products/:id/check', async (req, res) => {
   if (!target) return res.status(400).json({ error: 'validation', message: 'У продукта нет ссылки' });
   const result = await checkLink(target, { timeoutMs: num(req.body?.timeoutMs, 8000) });
   const link = withUtm(target, { source: p.utm_source, medium: p.utm_medium, campaign: p.utm_campaign });
+  // вердикт остаётся в карточке продукта: не нужно проверять заново, чтобы вспомнить,
+  // что ссылка сломана — и видно, когда её проверяли в последний раз
+  db.prepare('UPDATE products SET link_checked_at = ?, link_status = ?, link_level = ?, link_note = ? WHERE id = ?')
+    .run(nowIso(), result.status, result.level, String(result.note || ''), p.id);
   if (result.level !== 'ok') {
     log({
       level: result.level === 'warn' ? 'warn' : 'error', actor: 'user', action: 'product.link_checked',
