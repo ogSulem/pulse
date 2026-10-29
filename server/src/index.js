@@ -71,7 +71,7 @@ migrate();
 // задачи, которые выполнялись в момент прошлого убийства/рестарта контейнера,
 // возвращаются в очередь сразу — иначе ролик ждёт истечения 5-минутного lease
 recoverOrphans();
-seedIfEmpty();
+await seedIfEmpty();
 log({ level: 'info', actor: 'system', action: 'server.start', message: `Pulse запущен в режиме ${process.env.PULSE_MODE || 'demo'}` });
 
 // Первичное наполнение трафика (только demo): клики и конверсии из счётчиков

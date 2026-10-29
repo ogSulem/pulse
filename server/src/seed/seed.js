@@ -150,7 +150,7 @@ function makePublicationsFor(episode, project, accounts, rnd, publishedAt) {
   return out;
 }
 
-export function seedBase() {
+export async function seedBase() {
   ensureSettings();
   // демо-проект условно прошёл аудит Google: иначе вся история Shorts была бы приватной
   // и экран роста показывал бы нули. В live это включает владелец после проверки проекта.
@@ -204,7 +204,7 @@ export function seedBase() {
       const id = uid('id_');
       const status = rnd() > 0.72 ? 'used' : 'new';
       db.prepare(`INSERT INTO ideas (id, project_id, title, hook, angle, format, tags, score, source, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ai', ?, ?)`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'template', ?, ?)`)
         .run(id, project.id, i.title, i.hook, i.angle, i.format, JSON.stringify(i.tags), i.score, status, addDays(ts, -(20 - idx * 3)));
       ideaRows.push({ ...i, id, status });
     }
@@ -437,20 +437,39 @@ export function seedBase() {
       .run(uid('log_'), new Date(now - i * 1000 * 60 * (6 + rnd() * 18)).toISOString(), level, actor, action, 'system', '', message, '{}');
   }
 
+  // ── демо-сериал ───────────────────────────────────────────────────────────
+  // Пустой раздел «Сериалы» на первом запуске выглядит как недоделка. Держим один
+  // готовый сериал с серией в стадии сценария: видно формат, экономику и автопилот.
+  try {
+    const { createSeries, composeEpisode } = await import('../engine/series.js');
+    const series = createSeries({
+      title: 'Мёртвая станция',
+      genre: 'zombie',
+      episodesPlanned: 8,
+      episodeSec: 900,
+      logline: 'Двенадцать выживших держат последнюю станцию метро — и не говорят, что живёт в тоннеле.',
+    });
+    const ep = composeEpisode({ seriesId: series.id, episodeNo: 1 });
+    db.prepare("UPDATE series SET auto_compose = 1, lookahead = 3 WHERE id = ?").run(series.id);
+    if (ep?.id) db.prepare("UPDATE series_episodes SET stage = 'script' WHERE id = ?").run(ep.id);
+  } catch (err) {
+    log({ level: 'warn', actor: 'seed', action: 'seed.series_failed', message: `Демо-сериал не создан: ${String(err.message || err).slice(0, 160)}` });
+  }
+
   return { projects: PROJECTS.length, accounts: ACCOUNTS.length, publications: publishedCount };
 }
 
-export function seedIfEmpty() {
+export async function seedIfEmpty() {
   const count = db.prepare('SELECT COUNT(*) n FROM projects').get().n;
   if (count > 0) return false;
-  const res = seedBase();
+  const res = await seedBase();
   log({ level: 'success', actor: 'system', action: 'seed.created', message: `Демо-стенд готов: ${res.projects} проекта, ${res.publications} публикаций в истории` });
   return true;
 }
 
-export function reseed() {
+export async function reseed() {
   truncateAll();
-  seedBase();
+  await seedBase();
   log({ level: 'success', actor: 'system', action: 'seed.reseed', message: 'Демо-данные пересозданы' });
   return true;
 }

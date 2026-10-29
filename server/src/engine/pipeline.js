@@ -20,7 +20,8 @@ import {
 import { preferredVariant, evaluateAB } from './abtest.js';
 import { checkCompliance, disclosureText, saveCompliance, PLATFORM_RULES } from './compliance.js';
 import { scoreViral, saveViral, recalibrate } from './viral.js';
-import { studio, promotionDecision } from './creative.js';
+import { studio, promotionDecision, enrichPackage } from './creative.js';
+import * as aiContent from './ai.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -128,7 +129,35 @@ registerHandler('episode.prepare', async ({ episodeId }) => {
       promo: decision.intensity,
       count: 3,
     });
+    // ИИ-усиление: модель переписывает хук, сцены и теги под тему канала.
+    // Недоступна — остаётся шаблонный пакет, ролик всё равно выходит.
     creative = pack.best;
+    try {
+      const { available: aiOn } = await import('./ai.js');
+      if (aiOn()) {
+        const persona = accountPersonaFor(episode.account_id);
+        const enriched = await enrichPackage(pack.best, {
+          project,
+          idea: idea || { title: episode.title, format: episode.format },
+          product: chosenProduct,
+          platform: 'reels',
+          durationSec: project.duration_sec,
+          promo: decision.intensity,
+          topic: episode.topic || '',
+          persona,
+        });
+        if (enriched?.ai) {
+          creative = enriched;
+          log({
+            level: 'info', actor: 'ai', action: 'episode.ai_script', entityType: 'episode', entityId: episodeId,
+            message: `Сценарий написан ИИ (${enriched.ai.provider}), скор ${enriched.scores.total}/100`,
+            meta: { model: enriched.ai.model, cached: enriched.ai.cached },
+          });
+        }
+      }
+    } catch (err) {
+      log({ level: 'warn', actor: 'ai', action: 'episode.ai_failed', entityType: 'episode', entityId: episodeId, message: `ИИ недоступен, оставлен шаблон: ${String(err.message || err).slice(0, 160)}` });
+    }
     scenes = creative.scenes;
     description = creative.caption;
     hashtags = creative.hashtags;
@@ -168,7 +197,7 @@ registerHandler('episode.prepare', async ({ episodeId }) => {
       formatLabel: creative.formatLabel, scores: creative.scores, warnings: creative.warnings,
       alternativeHooks: creative.alternativeHooks, coverText: creative.coverText,
       pinnedComment: creative.pinnedComment, captions: creative.captions,
-      product: creative.product,
+      product: creative.product, ai: creative.ai || null, durationSec: creative.durationSec,
     }) } : {}),
     risk,
     status: 'generating',
@@ -197,7 +226,7 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
   try {
     if (step === 'voice') {
       const text = [scenes[0]?.text, ...scenes.slice(1).map((s) => s.text)].filter(Boolean).join(' ');
-      const audio = await providers.tts.synthesize({ text, voiceId: process.env.ELEVENLABS_VOICE_ID });
+      const audio = await providers.tts.synthesize({ text, voiceId: process.env.TTS_VOICE_ID || null });
       // Реальная озвучка (live-режим) сохраняется рядом с видео и подмешивается в рендер.
       if (audio?.audioBuffer) {
         fs.mkdirSync(MEDIA_DIR, { recursive: true });
@@ -219,7 +248,10 @@ registerHandler('episode.render', async ({ episodeId, step }, job) => {
       });
       touchEpisode(episodeId, { stage: 'footage', progress: STAGE_PROGRESS.footage });
       log({ level: 'info', actor: `provider.video.${draft.provider}`, action: 'episode.footage', entityType: 'episode', entityId: episodeId, message: `Видеоряд сгенерирован (${draft.provider}${draft.demo ? ', demo' : ''})`, meta: draft });
-      if (Math.random() < 0.05) throw new Error('Провайдер видео вернул 429 (rate limit) — задача будет повторена');
+      // Имитация 429 — только для демонстрации ретраев. В live случайные падения
+      // недопустимы: они съедают слот публикации и нервы владельца.
+      const isDemo = (process.env.PULSE_MODE || 'demo') !== 'live';
+      if (isDemo && draft.demo && Math.random() < 0.05) throw new Error('Провайдер видео вернул 429 (rate limit) — задача будет повторена');
       enqueue('episode.render', { episodeId, step: 'edit' }, { delayMs: 1800, priority: 4, dedupeKey: `render:${episodeId}:edit` });
       return;
     }
@@ -451,12 +483,25 @@ export function pickAccount(platform, projectId, need = 1) {
     candidates.push({ account: a, ...q });
   }
   if (!candidates.length) return null;
-  // балансировка: аккаунт с наибольшим остатком квоты; при равенстве — с лучшим качеством
-  candidates.sort((x, y) => y.left - x.left || y.account.quality - x.account.quality);
-  const chosen = candidates[0];
-  // мягкое распределение по проектам: если аккаунт уже публиковал этот проект сегодня — берём следующий
-  if (candidates.length > 1 && Math.random() < 0.35) return candidates[1].account;
-  return chosen.account;
+  // Балансировка детерминированная (никакой случайности — иначе планировщик
+  // «дрожит» и один аккаунт получает всё):
+  //  1) сначала те, кто сегодня ещё не публиковал этот проект;
+  //  2) затем наибольший остаток суточной квоты;
+  //  3) затем лучшее качество и самый давний визит.
+  for (const c of candidates) {
+    const usedForProject = projectId
+      ? db.prepare(`SELECT COUNT(*) AS n FROM publications p JOIN episodes e ON e.id = p.episode_id
+                    WHERE p.account_id = ? AND e.project_id = ? AND substr(p.created_at, 1, 10) = ?`)
+        .get(c.account.id, projectId, nowIso().slice(0, 10))?.n || 0
+      : 0;
+    c.projectToday = usedForProject;
+    c.lastAt = lastPublishAt(c.account.id) || '';
+  }
+  candidates.sort((x, y) => (x.projectToday - y.projectToday)
+    || (y.left - x.left)
+    || (y.account.quality - x.account.quality)
+    || String(x.lastAt).localeCompare(String(y.lastAt)));
+  return candidates[0].account;
 }
 
 export function consumeQuota(accountId) {
@@ -731,6 +776,21 @@ function buildCaption({ episode, project, product, platform, variant, hashtags }
 }
 
 /**
+ * Персона канала: тема, язык, стиль и характер из карточки аккаунта.
+ * Нужна ИИ-сценаристу, чтобы один бренд звучал по-разному на разных каналах.
+ */
+function accountPersonaFor(accountId) {
+  if (!accountId) return null;
+  const row = db.prepare('SELECT topic, language, visual_style, persona FROM accounts WHERE id = ?').get(accountId);
+  if (!row) return null;
+  let persona = {};
+  try { persona = row.persona ? JSON.parse(row.persona) : {}; } catch { persona = {}; }
+  if (row.visual_style) persona.style = row.visual_style;
+  if (row.language) persona.language = row.language;
+  return Object.keys(persona).length ? persona : null;
+}
+
+/**
  * Какой канал возьмёт следующий ролик: сначала свой аккаунт проекта, затем
  * универсальный. Перегруженные (квота выбрана) и заблокированные пропускаем,
  * иначе планировщик поставит ролик в аккаунт, который сегодня уже не может.
@@ -829,10 +889,28 @@ registerHandler('autopilot.tick', async () => {
           JOIN episodes e ON e.id = pb.episode_id
           WHERE pb.project_id = ? AND e.topic <> ''
           GROUP BY e.topic ORDER BY v DESC LIMIT 2`).all(project.id).map((r) => r.topic);
-      const fresh = generateIdeas(project, { count: 6 - ideasCount, product, exclude: existing, preferFormats: leadFormats, seedTopics });
+      const want = 6 - ideasCount;
+      // Сначала модель: темы, написанные под нишу и канал, дают лучший отклик, чем
+      // шаблонный банк. Отказ модели (нет ключа, лимит, сеть) — не ошибка: ниже
+      // срабатывает генератор Content Brain, и это честно пишется в `source`.
+      let fresh = null;
+      let source = 'template';
+      try {
+        const account = pickAccountFor(project.id);
+        fresh = await aiContent.ideas({
+          project, product, count: want, exclude: existing,
+          topic: account?.topic || '', persona: account?.persona ? parseJson(account.persona, {}) : null,
+        });
+        if (fresh?.length) source = 'ai';
+      } catch (err) {
+        log({ level: 'warn', actor: 'ai', action: 'ideas.ai_failed', message: `Темы ИИ не собраны: ${String(err.message || err).slice(0, 160)}` });
+      }
+      if (!fresh?.length) fresh = generateIdeas(project, { count: want, product, exclude: existing, preferFormats: leadFormats, seedTopics });
       const ins = db.prepare(`INSERT INTO ideas (id, project_id, title, hook, angle, format, tags, score, source, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ai', 'new', ?)`);
-      for (const i of fresh) ins.run(uid('id_'), project.id, i.title, i.hook, i.angle, i.format, JSON.stringify(i.tags), i.score, nowIso());
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)`);
+      for (const i of fresh) {
+        ins.run(uid('id_'), project.id, i.title, i.hook, i.angle, i.format, JSON.stringify(i.tags), i.score, i.source || source, nowIso());
+      }
     }
 
     const plan = nextSlotPlan(project.id);

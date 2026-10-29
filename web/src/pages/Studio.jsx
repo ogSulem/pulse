@@ -18,6 +18,22 @@ export default function Studio() {
   const toast = useToast();
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  const [testing, setTesting] = useState(false);
+
+  const testAi = async () => {
+    setTesting(true);
+    try {
+      const res = await api.aiTest();
+      toast.push({
+        tone: 'success',
+        title: `ИИ отвечает: ${res.provider || 'ok'}`,
+        text: res.model ? `${res.model} · ${res.ms} мс` : undefined,
+      });
+      load();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'ИИ не ответил', text: err.message });
+    } finally { setTesting(false); }
+  };
 
   const load = async () => {
     try {
@@ -40,6 +56,9 @@ export default function Studio() {
   const frames = integrations.frames || {};
   const oauth = integrations.oauth || {};
   const providers = integrations.providers || {};
+  const ai = integrations.ai || {};
+  const aiReady = (ai.providers || []).filter((p) => p.configured);
+  const aiFree = aiReady.filter((p) => p.free).length;
   const live = data.mode === 'live';
 
   return (
@@ -170,6 +189,42 @@ export default function Studio() {
                 </div>
               );
             })}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-head">
+            <div>
+              <div className="card-title">ИИ-мозг</div>
+              <div className="card-sub">Кто на самом деле пишет идеи, сценарии и описания</div>
+            </div>
+            <Badge tone={ai.enabled ? 'success' : 'warn'} dot>{ai.enabled ? 'включён' : 'выключен'}</Badge>
+          </div>
+          <div className="card-body col" style={{ gap: 8, fontSize: 12 }}>
+            <div className="row-between">
+              <span style={{ color: 'var(--muted)' }}>Активный провайдер</span>
+              <b style={{ fontSize: 12 }}>{ai.active || '—'}</b>
+            </div>
+            <div className="row-between">
+              <span style={{ color: 'var(--muted)' }}>Готовых провайдеров</span>
+              <span>{aiReady.length ? `${aiReady.length} · ${aiFree} бесплатных` : 'нет ключей'}</span>
+            </div>
+            <div className="row-between">
+              <span style={{ color: 'var(--muted)' }}>Запросов сегодня</span>
+              <span>{(ai.providers || []).reduce((a, p) => a + (p.callsToday || 0), 0)}</span>
+            </div>
+            <div className="row" style={{ gap: 8, marginTop: 4 }}>
+              <button className="btn btn-soft btn-sm" onClick={testAi} disabled={testing}>
+                <Icon name="sparkles" size={12} />{testing ? 'Проверяем…' : 'Проверить ИИ'}
+              </button>
+              <a className="btn btn-ghost btn-sm" href="#/settings">Ключи и модели<Icon name="chevronRight" size={12} /></a>
+            </div>
+            {!aiReady.length && (
+              <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.55 }}>
+                Без ключей работает встроенный Content Brain — ролики выходят, но тексты шаблонные.
+                Добавьте бесплатный ключ NVIDIA / Gemini / Groq в <code className="mono">.env</code> и включите <code className="mono">PULSE_AI=on</code>.
+              </div>
+            )}
           </div>
         </div>
 

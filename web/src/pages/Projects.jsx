@@ -50,7 +50,13 @@ export default function Projects() {
     setBusy(true);
     try {
       const res = await api.generateIdeas(project.id, 6);
-      toast.push({ tone: 'success', title: `+${res.created} новых тем`, text: 'Оценка показывает прогноз вовлечения — можно отправить в конвейер.' });
+      toast.push({
+        tone: 'success',
+        title: `+${res.created} новых тем`,
+        text: res.source === 'ai'
+          ? 'Идеи написала языковая модель под вашу нишу и площадку — оценка показывает прогноз вовлечения.'
+          : 'Оценка показывает прогноз вовлечения — можно отправить в конвейер.',
+      });
       loadIdeas(project.id);
     } catch (err) {
       toast.push({ tone: 'error', title: 'Не удалось сгенерировать', text: err.message });
@@ -230,7 +236,9 @@ export default function Projects() {
                     <div style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 3 }}>{FORMAT_LABELS[idea.format] || idea.format}</div>
                   </div>
                 </div>
-                {idea.status === 'used' && <Badge tone="success">использована</Badge>}
+                {idea.status === 'used'
+                  ? <Badge tone="success">использована</Badge>
+                  : idea.source === 'ai' ? <Badge tone="accent">ИИ</Badge> : null}
               </div>
               <p className="muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>«{idea.hook}»</p>
               <div className="row wrap" style={{ gap: 4 }}>
@@ -244,7 +252,7 @@ export default function Projects() {
           ))}
           {!ideasLoading && !ideas.length && (
             <div style={{ gridColumn: 'span 3' }}>
-              <Empty icon="sparkles" title="Тем пока нет" text="Нажмите «Ещё 6 тем» — Content Brain предложит идеи под нишу проекта."
+              <Empty icon="sparkles" title="Тем пока нет" text="Нажмите «Ещё 6 тем» — ИИ предложит идеи под нишу проекта (без ключа работает встроенный Content Brain)."
                 action={<button className="btn btn-primary btn-sm" onClick={generate}><Icon name="sparkles" size={13} />Сгенерировать темы</button>} />
             </div>
           )}

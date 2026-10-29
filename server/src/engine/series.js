@@ -24,6 +24,7 @@ import { SERIES_GENRES, SERIES_GENRES_LIST, buildBible, planSeason, buildEpisode
 import { planVoiceSections, renderSeriesEpisode, renderSeriesCut, seriesRenderInfo } from './serialrender.js';
 import { MEDIA_DIR } from './render.js';
 import { framesStatus } from './frames.js';
+import * as aiContent from './ai.js';
 import { createEpisode, touchEpisode, nextSlot } from './pipeline.js';
 import { decryptSecret } from '../core/secrets.js';
 
@@ -200,6 +201,168 @@ function episodeSlotDate(seriesId, episodeNo) {
 }
 
 /**
+ * Библия сериала, написанная моделью. Шаблонная библия остаётся основой:
+ * ИИ перекрывает только те поля, которые реально приносит (мир, герои, стиль).
+ * Возвращает обновлённый сериал или null, если модель недоступна.
+ */
+export async function aiBible(seriesId) {
+  const s = db.prepare('SELECT * FROM series WHERE id = ?').get(seriesId);
+  if (!s) throw new Error('Сериал не найден');
+  if (!aiContent.available()) return null;
+  const base = parseJson(s.bible, {}) || {};
+  const draft = await aiContent.seriesBible({ title: s.title, genre: s.genre, premise: s.premise, tone: s.tone });
+  if (!draft?.world) return null;
+
+  const palettes = ['ash', 'ink', 'ember', 'moss', 'rust', 'ice'];
+  const merged = {
+    ...base,
+    ai: { provider: draft.provider || 'llm', model: draft.model || null },
+    tagline: draft.tagline || base.tagline || '',
+    premise: base.premise,
+    world: {
+      ...(base.world || {}),
+      ...Object.fromEntries(Object.entries(draft.world || {}).filter(([, v]) => typeof v === 'string' && v.trim())),
+      ...(draft.world?.secret ? { secret: draft.world.secret } : {}),
+    },
+    characters: Array.isArray(draft.characters) && draft.characters.length
+      ? draft.characters.slice(0, 4).map((c, i) => ({
+        name: String(c.name || `Герой ${i + 1}`).slice(0, 40),
+        role: String(c.role || (i === 0 ? 'герой' : i === 1 ? 'союзник' : 'антагонист')).slice(0, 30),
+        gender: /[ая]$/i.test(String(c.name || '')) ? 'f' : 'm',
+        profession: String(c.job || '').slice(0, 60),
+        want: String(c.want || '').slice(0, 120),
+        wound: String(c.fear || '').slice(0, 120),
+        secret: String(c.secret || '').slice(0, 140),
+      }))
+      : base.characters,
+    visual: {
+      ...(base.visual || {}),
+      palette: palettes.includes(draft.visual?.palette) ? draft.visual.palette : (base.visual?.palette || 'ash'),
+      look: String(draft.visual?.look || base.visual?.look || '').slice(0, 200),
+    },
+  };
+  db.prepare('UPDATE series SET bible = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(merged), nowIso(), seriesId);
+  log({ level: 'info', actor: 'ai', action: 'series.bible', entityType: 'series', entityId: seriesId, message: `Библия «${s.title}» написана ИИ: ${merged.world?.place || '—'}` });
+  return getSeries(seriesId);
+}
+
+/**
+ * Переписать нарратив серии моделью. Сетка сцен, фото-ряд, тайминг и аудит
+ * остаются прежними — меняется только текст озвучки (и, если повезёт, название).
+ * Так серия получает живую речь без риска сломать рендер.
+ */
+export async function aiComposeEpisode(id) {
+  const ep = getEpisode(id);
+  if (!ep) throw new Error('Серия не найдена');
+  if (!aiContent.available()) return null;
+  const s = db.prepare('SELECT * FROM series WHERE id = ?').get(ep.series_id);
+  if (!s) throw new Error('Сериал не найден');
+  const bible = parseJson(s.bible, {});
+  const plan = parseJson(s.season_plan, {});
+  const planEntry = (plan.episodes || []).find((e) => e.number === ep.episode_no) || null;
+  const scenes = Array.isArray(ep.scenes) ? ep.scenes : [];
+  if (scenes.length < 4) return null;
+
+  const durationSec = num(ep.duration_sec, num(s.episode_sec, 900));
+  // Речь в озвучке идёт ~2.35 слова в секунду. Модель пишет кусками по ~120 слов
+  // (это её «естественный» абзац), а по сценам текст раскладываем сами — иначе
+  // 65 сцен требовали бы 65 абзацев и модель бы не уложилась в ответ.
+  const totalWords = Math.round(durationSec * 2.35);
+  const paragraphs = clamp(Math.round(totalWords / 120), 5, 26);
+  const wordsPerParagraph = Math.max(60, Math.round(totalWords / paragraphs));
+
+  const siblings = db.prepare('SELECT scenes FROM series_episodes WHERE series_id = ? AND episode_no <> ?')
+    .all(ep.series_id, ep.episode_no)
+    .flatMap((r) => parseJson(r.scenes, []).map((x) => String(x.text || '').slice(0, 90)))
+    .filter(Boolean);
+
+  const draft = await aiContent.seriesNarration({
+    series: s, bible, planEntry, episodeNo: ep.episode_no,
+    paragraphs, wordsPerParagraph, siblings: siblings.slice(0, 8),
+  });
+  if (!draft?.paragraphs?.length) return null;
+
+  // ── раскладка по сценам: предложение за предложением, пропорционально времени
+  let sentences = draft.paragraphs
+    .join(' ')
+    .match(/[^.!?…]+[.!?…]+[»"']?|[^.!?…]+$/g)
+    ?.map((x) => x.trim())
+    .filter((x) => x.length > 2) || [];
+  if (sentences.length < 5) return null;
+  // Сцен в длинной серии много (кадр каждые 8–12 секунд), а предложений меньше.
+  // Длинные фразы делим по запятым/тире — так у каждой сцены есть свой текст,
+  // и субтитр не растягивается на пол-экрана.
+  const countW = (t) => String(t).trim().split(/\s+/).filter(Boolean).length;
+  let guard = 0;
+  while (sentences.length < scenes.length && guard++ < 500) {
+    let idx = -1;
+    let max = 0;
+    for (let i = 0; i < sentences.length; i += 1) {
+      const w = countW(sentences[i]);
+      if (w > max) { max = w; idx = i; }
+    }
+    if (idx < 0 || max < 8) break;
+    const parts = sentences[idx].split(/(?<=[,;:—–])\s+/);
+    if (parts.length < 2) {
+      // запятых нет — режем по середине, ближе к пробелу
+      const words = sentences[idx].split(' ');
+      const mid = Math.ceil(words.length / 2);
+      sentences.splice(idx, 1, words.slice(0, mid).join(' '), words.slice(mid).join(' '));
+    } else {
+      sentences.splice(idx, 1, ...parts);
+    }
+  }
+
+  const countWords = (t) => String(t).trim().split(/\s+/).filter(Boolean).length;
+  const totalSec = scenes.reduce((a, sc) => a + num(sc.seconds, 5), 0) || scenes.length;
+  const budget = scenes.map((sc) => (countWords(sentences.join(' ')) * num(sc.seconds, 5)) / totalSec);
+  const nextScenes = scenes.map((sc) => ({ ...sc }));
+  let si = 0;
+  let acc = 0;
+  for (let i = 0; i < sentences.length && si < nextScenes.length; i += 1) {
+    if (!nextScenes[si].aiText) nextScenes[si].aiText = '';
+    nextScenes[si].aiText += (nextScenes[si].aiText ? ' ' : '') + sentences[i];
+    acc += countWords(sentences[i]);
+    // сцена заполнена — переходим к следующей (последняя забирает остаток)
+    if (acc >= budget[si] && si < nextScenes.length - 1) { si += 1; acc = 0; }
+  }
+  // Сцене без своего куска текста оставляем пустую строку: кадр показывается,
+  // а narration идёт непрерывно. Хвост шаблонного текста здесь был бы хуже —
+  // зритель услышал бы другую историю.
+  for (const sc of nextScenes) {
+    if (sc.aiText) { sc.text = sc.aiText.trim(); sc.ai = true; }
+    else if (String(sc.text || '').trim()) { sc.text = ''; sc.ai = true; }
+    delete sc.aiText;
+  }
+
+  const script = {
+    ...(ep.script || {}),
+    scenes: nextScenes,
+    sections: planVoiceSections({ scenes: nextScenes }),
+    ai: { provider: draft.provider || 'llm', model: draft.model || null },
+  };
+  const words = nextScenes.reduce((a, sc) => a + countWords(sc.text), 0);
+  const wpm = Math.round((words / Math.max(1, durationSec)) * 60);
+
+  const audit = authenticityAudit({
+    series: s, bible, scenes: nextScenes, episodeNo: ep.episode_no,
+    plan: planEntry, wpm, durationSec, midRolls: num(ep.mid_rolls, 0), siblingScenes: siblings,
+  });
+
+  db.prepare(`UPDATE series_episodes SET script = ?, scenes = ?, words = ?, wpm = ?, authenticity = ?,
+      title = COALESCE(NULLIF(?, ''), title), thumb_text = COALESCE(NULLIF(?, ''), thumb_text), updated_at = ? WHERE id = ?`)
+    .run(JSON.stringify(script), JSON.stringify(nextScenes), words, wpm, JSON.stringify(audit),
+      String(draft.title || '').slice(0, 120), String(draft.thumb || '').slice(0, 60), nowIso(), id);
+
+  log({
+    level: 'info', actor: 'ai', action: 'series.episode_ai', entityType: 'series_episode', entityId: id,
+    message: `Серия ${ep.episode_no} переписана ИИ: ${words} слов, ${wpm} слов/мин, аудит ${audit.score}`,
+    meta: { provider: draft.provider, model: draft.model, similarity: audit.similarity, paragraphs },
+  });
+  return { ok: true, words, wpm, audit, episode: getEpisode(id) };
+}
+
+/**
  * Сценарий серии. Сравниваем с уже готовыми сериями сезона: дословные повторы
  * между сериями — главный признак масс-продакшна, за который в 2026 снимают
  * монетизацию.
@@ -303,9 +466,20 @@ export async function synthesizeEpisode(id, { voiceId = null } = {}) {
   const ep = getEpisode(id);
   if (!ep) throw new Error('Серия не найдена');
   const script = ep.script || {};
-  const sections = Array.isArray(script.sections) && script.sections.length
-    ? script.sections
-    : planVoiceSections({ scenes: ep.scenes });
+  // ИИ-текст до озвучки: переписывать после синтеза бессмысленно — звук уже готов.
+  let current = ep;
+  if (!script.ai && aiContent.available()) {
+    try {
+      const upgraded = await aiComposeEpisode(id);
+      if (upgraded?.episode) current = upgraded.episode;
+    } catch (err) {
+      log({ level: 'warn', actor: 'ai', action: 'series.ai_failed', entityType: 'series_episode', entityId: id, message: `ИИ-текст не применён: ${String(err.message || err).slice(0, 160)}` });
+    }
+  }
+  const finalScript = current.script || script;
+  const sections = Array.isArray(finalScript.sections) && finalScript.sections.length
+    ? finalScript.sections
+    : planVoiceSections({ scenes: current.scenes });
 
   const voice = voiceId || process.env.TTS_VOICE_ID || 'ru-narrator';
   const results = [];
@@ -327,7 +501,7 @@ export async function synthesizeEpisode(id, { voiceId = null } = {}) {
   const costCents = Math.round((voiceRub + renderRub + budget.llmRub) * 100);
   const audioSec = results.reduce((a, r) => a + num(r.estimateSec, 0), 0);
 
-  const nextScript = { ...script, sections: sections.map((s, i) => ({ ...s, audioPath: results[i].audioPath, provider: results[i].provider })) };
+  const nextScript = { ...finalScript, sections: sections.map((s, i) => ({ ...s, audioPath: results[i].audioPath, provider: results[i].provider })) };
   db.prepare('UPDATE series_episodes SET script = ?, audio_path = ?, audio_sec = ?, cost_cents = ?, stage = ?, error = NULL, updated_at = ? WHERE id = ?')
     .run(JSON.stringify(nextScript), results[0]?.audioPath || null, audioSec, costCents, 'voice', nowIso(), id);
 

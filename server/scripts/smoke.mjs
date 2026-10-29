@@ -36,7 +36,7 @@ try {
 } catch (err) { fail('база и миграции', err); }
 
 try {
-  seedBase();
+  await seedBase();
   ok('демо-данные');
 } catch (err) { fail('демо-данные', err); }
 
@@ -978,6 +978,92 @@ try {
   if (!status.oauth.platforms.length) throw new Error('oauth-платформы не отдаются студии');
   ok('студия: состояние интеграций', `${status.oauth.platforms.length} площадки · ${status.frames.providers.length} картинок · ${status.providers.publish.length} публикаций`);
 } catch (err) { fail('студия: состояние интеграций', err); }
+
+try {
+  // ИИ-слой: бесплатные провайдеры идут первыми, статус честный, озвучка бесплатная
+  const llm = await import('../src/providers/llm.js');
+  const saved = process.env.NVIDIA_API_KEY;
+  process.env.NVIDIA_API_KEY = 'nvapi-smoke';
+  const chain = llm.chain().map((p) => p.id);
+  if (!chain.length) throw new Error('ключ задан, а цепочка пустая');
+  if (chain[0] !== 'ollama' && chain[0] !== 'nvidia') throw new Error(`бесплатные провайдеры не первые: ${chain.join(',')}`);
+  if (saved === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = saved;
+
+  const status = llm.status();
+  if (!Array.isArray(status.providers) || !status.providers.length) throw new Error('статус ИИ без провайдеров');
+  const nvidia = status.providers.find((p) => p.id === 'nvidia');
+  if (!nvidia?.free) throw new Error('NVIDIA не помечен бесплатным');
+
+  const edge = await import('../src/providers/tts/edge.js');
+  if (!/^[A-F0-9]{64}$/.test(edge.secMsGec(new Date('2026-10-29T12:00:00Z').getTime()))) throw new Error('Sec-MS-GEC не sha256-hex');
+  if (edge.secMsGec(1000) === edge.secMsGec(1000 + 5 * 60 * 1000 + 1)) throw new Error('окно 5 минут не двигает токен');
+  if (!edge.escapeSsml('a & <b>').includes('&amp;')) throw new Error('SSML не экранируется');
+  const parts = edge.splitText('Слово. '.repeat(900));
+  if (parts.length < 2 || parts.some((x) => x.length > 2600)) throw new Error(`нарезка озвучки: ${parts.map((x) => x.length).join(',')}`);
+  if (edge.resolveVoice('ru-female') !== 'ru-RU-SvetlanaNeural') throw new Error('голос ru-female не резолвится');
+
+  const { providers } = await import('../src/providers/index.js');
+  if (providers.tts.current() !== 'edge') throw new Error(`TTS по умолчанию не бесплатный: ${providers.tts.current()}`);
+  if (!providers.video.providers().some((p) => p.id === 'nvidia')) throw new Error('нет видео-адаптера NVIDIA');
+  ok('ИИ: цепочка, статус и бесплатная озвучка', `${chain[0]} → …, TTS edge, ${parts.length} частей по ≤2600 знаков`);
+} catch (err) { fail('ИИ: цепочка, статус и бесплатная озвучка', err); }
+
+try {
+  // Серия: сценарий раскладывается по планам, аудит оригинальности считается
+  const { createSeries, composeEpisode } = await import('../src/engine/series.js');
+  const { db } = await import('../src/core/db.js');
+  const created = createSeries({ title: 'Smoke: тихий город', genre: 'zombie', episodesPlanned: 3, episodeSec: 600 });
+  try {
+    const ep = composeEpisode({ seriesId: created.id, episodeNo: 1 });
+    if (!ep?.scenes?.length) throw new Error('серия не собрана');
+    if (!ep.script?.sections?.length) throw new Error('нет секций озвучки');
+    const audit = ep.authenticity || ep.script.audit;
+    if (!audit || typeof audit.score !== 'number') throw new Error('нет аудита оригинальности');
+    const withText = ep.scenes.filter((x) => String(x.text || '').trim()).length;
+    if (withText < ep.scenes.length * 0.5) throw new Error(`текст есть только в ${withText} из ${ep.scenes.length} сцен`);
+    const frames = (ep.frames || []).length;
+    if (!frames) throw new Error('фото-ряд не спланирован');
+    ok('сериал: ИИ-текст и аудит', `${ep.scenes.length} планов, ${frames} кадров, секций ${ep.script.sections.length}, аудит ${audit.score}`);
+  } finally {
+    db.prepare('DELETE FROM series_episodes WHERE series_id = ?').run(created.id);
+    db.prepare('DELETE FROM series WHERE id = ?').run(created.id);
+  }
+} catch (err) { fail('сериал: ИИ-текст и аудит', err); }
+
+try {
+  // Автопилот платформы: идеи добираются, ролик уходит в конвейер, источник честный
+  const { enqueue, drain } = await import('../src/core/queue.js');
+  const { db, nowIso, setSettings } = await import('../src/core/db.js');
+  await import('../src/engine/pipeline.js');
+  setSettings({ autopilot_global: '1' });
+  const pid = 'pr_smoke_auto';
+  db.prepare(`INSERT INTO projects (id, name, niche, autopilot, posts_per_day, created_at, updated_at)
+    VALUES (?, 'SmokeAutopilot', 'тест конвейера', 1, 1, ?, ?)`).run(pid, nowIso(), nowIso());
+  try {
+    enqueue('autopilot.tick', {});
+    // очередь уже наполнена задачами прошлых проверок — даём планировщику пройти её
+    await drain(30);
+    for (let i = 0; i < 20; i++) {
+      const st = db.prepare("SELECT status FROM jobs WHERE type = 'autopilot.tick' ORDER BY created_at DESC LIMIT 1").get()?.status;
+      if (st !== 'pending') break;
+      await drain(30);
+    }
+    const ideas = db.prepare('SELECT source, COUNT(*) c FROM ideas WHERE project_id = ? GROUP BY source').all(pid);
+    const total = ideas.reduce((a, r) => a + r.c, 0);
+    if (!total) {
+      const j = db.prepare("SELECT status, last_error FROM jobs WHERE type = 'autopilot.tick' ORDER BY created_at DESC LIMIT 1").get();
+      throw new Error(`автопилот не добрал ни одной темы (джоба: ${j?.status || '—'} ${j?.last_error || ''})`);
+    }
+    if (ideas.some((r) => !['ai', 'template'].includes(r.source))) throw new Error(`неизвестный источник идей: ${ideas.map((r) => r.source).join(',')}`);
+    const eps = db.prepare('SELECT COUNT(*) n FROM episodes WHERE project_id = ?').get(pid).n;
+    if (!eps) throw new Error('автопилот не поставил ни одного ролика в конвейер');
+    ok('автопилот платформы', `${total} тем (${ideas.map((r) => `${r.source}:${r.c}`).join(', ')}), ${eps} ролика в конвейере`);
+  } finally {
+    db.prepare('DELETE FROM episodes WHERE project_id = ?').run(pid);
+    db.prepare('DELETE FROM ideas WHERE project_id = ?').run(pid);
+    db.prepare('DELETE FROM projects WHERE id = ?').run(pid);
+  }
+} catch (err) { fail('автопилот платформы', err); }
 
 fs.rmSync(tmp, { recursive: true, force: true });
 

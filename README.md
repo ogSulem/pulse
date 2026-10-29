@@ -335,9 +335,33 @@ pulse/
 | `PULSE_TZ` | `Europe/Moscow` | часовой пояс планировщика |
 | `PULSE_DB_PATH` | `/app/data/pulse.db` | путь к базе |
 | `VIDEO_PROVIDER` | `nvidia` | `nvidia` · `runway` · `luma` · `pika` · `replicate` |
-| `TTS_PROVIDER` | `elevenlabs` | `elevenlabs` · `openai` · `system` |
-| `LLM_PROVIDER` | `openai` | провайдер идей и сценариев |
-| `NVIDIA_API_KEY`, `RUNWAY_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY` … | — | ключи для live-режима |
+| `TTS_PROVIDER` | `edge` | `edge` (бесплатно, без ключа) · `elevenlabs` · `openai` · `system` |
+| `TTS_VOICE_ID` | `ru-narrator` | `ru-narrator` · `ru-female` · `en-narrator` · `en-female` или имя голоса Edge |
+| `PULSE_AI` | `on` | включает ИИ везде: идеи, сценарии, описания, библия сериалов, режиссура кадра |
+| `NVIDIA_API_KEY` | — | бесплатный ключ [build.nvidia.com](https://build.nvidia.com): LLM (~40 rpm) и видео Cosmos |
+| `GEMINI_API_KEY` / `GROQ_API_KEY` / `CEREBRAS_API_KEY` / `OPENROUTER_API_KEY` / `MISTRAL_API_KEY` / `OPENAI_API_KEY` | — | цепочка LLM-фолбэков; достаточно одного ключа |
+| `PULSE_OLLAMA` + `OLLAMA_BASE_URL` | `off` | своя Ollama на VPS: ИИ без интернета и без оплаты |
+| `PULSE_LLM_ORDER` / `PULSE_LLM_PROVIDER` | — | жёсткий порядок или один провайдер: `gemini,groq` |
+| `NVIDIA_VIDEO_MODEL` | `nvidia/cosmos-1.0-diffusion-7b-text2world` | модель видео NVIDIA NIM |
+| `NVIDIA_API_KEY`, `RUNWAY_API_KEY`, `LUMA_API_KEY`, `PIKA_API_KEY`, `REPLICATE_API_TOKEN`, `ELEVENLABS_API_KEY` … | — | остальные ключи live-режима |
+
+### ИИ бесплатно за пять минут
+
+Pulse не требует платных ключей, чтобы писать сценарии и озвучивать видео:
+
+1. Возьмите бесплатный ключ на [build.nvidia.com](https://build.nvidia.com) (без карты, ~40 запросов в минуту)
+   и впишите в `.env`: `NVIDIA_API_KEY=nvapi-…`, `PULSE_AI=on`, `PULSE_MODE=live`.
+2. Озвучка уже бесплатна: `TTS_PROVIDER=edge` — нейронные голоса Microsoft (Dmitry/Svetlana) без ключа,
+   без лимитов и без оплаты за символы.
+3. Хотите страховку от лимитов — добавьте второй ключ: `GEMINI_API_KEY` или `GROQ_API_KEY`.
+   Pulse перебирает цепочку и берёт первый доступный, ответы кэширует в `data/ai-cache/` на 7 дней.
+4. Совсем без внешних API — своя модель на VPS: `PULSE_OLLAMA=on`, `OLLAMA_BASE_URL=http://ollama:11434`.
+5. Проверить, что всё работает: «Настройки → ИИ-движок → Проверить ИИ живым запросом»
+   (или `curl -X POST localhost:8080/api/ai/test`).
+
+Где Pulse использует ИИ: генератор идей с оценкой вирусности, сценарий короткого ролика,
+описание и теги под каждую площадку, режиссура кадра для нейро-фото-ряда, библия сериала,
+переписывание серии «как рассказчик», названия и хуки A/B.
 
 **Demo-режим** полностью рабочий: генерация, рендер и постинг симулируются с реалистичными задержками,
 метрики растут по кривой охвата. **Live-режим** включает адаптеры провайдеров и официальные API площадок

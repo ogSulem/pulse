@@ -163,8 +163,27 @@ sudo docker compose --profile tls up -d # с HTTPS через Caddy
 | `PULSE_RENDER` | `off` отключает рендер (экономия CPU на слабом хосте) | `on` |
 | `PULSE_FFMPEG_PATH` | свой бинарь ffmpeg | резолвится автоматически |
 
-Ключи провайдеров (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `RUNWAY_API_KEY`, …) нужны только
+Ключи провайдеров (`NVIDIA_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `RUNWAY_API_KEY`, …) нужны только
 в `live`. Полный список — в `.env.example`.
+
+### ИИ на бесплатных лимитах
+
+| Что | Чем закрывается | Цена |
+|-----|-----------------|------|
+| Идеи, сценарии, описания, библия сериала | NVIDIA NIM (`meta/llama-3.3-70b-instruct`), фолбэки Gemini / Groq / Cerebras / OpenRouter | 0 ₽, ~40 запросов/мин у NVIDIA |
+| Озвучка (в т.ч. 15-минутная серия) | `TTS_PROVIDER=edge` — голоса Microsoft `ru-RU-DmitryNeural` / `SvetlanaNeural` | 0 ₽, без ключа |
+| Фото-ряд сериала | Flux через Pollinations (без ключа) или Cloudflare Workers AI | 0 ₽ |
+| Видео | NVIDIA Cosmos по тому же ключу; платные Runway/Luma/Pika — опционально | 0 ₽ в рамках ключа |
+
+Что действительно нужно открыть в фаерволе, помимо HTTPS наружу:
+
+- `integrate.api.nvidia.com`, `ai.api.nvidia.com` — LLM и видео NVIDIA;
+- `speech.platform.bing.com` (WSS, 443) — бесплатная озвучка Edge;
+- `image.pollinations.ai` — нейро-кадры;
+- `graph.facebook.com`, `open.tiktokapis.com`, `www.googleapis.com` — публикация.
+
+Если сервер за жёстким NAT, озвучка сама откатится на системный синтез, а тексты — на Content Brain:
+платформа продолжит работать, но без «живого» ИИ. Проверка — «Настройки → ИИ-движок → Проверить ИИ».
 
 **Безопасность на публичном адресе:**
 - задайте `PULSE_PASSWORD` — иначе на облаке пароль генерируется и показывается в логах деплоя;

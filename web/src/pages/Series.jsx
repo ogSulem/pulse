@@ -218,6 +218,9 @@ function EpisodeDrawer({ episodeId, onClose, onChanged }) {
             <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => run('render', () => api.renderSeriesEpisode(ep.id, { wait: false }), 'Сборка запущена')}>
               <Icon name="film" size={14} className={busy === 'render' ? 'spin' : ''} />Собрать видео
             </button>
+            <button className="btn btn-soft btn-sm" disabled={busy} onClick={() => run('ai', () => api.composeSeriesEpisodeAi(ep.id), 'Текст переписан моделью')}>
+              <Icon name="sparkles" size={14} className={busy === 'ai' ? 'spin' : ''} />Пересобрать ИИ
+            </button>
             <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run('recompose', () => api.recomposeSeriesEpisode(ep.id), 'Сценарий переписан')}>
               <Icon name="refresh" size={14} />Другая версия
             </button>

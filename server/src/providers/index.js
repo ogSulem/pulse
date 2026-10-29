@@ -9,6 +9,9 @@ import { decryptSecret } from '../core/secrets.js';
 import tiktok from './social/tiktok.js';
 import instagram from './social/instagram.js';
 import youtube from './social/youtube.js';
+import * as llmRouter from './llm.js';
+
+const { status: llmStatus } = llmRouter;
 
 const env = process.env;
 const MODE = () => process.env.PULSE_MODE || 'demo';
@@ -16,26 +19,26 @@ const MODE = () => process.env.PULSE_MODE || 'demo';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── LLM (идеи/сценарии/описания) ────────────────────────────────────────────
+// Единственная точка выхода в модели: мультироутер providers/llm.js.
+// Он сам перебирает бесплатные провайдеры (NVIDIA NIM → Gemini → Groq → Cerebras
+// → OpenRouter → Mistral → OpenAI → локальная Ollama), держит кэш и бюджет RPM.
+// Контракт для движков прежний: complete() → объект или null (→ Content Brain).
 const llm = {
-  name: 'local-brain',
-  async complete({ prompt, system }) {
-    if (MODE() !== 'live' || !env.OPENAI_API_KEY) return null; // → fallback на Content Brain
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.OPENAI_API_KEY}` },
-      body: JSON.stringify({
-        model: env.OPENAI_MODEL || 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: system || 'Ты продюсер коротких видео. Отвечай JSON без markdown.' },
-          { role: 'user', content: prompt },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.85,
-      }),
-    });
-    if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const data = await res.json();
-    return JSON.parse(data.choices?.[0]?.message?.content || '{}');
+  name: 'pulse-llm-router',
+  enabled() {
+    try { return llmStatus().enabled; } catch { return false; }
+  },
+  status() {
+    try { return llmStatus(); } catch { return { enabled: false, providers: [] }; }
+  },
+  async complete({ prompt, system, temperature = 0.85, maxTokens = 1400, tag = 'engine' } = {}) {
+    try {
+      const res = await llmRouter.completeJson({ prompt, system, temperature, maxTokens, tag });
+      return res?.ok ? res.data || null : null;
+    } catch (err) {
+      log({ level: 'warn', actor: 'provider.llm', action: 'llm.failed', message: `LLM недоступен: ${String(err.message || err).slice(0, 160)}` });
+      return null;
+    }
   },
 };
 
@@ -85,40 +88,138 @@ const video = {
       const data = await res.json();
       return { externalId: data.id, provider, demo: false };
     }
-    // NVIDIA NIM / Luma / Pika подключаются по тому же контракту:
-    // POST endpoint → { id } → poll(GET /status/{id}).
+    // NVIDIA NIM: у Cosmos текст-в-видео синхронный (ответ = mp4 в base64),
+    // у платформенных моделей — async с id. Поддерживаем оба вида ответа.
+    if (provider === 'nvidia') {
+      const base = env.NVIDIA_VIDEO_BASE_URL || 'https://ai.api.nvidia.com/v1';
+      const model = env.NVIDIA_VIDEO_MODEL || 'nvidia/cosmos-1.0-diffusion-7b-text2world';
+      const res = await fetch(`${base}/genai/${model}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.NVIDIA_API_KEY}` },
+        body: JSON.stringify({
+          prompt,
+          aspect_ratio: aspect,
+          duration: Math.max(2, Math.min(10, Number(seconds) || 5)),
+          seed: Number(seed) || 0,
+        }),
+      });
+      if (!res.ok) throw new Error(`NVIDIA video ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      const type = String(res.headers.get('content-type') || '');
+      if (type.includes('video/') || type.includes('application/octet-stream')) {
+        // синхронный ответ: сразу кладём mp4 в кэш и отдаём «externalId» как file:путь
+        const buf = Buffer.from(await res.arrayBuffer());
+        const dir = env.PULSE_MEDIA_DIR || 'data/media';
+        fs.mkdirSync(dir, { recursive: true });
+        const file = `${dir}/nvidia-${String(seed || Date.now())}.mp4`;
+        fs.writeFileSync(file, buf);
+        return { externalId: `file:${file}`, provider, demo: false, url: null };
+      }
+      const data = await res.json();
+      const b64 = data?.artifacts?.[0]?.base64 || data?.video?.base64 || data?.data?.[0]?.b64_json;
+      if (b64) {
+        const dir = env.PULSE_MEDIA_DIR || 'data/media';
+        fs.mkdirSync(dir, { recursive: true });
+        const file = `${dir}/nvidia-${String(seed || Date.now())}.mp4`;
+        fs.writeFileSync(file, Buffer.from(b64, 'base64'));
+        return { externalId: `file:${file}`, provider, demo: false, url: null };
+      }
+      const id = data?.id || data?.request_id || data?.job?.id;
+      if (!id) throw new Error('NVIDIA video: в ответе нет ни файла, ни id задачи');
+      return { externalId: String(id), provider, demo: false };
+    }
+    if (provider === 'luma') {
+      const res = await fetch('https://api.lumalabs.ai/dream-machine/v1/generations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.LUMA_API_KEY}` },
+        body: JSON.stringify({ prompt, aspect_ratio: aspect, loop: false }),
+      });
+      if (!res.ok) throw new Error(`Luma ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      const data = await res.json();
+      return { externalId: data.id, provider, demo: false };
+    }
+    if (provider === 'pika') {
+      // Pika живёт на fal.ai — единый контракт queue → status
+      const res = await fetch('https://queue.fal.run/fal-ai/pika/v2/text-to-video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Key ${env.PIKA_API_KEY}` },
+        body: JSON.stringify({ prompt, aspect_ratio: aspect }),
+      });
+      if (!res.ok) throw new Error(`Pika ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      const data = await res.json();
+      return { externalId: data.request_id, provider, demo: false };
+    }
     throw new Error(`Адаптер ${provider} не сконфигурирован: добавьте ключ и endpoint в providers/index.js`);
   },
 };
 
 // ── TTS ─────────────────────────────────────────────────────────────────────
+// Порядок честный: сначала бесплатное и хорошее (Edge), затем платное.
+// Edge TTS — нейронные голоса Microsoft без ключа: 15 минут серии стоят 0 ₽.
+const ttsProviders = () => [
+  { id: 'edge', label: 'Edge TTS (бесплатно, без ключа)', keyEnv: null, live: true, free: true },
+  { id: 'elevenlabs', label: 'ElevenLabs Multilingual v2', keyEnv: 'ELEVENLABS_API_KEY', live: Boolean(env.ELEVENLABS_API_KEY), free: false },
+  { id: 'openai', label: 'OpenAI TTS', keyEnv: 'OPENAI_API_KEY', live: Boolean(env.OPENAI_API_KEY), free: false },
+  { id: 'system', label: 'Системный синтез (demo)', keyEnv: null, live: true, free: true },
+];
+
+const ttsCurrent = () => {
+  const wanted = env.TTS_PROVIDER;
+  if (wanted && ttsProviders().some((p) => p.id === wanted)) return wanted;
+  // По умолчанию — бесплатный Edge, если только не выбрано другое явно
+  return 'edge';
+};
+
 const tts = {
-  providers() {
-    return [
-      { id: 'elevenlabs', label: 'ElevenLabs Multilingual v2', keyEnv: 'ELEVENLABS_API_KEY', live: Boolean(env.ELEVENLABS_API_KEY) },
-      { id: 'openai', label: 'OpenAI TTS', keyEnv: 'OPENAI_API_KEY', live: Boolean(env.OPENAI_API_KEY) },
-      { id: 'system', label: 'Системный синтез (demo)', keyEnv: null, live: true },
-    ];
-  },
-  async synthesize({ text, voiceId }) {
-    const provider = env.TTS_PROVIDER || 'elevenlabs';
-    if (MODE() !== 'live' || provider === 'system' || !env.ELEVENLABS_API_KEY) {
+  current: ttsCurrent,
+  providers: ttsProviders,
+  async synthesize({ text, voiceId = null, rate = 0 } = {}) {
+    const provider = ttsCurrent();
+    const live = MODE() === 'live' || env.PULSE_TTS === 'on';
+    const voice = voiceId || env.TTS_VOICE_ID || null;
+
+    if (!live || provider === 'system' || String(env.PULSE_TTS).toLowerCase() === 'off') {
       await sleep(90);
-      return { provider: 'demo', audioUrl: null, durationSec: Math.max(4, Math.round(text.split(/\s+/).length / 2.6)) };
+      return { provider: 'demo', audioUrl: null, audioFormat: 'mp3', durationSec: Math.max(4, Math.round(String(text).split(/\s+/).length / 2.6)) };
     }
-    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId || env.ELEVENLABS_VOICE_ID}`, {
+
+    if (provider === 'edge') {
+      const edge = await import('./tts/edge.js');
+      const out = await edge.synthesize({ text, voiceId: voice, rate });
+      return { ...out, audioUrl: null };
+    }
+
+    if (provider === 'elevenlabs') {
+      if (!env.ELEVENLABS_API_KEY) throw new Error('ElevenLabs: нужен ELEVENLABS_API_KEY');
+      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice || env.ELEVENLABS_VOICE_ID}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'xi-api-key': env.ELEVENLABS_API_KEY },
+        body: JSON.stringify({ text, model_id: 'eleven_multilingual_v2' }),
+      });
+      if (!res.ok) throw new Error(`TTS ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      return {
+        provider, audioBytes: buf.length, audioBuffer: buf, audioFormat: 'mp3',
+        durationSec: Math.max(4, Math.round(String(text).length / 15)),
+      };
+    }
+
+    // OpenAI TTS: дешевле ElevenLabs и с приличным русским (gpt-4o-mini-tts)
+    if (!env.OPENAI_API_KEY) throw new Error('OpenAI TTS: нужен OPENAI_API_KEY');
+    const res = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'xi-api-key': env.ELEVENLABS_API_KEY },
-      body: JSON.stringify({ text, model_id: 'eleven_multilingual_v2' }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
+        voice: env.OPENAI_TTS_VOICE || 'alloy',
+        input: String(text).slice(0, 4000),
+        response_format: 'mp3',
+      }),
     });
-    if (!res.ok) throw new Error(`TTS ${res.status}`);
+    if (!res.ok) throw new Error(`OpenAI TTS ${res.status}: ${(await res.text()).slice(0, 160)}`);
     const buf = Buffer.from(await res.arrayBuffer());
     return {
-      provider,
-      audioBytes: buf.length,
-      audioBuffer: buf,                       // сохраняется в data/media/<episode>.mp3
-      audioFormat: 'mp3',
-      durationSec: Math.max(4, Math.round(text.split(/\s+/).length / 2.6)),
+      provider: 'openai', audioBytes: buf.length, audioBuffer: buf, audioFormat: 'mp3',
+      durationSec: Math.max(3, Math.round(String(text).length / 15)),
     };
   },
 };
@@ -303,8 +404,17 @@ export const providers = {
     return {
       mode: MODE(),
       video: video.providers().map((p) => ({ ...p, active: p.id === video.current() })),
-      tts: tts.providers().map((p) => ({ ...p, active: p.id === (env.TTS_PROVIDER || 'elevenlabs') })),
-      llm: [{ id: 'openai', label: 'OpenAI', live: Boolean(env.OPENAI_API_KEY), active: Boolean(env.OPENAI_API_KEY) }],
+      tts: tts.providers().map((p) => ({ ...p, active: p.id === tts.current() })),
+      llm: (() => {
+        try {
+          const st = llmStatus();
+          return st.providers.filter((p) => p.configured || p.free).map((p) => ({
+            id: p.id, label: p.label, model: p.model, live: p.configured, active: p.active,
+          }));
+        } catch {
+          return [{ id: 'openai', label: 'OpenAI', live: Boolean(env.OPENAI_API_KEY), active: Boolean(env.OPENAI_API_KEY) }];
+        }
+      })(),
       publish: [
         { id: 'meta', label: 'Meta Graph API (Reels)', live: Boolean(env.META_APP_ID), active: Boolean(env.META_APP_ID) },
         { id: 'tiktok', label: 'TikTok Content Posting API', live: Boolean(env.TIKTOK_CLIENT_KEY), active: Boolean(env.TIKTOK_CLIENT_KEY) },

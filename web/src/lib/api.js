@@ -102,6 +102,11 @@ export const api = {
   studioQueue: (payload) => request('/studio/queue', { method: 'POST', body: payload }),
   regeneratePackage: (id, payload = {}) => request(`/episodes/${id}/package/regenerate`, { method: 'POST', body: payload }),
 
+  // ИИ: статус мультироутера, живой тест ключа, пересборка текста серии
+  aiStatus: () => request('/ai/status'),
+  aiTest: () => request('/ai/test', { method: 'POST', body: {} }),
+  composeSeriesEpisodeAi: (id) => request(`/series/episodes/${id}/ai`, { method: 'POST', body: {} }),
+
   // Сериалы: библия → сезон → серия → озвучка → сборка → публикация
   seriesOverview: () => request('/series'),
   seriesGenres: () => request('/series/genres'),

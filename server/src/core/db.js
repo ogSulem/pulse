@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS ideas (
   format      TEXT NOT NULL,
   tags        TEXT DEFAULT '[]',
   score       INTEGER DEFAULT 50,
-  source      TEXT DEFAULT 'ai',
+  source      TEXT DEFAULT 'template',
   status      TEXT DEFAULT 'new',       -- new | used | rejected
   created_at  TEXT NOT NULL
 );
