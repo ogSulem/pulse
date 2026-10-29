@@ -12,3 +12,4 @@ data/first-login.txt
 .DS_Store
 web/.vite/
 data/media/
+.pr-body.md
