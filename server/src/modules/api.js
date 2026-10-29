@@ -94,7 +94,16 @@ function accountRow(a) {
 
 // ─── Health / мета ──────────────────────────────────────────────────────────
 api.get('/health', (_req, res) => {
-  res.json({ ok: true, mode: process.env.PULSE_MODE || 'demo', uptimeSec: Math.round(process.uptime()), queue: jobStats(), version: '1.0.0' });
+  // frames в healthcheck: по нему видно до запуска серии, пойдёт нейро-ряд
+  // или процедурные плашки (и жив ли провайдер картинок)
+  res.json({
+    ok: true,
+    mode: process.env.PULSE_MODE || 'demo',
+    uptimeSec: Math.round(process.uptime()),
+    queue: jobStats(),
+    frames: framesStatus(),
+    version: '1.0.0',
+  });
 });
 
 api.get('/meta', (_req, res) => {
