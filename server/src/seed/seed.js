@@ -152,6 +152,38 @@ function makePublicationsFor(episode, project, accounts, rnd, publishedAt) {
   return out;
 }
 
+/**
+ * Паспорт демо-ролика. Демо-данные не проходили конвейер, но карточка ролика
+ * должна выглядеть как настоящая: видно, кто делает каждый шаг. Все шаги, кроме
+ * текста, помечены `demo` — это данные, а не реальный вызов провайдера.
+ */
+function seedPassport(episodeId, { stage = 'published', publishedAt = null, title = '', handle = null, platforms = [] } = {}) {
+  const at = publishedAt || nowIso();
+  const meta = {
+    idea: { provider: 'idea-library', model: 'автопилот', note: String(title).slice(0, 80), at },
+    script: { provider: 'template', model: 'Content Brain', note: 'демо-данные: текст собран шаблонами', at },
+  };
+  const done = ['voice', 'footage', 'edit', 'ready', 'published'];
+  if (done.includes(stage)) {
+    meta.voice = { provider: 'edge', model: 'ru-RU-DmitryNeural', note: '31 с', demo: true, at };
+    meta.footage = { provider: 'pollinations', model: 'flux', note: 'кадры по сценам', demo: true, at };
+    meta.render = { provider: 'ffmpeg', model: '1080×1920 @ 30 fps', ms: 2600, note: 'со звуком', demo: true, at };
+  } else if (stage === 'voice') {
+    meta.voice = { provider: 'edge', model: 'ru-RU-DmitryNeural', note: '31 с', demo: true, at };
+  }
+  if (stage === 'published' && handle) {
+    meta.publish = {
+      provider: 'platform-api', model: `@${handle}`,
+      note: platforms.map((x) => ({ reels: 'Instagram Reels', tiktok: 'TikTok', youtube: 'YouTube Shorts' }[x] || x)).join(', '),
+      platforms, demo: true, at,
+    };
+  }
+  try {
+    db.prepare('UPDATE episodes SET ai_meta = ? WHERE id = ?').run(JSON.stringify(meta), episodeId);
+  } catch { /* паспорт не должен ломать посев */ }
+  return meta;
+}
+
 export async function seedBase() {
   ensureSettings();
   // демо-проект условно прошёл аудит Google: иначе вся история Shorts была бы приватной
@@ -242,6 +274,11 @@ export async function seedBase() {
         db.prepare('UPDATE episodes SET compliance = ?, viral = ?, viral_meta = ? WHERE id = ?')
           .run(JSON.stringify(demo.compliance), demo.viral, JSON.stringify(demo.viralMeta), episodeId);
         const pubList = makePublicationsFor(null, project, accountRows, rnd, publishedAt);
+        seedPassport(episodeId, {
+          stage: 'published', publishedAt, title: idea.title,
+          handle: pubList[0]?.account?.handle || null,
+          platforms: pubList.map((x) => x.platform),
+        });
         for (const pub of pubList) {
           const pid = uid('pb_');
           insertPub.run({
@@ -321,6 +358,7 @@ export async function seedBase() {
         plan.risk || riskScore(script.caption), plan.error || null, scheduledAt, EPISODE_COST_CENTS,
         new Date(now - (plan.status === 'scheduled' ? 60000 : 300000)).toISOString(),
         new Date(now - (plan.status === 'scheduled' ? 60000 : 300000)).toISOString());
+    seedPassport(episodeId, { stage: plan.stage, title: idea?.title || '' });
   }
 
   // ── реклама: бренды и живые кампании ────────────────────────────────────
