@@ -32,14 +32,14 @@ const PROJECTS = [
 // Портфель из трёх площадок: у каждого аккаунта своя роль и своя история роста.
 // followers — реальные подписчики на момент старта демо (дальше растут из факта).
 const ACCOUNTS = [
-  { platform: 'reels', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 3, min_gap_min: 110, quality: 92, hue: 268, followers: 24800, project: 'pulse' },
-  { platform: 'reels', handle: 'momentum.app', display_name: 'Momentum', status: 'healthy', daily_limit: 3, min_gap_min: 95, quality: 84, hue: 250, followers: 18400, project: 'momentum' },
-  { platform: 'reels', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'warmup', daily_limit: 2, min_gap_min: 140, quality: 71, hue: 300, followers: 6100, project: 'fitflow' },
-  { platform: 'tiktok', handle: 'pulse.studio', display_name: 'Pulse', status: 'healthy', daily_limit: 3, min_gap_min: 90, quality: 88, hue: 275, followers: 41200, project: 'pulse' },
-  { platform: 'tiktok', handle: 'momentum.app', display_name: 'Momentum', status: 'cooldown', daily_limit: 2, min_gap_min: 120, quality: 63, hue: 240, followers: 12600, project: 'momentum' },
-  { platform: 'youtube', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 2, min_gap_min: 240, quality: 86, hue: 8, followers: 9800, project: 'pulse' },
-  { platform: 'youtube', handle: 'momentum.shorts', display_name: 'Momentum Shorts', status: 'warmup', daily_limit: 1, min_gap_min: 300, quality: 68, hue: 355, followers: 3200, project: 'momentum' },
-  { platform: 'youtube', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'healthy', daily_limit: 2, min_gap_min: 260, quality: 74, hue: 20, followers: 1150, project: 'fitflow' },
+  { platform: 'reels', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 3, min_gap_min: 110, quality: 92, hue: 268, followers: 24800, project: 'pulse', topic: 'автоматизация контента и короткие видео' },
+  { platform: 'reels', handle: 'momentum.app', display_name: 'Momentum', status: 'healthy', daily_limit: 3, min_gap_min: 95, quality: 84, hue: 250, followers: 18400, project: 'momentum', topic: 'привычки и продуктивность' },
+  { platform: 'reels', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'warmup', daily_limit: 2, min_gap_min: 140, quality: 71, hue: 300, followers: 6100, project: 'fitflow', topic: 'фитнес дома' },
+  { platform: 'tiktok', handle: 'pulse.studio', display_name: 'Pulse', status: 'healthy', daily_limit: 3, min_gap_min: 90, quality: 88, hue: 275, followers: 41200, project: 'pulse', topic: 'закулисье контент-завода' },
+  { platform: 'tiktok', handle: 'momentum.app', display_name: 'Momentum', status: 'cooldown', daily_limit: 2, min_gap_min: 120, quality: 63, hue: 240, followers: 12600, project: 'momentum', topic: 'привычки и дисциплина' },
+  { platform: 'youtube', handle: 'pulse.studio', display_name: 'Pulse Studio', status: 'healthy', daily_limit: 2, min_gap_min: 240, quality: 86, hue: 8, followers: 9800, project: 'pulse', topic: 'зомби-истории и разборы контента' },
+  { platform: 'youtube', handle: 'momentum.shorts', display_name: 'Momentum Shorts', status: 'warmup', daily_limit: 1, min_gap_min: 300, quality: 68, hue: 355, followers: 3200, project: 'momentum', topic: 'короткие разборы привычек' },
+  { platform: 'youtube', handle: 'fitflow.daily', display_name: 'FitFlow Daily', status: 'healthy', daily_limit: 2, min_gap_min: 260, quality: 74, hue: 20, followers: 1150, project: 'fitflow', topic: 'тренировки дома без инвентаря' },
 ];
 
 const PRODUCTS = [
@@ -172,10 +172,10 @@ export async function seedBase() {
   for (const a of ACCOUNTS) {
     const id = uid('ac_');
     const projectId = projectIds[a.project] || null;
-    db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, followers, followers_source, followers_updated_at, project_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '09:00', '23:00', 'Europe/Moscow', ?, '', ?, 'seed', ?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO accounts (id, platform, handle, display_name, avatar_hue, status, daily_limit, min_gap_min, window_start, window_end, timezone, quality, notes, followers, followers_source, followers_updated_at, project_id, topic, language, visual_style, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, '09:00', '23:00', 'Europe/Moscow', ?, '', ?, 'seed', ?, ?, ?, 'ru', 'cinematic', ?, ?)`)
       .run(id, a.platform, a.handle, a.display_name, a.hue, a.status, a.daily_limit, a.min_gap_min, a.quality,
-        a.followers || 0, ts, projectId, addDays(ts, -(60 + Math.floor(rnd() * 240))), ts);
+        a.followers || 0, ts, projectId, a.topic || '', addDays(ts, -(60 + Math.floor(rnd() * 240))), ts);
     accountRows.push({ ...a, id, project_id: projectId });
   }
 

@@ -398,6 +398,7 @@ export default function Settings({ refresh }) {
 cp .env.example .env
 nano .env                  # пароль + секрет + режим
 docker compose up -d --build
+bash deploy/tunnel.sh      # бесплатный https-адрес для Instagram
 open http://<ip-сервера>:8080`}</pre>
           <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 12, lineHeight: 1.6 }}>
             Данные лежат в томе <span className="mono">./data</span>. Бэкап — скопировать этот каталог или скачать JSON выше.

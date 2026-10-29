@@ -1065,6 +1065,71 @@ try {
   }
 } catch (err) { fail('автопилот платформы', err); }
 
+try {
+  // Бесплатные ключи: GitHub Models и Cloudflare должны попадать в цепочку, но не врать
+  const llm = await import('../src/providers/llm.js');
+  const saved = { gh: process.env.GITHUB_TOKEN, cf: process.env.CLOUDFLARE_AI_TOKEN, acc: process.env.CLOUDFLARE_ACCOUNT_ID };
+  process.env.GITHUB_TOKEN = 'ghp-smoke';
+  process.env.CLOUDFLARE_AI_TOKEN = 'cf-smoke';
+  const withoutAccount = llm.chain().map((p) => p.id);
+  if (!withoutAccount.includes('github')) throw new Error('GitHub Models не попал в цепочку');
+  if (withoutAccount.includes('cloudflare')) throw new Error('Cloudflare без account id считается готовым');
+  process.env.CLOUDFLARE_ACCOUNT_ID = 'acc-smoke';
+  const withAccount = llm.chain().map((p) => p.id);
+  if (!withAccount.includes('cloudflare')) throw new Error('Cloudflare не попал в цепочку с account id');
+  const st = llm.status();
+  for (const id of ['github', 'cloudflare']) {
+    if (!st.providers.find((p) => p.id === id)?.free) throw new Error(`${id} не помечен бесплатным`);
+  }
+  if (saved.gh === undefined) delete process.env.GITHUB_TOKEN; else process.env.GITHUB_TOKEN = saved.gh;
+  if (saved.cf === undefined) delete process.env.CLOUDFLARE_AI_TOKEN; else process.env.CLOUDFLARE_AI_TOKEN = saved.cf;
+  if (saved.acc === undefined) delete process.env.CLOUDFLARE_ACCOUNT_ID; else process.env.CLOUDFLARE_ACCOUNT_ID = saved.acc;
+  ok('бесплатные ключи: GitHub Models и Cloudflare', 'оба в цепочке, Cloudflare не врёт без account id');
+} catch (err) { fail('бесплатные ключи: GitHub Models и Cloudflare', err); }
+
+try {
+  // Один клик «заработать»: включает автопилот, идемпотентен, честно перечисляет блокеры
+  const { startAutopilot, stopAutopilot } = await import('../src/engine/launch.js');
+  const { db, setSettings } = await import('../src/core/db.js');
+  setSettings({ autopilot_global: '0', series_autopublish: '0', ads_enabled: '0', manual_review: '1' });
+  db.prepare("UPDATE projects SET autopilot = 0").run();
+  const first = startAutopilot();
+  if (!first.changes.length) throw new Error('автопилот не изменил ни одной настройки');
+  if (String(first.settings.autopilot_global) !== '1') throw new Error('autopilot_global не включился');
+  if (String(first.settings.manual_review) !== '0') throw new Error('ручная проверка не снялась');
+  if (db.prepare('SELECT COUNT(*) n FROM projects WHERE COALESCE(autopilot,0) = 0 AND archived = 0').get().n) {
+    throw new Error('остались проекты без автопилота');
+  }
+  if (!Array.isArray(first.blockers)) throw new Error('блокеры не посчитаны');
+  const second = startAutopilot();
+  if (second.changes.length) throw new Error(`повторный запуск что-то меняет: ${second.changes.join(', ')}`);
+  const stopped = stopAutopilot();
+  if (String(stopped.settings.autopilot_global) !== '0') throw new Error('автопилот не остановился');
+  startAutopilot();
+  ok('запуск на деньги: один клик', `${first.changes.length} настроек, блокеров ${first.blockers.length}, повтор идемпотентен`);
+} catch (err) { fail('запуск на деньги: один клик', err); }
+
+try {
+  // Проверка публичного адреса: отличает «не задан», «не отвечает» и «медиа сломано»
+  const { publicUrlCheck } = await import('../src/engine/launch.js');
+  const empty = await publicUrlCheck({ url: '' });
+  if (empty.ok || !/не задан/.test(empty.reason)) throw new Error('пустой адрес не отловлен');
+
+  const answered = await publicUrlCheck({
+    url: 'https://pulse.example.com',
+    fetchImpl: async (u) => ({ ok: true, status: 200, headers: { get: () => 'video/mp4' } }),
+  });
+  if (!answered.ok) throw new Error(`живой адрес признан мёртвым: ${answered.reason}`);
+  if (!answered.note && !answered.media) throw new Error('нет ни заметки про медиа, ни результата медиа');
+
+  const broken = await publicUrlCheck({
+    url: 'https://pulse.example.com',
+    fetchImpl: async () => { throw new Error('ECONNREFUSED'); },
+  });
+  if (broken.ok || !/не отвечает/.test(broken.reason)) throw new Error('недоступный адрес не отловлен');
+  ok('проверка публичного адреса', 'пусто / недоступно / доступно — три разных ответа');
+} catch (err) { fail('проверка публичного адреса', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

@@ -100,6 +100,36 @@ const PROVIDERS = [
     note: 'бесплатный эксперимент-план',
   },
   {
+    id: 'github',
+    label: 'GitHub Models',
+    base: 'https://models.github.ai/inference',
+    keyEnv: 'GITHUB_TOKEN',
+    altKeyEnv: 'GITHUB_MODELS_TOKEN',
+    modelEnv: 'GITHUB_MODEL',
+    defaultModel: 'openai/gpt-4o-mini',
+    free: true,
+    rpm: 10,
+    rpd: 150,
+    docs: 'github.com/settings/tokens → fine-grained token, права models:read',
+    note: 'бесплатно с обычным GitHub-токеном: ключ уже есть у любого разработчика',
+  },
+  {
+    id: 'cloudflare',
+    label: 'Cloudflare Workers AI',
+    // OpenAI-совместимый эндпоинт живёт внутри аккаунта — собираем адрес на месте
+    base: () => (process.env.CLOUDFLARE_ACCOUNT_ID
+      ? `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/v1`
+      : 'https://api.cloudflare.com/client/v4/accounts//ai/v1'),
+    keyEnv: 'CLOUDFLARE_AI_TOKEN',
+    modelEnv: 'CLOUDFLARE_MODEL',
+    defaultModel: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+    free: true,
+    rpm: 30,
+    rpd: 300,
+    docs: 'dash.cloudflare.com → Workers AI (10 000 нейронов/день)',
+    note: '10 000 нейронов в день бесплатно; тот же токен, что и для картинок',
+  },
+  {
     id: 'ollama',
     label: 'Ollama / свой сервер',
     base: 'http://127.0.0.1:11434/v1',
@@ -126,6 +156,8 @@ const PROVIDERS = [
 
 const keyOf = (p) => {
   if (!p.keyEnv) return p.enabledEnv && String(process.env[p.enabledEnv] || '').toLowerCase() === 'on' ? 'local' : '';
+  // Cloudflare без account id не сможет обратиться к модели — не притворяемся, что ключ рабочий
+  if (p.id === 'cloudflare' && !process.env.CLOUDFLARE_ACCOUNT_ID) return '';
   return process.env[p.keyEnv] || (p.altKeyEnv ? process.env[p.altKeyEnv] : '') || '';
 };
 
@@ -134,7 +166,11 @@ const keyOf = (p) => {
  * Ollama) и корпоративных прокси: `<ID>_BASE_URL` или общий PULSE_LLM_BASE_URL
  * (общий применяется только к активному провайдеру, иначе ломался бы фолбэк).
  */
-const baseOf = (p) => process.env[`${p.id.toUpperCase()}_BASE_URL`] || p.base;
+const baseOf = (p) => {
+  const override = process.env[`${p.id.toUpperCase()}_BASE_URL`];
+  if (override) return override;
+  return typeof p.base === 'function' ? p.base() : p.base;
+};
 const modelOf = (p) => process.env[p.modelEnv] || p.defaultModel;
 
 /**

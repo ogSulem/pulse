@@ -102,6 +102,11 @@ export const api = {
   studioQueue: (payload) => request('/studio/queue', { method: 'POST', body: payload }),
   regeneratePackage: (id, payload = {}) => request(`/episodes/${id}/package/regenerate`, { method: 'POST', body: payload }),
 
+  // Запуск «на деньги»: полный автопилот одним вызовом и проверка публичного адреса
+  launchStart: (payload = {}) => request('/launch/start', { method: 'POST', body: payload }),
+  launchStop: () => request('/launch/stop', { method: 'POST', body: {} }),
+  checkPublicUrl: (url = null) => request('/launch/check-url', { method: 'POST', body: { url } }),
+
   // ИИ: статус мультироутера, живой тест ключа, пересборка текста серии
   aiStatus: () => request('/ai/status'),
   aiTest: () => request('/ai/test', { method: 'POST', body: {} }),
