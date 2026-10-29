@@ -122,7 +122,12 @@ function AiBrain({ onToast }) {
       </div>
 
       <p style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 12, lineHeight: 1.6 }}>
-        Цепочка: <span className="mono">ollama → nvidia → gemini → groq → cerebras → openrouter → mistral → openai</span>.
+        {st?.chain?.length ? (
+          <>Порядок сейчас: <span className="mono">{st.chain.join(' → ')}</span>. </>
+        ) : (
+          <>Полный порядок: <span className="mono">nvidia → gemini → groq → cerebras → openrouter → mistral → github → cloudflare → ollama → openai</span>. </>
+        )}
+        <br />
         Ключи задаются в <span className="mono">.env</span> (<span className="mono">NVIDIA_API_KEY</span>,{' '}
         <span className="mono">GEMINI_API_KEY</span>, …), включение — <span className="mono">PULSE_AI=on</span>.
         Совсем без ключей: <span className="mono">PULSE_OLLAMA=on</span> и своя Ollama на VPS — тоже бесплатно.
