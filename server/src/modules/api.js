@@ -103,6 +103,13 @@ api.get('/health', (_req, res) => {
     uptimeSec: Math.round(process.uptime()),
     queue: jobStats(),
     frames: framesStatus(),
+    // ai в healthcheck: видно, что модели реально подключены, даже если панель не открыта
+    ai: (() => {
+      try {
+        const st = aiStatus();
+        return { enabled: st.enabled, active: st.active, configured: st.providers.filter((p) => p.configured).length };
+      } catch { return { enabled: false, active: null, configured: 0 }; }
+    })(),
     version: '1.0.0',
   });
 });
