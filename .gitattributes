@@ -1,0 +1,28 @@
+# Переводы строк: репозиторий хранит LF, и рабочая копия тоже.
+#
+# Зачем это здесь. На Windows Git с core.autocrlf=true переписывает файлы в CRLF.
+# Для .sh это фатально: ядро ищет интерпретатор "/bin/sh\r" и отвечает
+# "No such file or directory", а контейнер падает с кодом 127 ещё до старта.
+# Ровно это и случилось с docker-entrypoint.sh — правило ниже убирает причину.
+* text=auto eol=lf
+
+# shell-скрипты — строго LF, иначе docker-entrypoint.sh не запускается
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
+
+# Windows-скрипты, если появятся, остаются CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Бинарные файлы: никаких преобразований
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.mp4 binary
+*.webm binary
+*.mp3 binary
+*.woff binary
+*.woff2 binary

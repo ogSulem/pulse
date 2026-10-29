@@ -72,8 +72,17 @@ COPY server ./server
 
 RUN mkdir -p /app/data && chown -R node:node /app
 
+# Entrypoint копируется и сразу приводится в порядок:
+#   • sed убирает CR — если файл склонирован на Windows с core.autocrlf=true,
+#     в shebang попадает \r, ядро ищет "/bin/sh\r" и контейнер падает с кодом 127
+#     ещё до старта (ровно этот случай ломал `docker compose up`);
+#   • chmod +x — на всякий случай, если права потерялись при копировании.
+# .gitattributes в репозитории уже хранит LF, но образ должен быть неуязвим
+# к тому, как именно его склонировали.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && head -n1 /usr/local/bin/docker-entrypoint.sh | grep -qx '#!/bin/sh'
 
 EXPOSE 8080
 VOLUME ["/app/data"]

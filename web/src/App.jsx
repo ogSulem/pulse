@@ -3,86 +3,87 @@ import { api, getToken, setToken } from './lib/api.js';
 import Icon, { Logo } from './components/Icons.jsx';
 import { Badge, ToastProvider, useToast } from './components/ui.jsx';
 import { plural } from './lib/format.js';
+import { SECTIONS, resolveRoute, routeHash, sectionById } from './lib/nav.js';
 import Login from './pages/Login.jsx';
+import Today from './pages/Today.jsx';
 import Studio from './pages/Studio.jsx';
-import Dashboard from './pages/Dashboard.jsx';
-import Projects from './pages/Projects.jsx';
 import Queue from './pages/Queue.jsx';
 import Calendar from './pages/Calendar.jsx';
+import Series from './pages/Series.jsx';
+import Projects from './pages/Projects.jsx';
 import Analytics from './pages/Analytics.jsx';
 import Money from './pages/Money.jsx';
-import Transparency from './pages/Transparency.jsx';
+import Growth from './pages/Growth.jsx';
 import Accounts from './pages/Accounts.jsx';
+import Transparency from './pages/Transparency.jsx';
 import Products from './pages/Products.jsx';
 import Ads from './pages/Ads.jsx';
-import Growth from './pages/Growth.jsx';
-import Series from './pages/Series.jsx';
 import Logs from './pages/Logs.jsx';
 import Settings from './pages/Settings.jsx';
+import HostingCard from './components/HostingCard.jsx';
 import LaunchModal from './components/LaunchModal.jsx';
 
-const NAV = [
-  { section: 'Производство' },
-  { id: 'studio', label: 'Студия', icon: 'rocket', hash: '#/studio' },
-  { id: 'dashboard', label: 'Обзор', icon: 'grid', hash: '#/' },
-  { id: 'queue', label: 'Очередь роликов', icon: 'film', hash: '#/queue', badge: 'active' },
-  { id: 'series', label: 'Сериалы', icon: 'sparkles', hash: '#/series' },
-  { id: 'calendar', label: 'Расписание', icon: 'calendar', hash: '#/calendar' },
-  { id: 'projects', label: 'Проекты и темы', icon: 'sparkles', hash: '#/projects' },
-  { section: 'Рост' },
-  { id: 'growth', label: 'Рост и охваты', icon: 'growth', hash: '#/growth' },
-  { id: 'accounts', label: 'Аккаунты', icon: 'at', hash: '#/accounts' },
-  { section: 'Результат' },
-  { id: 'analytics', label: 'Аналитика', icon: 'chart', hash: '#/analytics' },
-  { id: 'money', label: 'Деньги', icon: 'target', hash: '#/money' },
-  { id: 'products', label: 'Продвижение', icon: 'package', hash: '#/products' },
-  { id: 'ads', label: 'Реклама', icon: 'megaphone', hash: '#/ads' },
-  { section: 'Доверие' },
-  { id: 'transparency', label: 'Прозрачность', icon: 'shield', hash: '#/transparency', badge: 'review' },
-  { id: 'logs', label: 'Журнал', icon: 'terminal', hash: '#/logs' },
-  { id: 'settings', label: 'Настройки', icon: 'settings', hash: '#/settings' },
-];
-
-const TITLES = {
-  studio: { title: 'PulseStudio', sub: 'Путь запуска: каналы, темы, продукты, сериалы — по шагам' },
-  dashboard: { title: 'Обзор', sub: 'Конвейер, публикации и результат в одном экране' },
-  queue: { title: 'Очередь роликов', sub: 'Каждый этап, статус и ручные правки' },
-  series: { title: 'Сериалы', sub: 'Длинные истории: библия, сезон, фото-ряд, мид-роллы и плейлист' },
-  calendar: { title: 'Расписание публикаций', sub: 'Слоты по аккаунтам и площадкам' },
-  projects: { title: 'Проекты и темы', sub: 'Ниша, продукт и генерация идей' },
-  analytics: { title: 'Аналитика', sub: 'Просмотры, CTR, подписчики и эффективность тем' },
-  money: { title: 'Деньги', sub: 'Доход, расход, ROI и окупаемость каждого ролика' },
-  transparency: { title: 'Прозрачность', sub: 'Что автоматизировано, где нужен человек и какие лимиты' },
-  products: { title: 'Продвижение продукта', sub: 'Шаблоны интеграции, ссылки и UTM' },
-  growth: { title: 'Рост и охваты', sub: 'Портфель аккаунтов, хуки, удержание и путь к монетизации' },
-  ads: { title: 'Реклама и бренды', sub: 'Кампании, маркировка ОРД и спонсорские деньги' },
-  accounts: { title: 'Аккаунты и квоты', sub: 'Распределение нагрузки и защита от блокировок' },
-  logs: { title: 'Журнал действий', sub: 'Что произошло и когда — по каждому ролику' },
-  settings: { title: 'Настройки', sub: 'Провайдеры, режим, риски, бэкап' },
+// Пятнадцать пунктов в сайдбаре — это не удобство, а ежедневный поиск «где что
+// лежит». Меню теперь из пяти разделов (см. lib/nav.js), внутри раздела —
+// вкладки. Старые адреса вроде #/analytics работают: они разрешаются в пару
+// «раздел/вкладка», поэтому ссылки и закладки не ломаются.
+const ROUTE_TITLES = {
+  'today/today': ['Сегодня', 'Один следующий шаг, деньги и то, что мешает зарабатывать'],
+  'create/studio': ['Студия', 'Запуск: каналы, темы, продукты, ИИ и автопилот'],
+  'create/queue': ['Очередь роликов', 'Каждый этап, статус и ручные правки'],
+  'create/calendar': ['Расписание', 'Слоты по аккаунтам и площадкам'],
+  'create/series': ['Сериалы', 'Длинные истории: библия, сезон, фото-ряд, мид-роллы'],
+  'create/themes': ['Темы и идеи', 'Ниша, продукт и генерация идей'],
+  'channels/growth': ['Рост и охваты', 'Алгоритмы площадок, хуки, удержание, монетизация'],
+  'channels/accounts': ['Аккаунты', 'Подключение, квоты и защита от блокировок'],
+  'channels/trust': ['Правила', 'Что автоматизировано, где нужен человек, какие лимиты'],
+  'money/totals': ['Деньги', 'Доход, расход, ROI и окупаемость каждого ролика'],
+  'money/analytics': ['Аналитика', 'Просмотры, CTR, подписчики и эффективность тем'],
+  'money/ads': ['Реклама и бренды', 'Кампании, маркировка ОРД и спонсорские деньги'],
+  'money/products': ['Продукты', 'Ссылки, UTM и шаблоны интеграции'],
+  'settings/main': ['Настройки', 'Режим, провайдеры, правила конвейера'],
+  'settings/hosting': ['Хостинг', 'Том, адрес, пароль, место на диске'],
+  'settings/logs': ['Журнал', 'Что произошло и когда — по каждому ролику'],
 };
 
 const AppCtx = createContext(null);
 export const useApp = () => useContext(AppCtx);
 
-const routeId = () => {
-  const h = (window.location.hash || '#/').replace(/^#\/?/, '').split('?')[0];
-  return h === '' ? 'dashboard' : h;
-};
+const currentRoute = () => resolveRoute(window.location.hash);
+
+// Хостинг — отдельная вкладка настроек: это разовая проверка, а не ежедневный
+// экран. Раньше она стояла в Студии рядом с «Запустить» и мешала.
+function SettingsHosting() {
+  return (
+    <div className="page">
+      <HostingCard />
+      <div className="notice">
+        <Icon name="info" size={14} />
+        <span>
+          Чек-лист по шагам, тарифы и разбор сбоев — в{' '}
+          <a className="link-btn" href="https://github.com/ogSulem/pulse/blob/main/docs/RAILWAY.md" target="_blank" rel="noreferrer">docs/RAILWAY.md <Icon name="arrowUpRight" size={10} /></a>
+          . Всё, что можно проверить кодом, платформа проверяет сама и показывает здесь с готовым действием.
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function Shell({ data, refresh, refreshLight, loading }) {
-  const [route, setRoute] = useState(routeId());
+  const [route, setRoute] = useState(currentRoute());
   const [menuOpen, setMenuOpen] = useState(false);
   const [theme, setTheme] = useState(document.documentElement.dataset.theme || 'dark');
   const [launch, setLaunch] = useState(false);
   const toast = useToast();
 
   useEffect(() => {
-    const onHash = () => { setRoute(routeId()); setMenuOpen(false); window.scrollTo({ top: 0 }); };
+    const onHash = () => { setRoute(currentRoute()); setMenuOpen(false); window.scrollTo({ top: 0 }); };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
   const go = (hash) => { window.location.hash = hash; };
+  const section = sectionById(route.section);
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
@@ -94,25 +95,30 @@ function Shell({ data, refresh, refreshLight, loading }) {
   const activeCount = (data.pipeline?.queued || 0) + (data.pipeline?.generating || 0);
   const reviewCount = data.pipeline?.review || 0;
   const badgeValue = (kind) => (kind === 'review' ? reviewCount : kind === 'active' ? activeCount : 0);
-  const meta = TITLES[route] || TITLES.dashboard;
+  const [title, sub] = ROUTE_TITLES[`${route.section}/${route.tab}`] || [section.title, section.sub];
+  const meta = { title, sub };
 
-  const pages = {
-    studio: <Studio />,
-    dashboard: <Dashboard onLaunch={() => setLaunch(true)} />,
-    queue: <Queue onLaunch={() => setLaunch(true)} />,
-    series: <Series />,
-    calendar: <Calendar />,
-    projects: <Projects />,
-    analytics: <Analytics />,
-    money: <Money />,
-    transparency: <Transparency />,
-    products: <Products />,
-    ads: <Ads />,
-    growth: <Growth />,
-    accounts: <Accounts />,
-    logs: <Logs />,
-    settings: <Settings refresh={refresh} />,
+  // Один экран на пару «раздел/вкладка». Ничего не грузится заранее: вкладка
+  // открывается по клику, поэтому первый экран остаётся быстрым.
+  const screens = {
+    'today/today': <Today onLaunch={() => setLaunch(true)} />,
+    'create/studio': <Studio />,
+    'create/queue': <Queue onLaunch={() => setLaunch(true)} />,
+    'create/calendar': <Calendar />,
+    'create/series': <Series />,
+    'create/themes': <Projects />,
+    'channels/growth': <Growth />,
+    'channels/accounts': <Accounts />,
+    'channels/trust': <Transparency />,
+    'money/totals': <Money />,
+    'money/analytics': <Analytics />,
+    'money/ads': <Ads />,
+    'money/products': <Products />,
+    'settings/main': <Settings refresh={refresh} />,
+    'settings/hosting': <SettingsHosting />,
+    'settings/logs': <Logs />,
   };
+  const page = screens[`${route.section}/${route.tab}`] || screens['today/today'];
 
   const queue = data.pipeline?.queue || {};
 
@@ -128,22 +134,38 @@ function Shell({ data, refresh, refreshLight, loading }) {
           </div>
         </a>
 
+        {/* Пять разделов. Внутри раздела — вкладки: так в меню не бывает
+            пятнадцати строк, а всё нужное остаётся в одном клике. */}
         <nav className="col" style={{ gap: 2 }}>
-          {NAV.map((item, i) =>
-            item.section ? (
-              <div className="nav-section" key={`s${i}`}>{item.section}</div>
-            ) : (
-              <button
-                key={item.id}
-                className={`nav-item ${route === item.id ? 'active' : ''}`}
-                onClick={() => go(item.hash)}
-              >
-                <Icon name={item.icon} size={16} />
-                {item.label}
-                {item.badge && badgeValue(item.badge) > 0 && <span className={`nav-badge ${item.badge}`}>{badgeValue(item.badge)}</span>}
-              </button>
-            )
-          )}
+          {SECTIONS.map((sec) => {
+            const active = sec.id === route.section;
+            return (
+              <div key={sec.id}>
+                <button
+                  className={`nav-item ${active ? 'active' : ''}`}
+                  onClick={() => go(routeHash(sec.id))}
+                >
+                  <Icon name={sec.icon} size={16} />
+                  {sec.label}
+                  {sec.badge && badgeValue(sec.badge) > 0 && <span className={`nav-badge ${sec.badge}`}>{badgeValue(sec.badge)}</span>}
+                </button>
+                {active && sec.tabs.length > 1 && (
+                  <div className="nav-sub">
+                    {sec.tabs.map((t) => (
+                      <button
+                        key={t.id}
+                        className={`nav-sub-item ${route.tab === t.id ? 'on' : ''}`}
+                        onClick={() => go(routeHash(sec.id, t.id))}
+                      >
+                        {t.label}
+                        {t.id === 'queue' && reviewCount > 0 && <span className="nav-badge review">{reviewCount}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </nav>
 
         <div className="sidebar-foot">
@@ -183,6 +205,20 @@ function Shell({ data, refresh, refreshLight, loading }) {
             <button className="btn btn-primary btn-sm" onClick={() => setLaunch(true)}><Icon name="plus" size={14} />Запуск</button>
           </div>
         </div>
+
+        {section.tabs.length > 1 && (
+          <div className="section-tabs">
+            {section.tabs.map((t) => (
+              <button
+                key={t.id}
+                className={`section-tab ${route.tab === t.id ? 'on' : ''}`}
+                onClick={() => go(routeHash(section.id, t.id))}
+              >
+                <Icon name={t.icon} size={13} />{t.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <header className="topbar">
           <div>
@@ -235,7 +271,7 @@ function Shell({ data, refresh, refreshLight, loading }) {
             <div className="skeleton" style={{ height: 320 }} />
           </div>
         ) : (
-          pages[route] || pages.dashboard
+          page
         )}
       </div>
 
