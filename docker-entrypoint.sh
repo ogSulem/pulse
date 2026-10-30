@@ -9,9 +9,29 @@ mkdir -p "$DATA"
 # забирают видео по публичной ссылке, поэтому адрес нужен самому приложению —
 # подставляем его здесь, чтобы человеку не приходилось дублировать одну и ту же
 # строку в двух переменных.
-if [ -z "${PULSE_PUBLIC_URL}" ] && [ -n "${PULSE_DOMAIN}" ] && [ "${PULSE_DOMAIN}" != "localhost" ]; then
-  export PULSE_PUBLIC_URL="https://${PULSE_DOMAIN}"
-  echo "  → PULSE_PUBLIC_URL=${PULSE_PUBLIC_URL} (из PULSE_DOMAIN)"
+# Домен может быть записан по-русски (edu.каркастайги.рф). Приложению и площадкам
+# нужен punycode, поэтому переводим здесь же — один раз, при старте.
+if [ -f /usr/local/bin/pulse-domain.sh ]; then
+  . /usr/local/bin/pulse-domain.sh
+else
+  pulse_to_ascii() { printf '%s' "$1"; }
+  pulse_public_url() {
+    case "$1" in http://*) printf 'http://%s' "$(printf '%s' "$1" | sed 's|^http://||')" ;; *) printf 'https://%s' "$1" ;; esac
+  }
+fi
+
+if [ -n "${PULSE_DOMAIN}" ] && [ "${PULSE_DOMAIN}" != "localhost" ]; then
+  ASCII_DOMAIN="$(pulse_to_ascii "${PULSE_DOMAIN}")"
+  if [ -z "${PULSE_PUBLIC_URL}" ]; then
+    export PULSE_PUBLIC_URL="$(pulse_public_url "${PULSE_DOMAIN}")"
+    echo "  → PULSE_PUBLIC_URL=${PULSE_PUBLIC_URL} (из PULSE_DOMAIN=${PULSE_DOMAIN})"
+  fi
+  # Caddy обычно получает домен из .env, но в облаке он приходит переменной.
+  # Отдаём латиницу — TLS на кириллице не выпустится.
+  if [ "${ASCII_DOMAIN}" != "${PULSE_DOMAIN}" ]; then
+    export PULSE_DOMAIN="${ASCII_DOMAIN}"
+    echo "  → PULSE_DOMAIN=${PULSE_DOMAIN} (кириллица → латиница)"
+  fi
 fi
 
 # ── Права на том ────────────────────────────────────────────────────────────

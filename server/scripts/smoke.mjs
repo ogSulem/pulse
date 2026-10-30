@@ -1377,6 +1377,151 @@ try {
 } catch (err) { fail('паспорт: разметка шагов', err); }
 
 try {
+  // Домен: кириллица, punycode, схема, путь, порт. Раньше `edu.каркастайги.рф`
+  // возвращался как есть — без https — и панель ругалась «адрес без HTTPS» на
+  // правильную настройку. Теперь любая форма приводится к рабочему виду.
+  const { normalizeDomain, publicBase, publicPair, publicHint, originFromRequest } = await import('../src/core/publicurl.js');
+
+  const uni = normalizeDomain('edu.каркастайги.рф');
+  if (!uni.ascii || /Ѐ-ӿ/.test(uni.ascii)) throw new Error('кириллица не переведена в punycode');
+  if (uni.url !== `https://${uni.ascii}`) throw new Error(`схема не добавлена: ${uni.url}`);
+  if (uni.unicode !== 'edu.каркастайги.рф') throw new Error(`потерялось написание для человека: ${uni.unicode}`);
+
+  // та же настройка, но человек добавил схему и слэш — результат не должен меняться
+  const withScheme = normalizeDomain('https://edu.каркастайги.рф/');
+  if (withScheme.url !== uni.url) throw new Error('https:// и слэш дают другой адрес');
+
+  // punycode руками — тоже рабочий вариант, схема всё равно нужна
+  const ascii = normalizeDomain(uni.ascii);
+  if (ascii.url !== uni.url) throw new Error('punycode-запись разобралась иначе');
+
+  // регистр и порт
+  if (normalizeDomain('EDU.Каркастайги.РФ').url !== uni.url) throw new Error('регистр ломает домен');
+  if (!normalizeDomain('localhost:8080').url.endsWith(':8080')) throw new Error('порт потерялся');
+  if (normalizeDomain('http://localhost:8080').url !== 'http://localhost:8080') throw new Error('явный http не уважается');
+
+  // мусор — понятная ошибка, а не молчаливая подстановка
+  for (const bad of ['не домен', 'http://', 'домен']) {
+    if (!normalizeDomain(bad).error) throw new Error(`мусор «${bad}» принят за домен`);
+  }
+
+  // PULSE_DOMAIN=localhost — дефолт Caddyfile, а не публичный адрес:
+  // площадки не должны получить ссылку на localhost, а локальный вход не должен
+  // превратиться в «облачный» со случайным паролем.
+  const savedEnv = { pub: process.env.PULSE_PUBLIC_URL, dom: process.env.PULSE_DOMAIN };
+  delete process.env.PULSE_PUBLIC_URL;
+  process.env.PULSE_DOMAIN = 'localhost';
+  const { isHosted } = await import('../src/core/publicurl.js');
+  if (publicBase()) throw new Error('localhost стал публичным адресом');
+  if (isHosted()) throw new Error('localhost признан облаком');
+  delete process.env.PULSE_DOMAIN;
+  if (savedEnv.pub !== undefined) process.env.PULSE_PUBLIC_URL = savedEnv.pub;
+  if (savedEnv.dom !== undefined) process.env.PULSE_DOMAIN = savedEnv.dom;
+
+  // и главное: панель больше не ругается на правильную настройку
+  const savedUrl = process.env.PULSE_PUBLIC_URL;
+  const savedDomain = process.env.PULSE_DOMAIN;
+  delete process.env.PULSE_DOMAIN;
+  process.env.PULSE_PUBLIC_URL = 'edu.каркастайги.рф';
+  const base = publicBase();
+  if (!base.startsWith('https://')) throw new Error(`publicBase без https: ${base}`);
+  if (publicHint().error) throw new Error('на кириллицу снова ругаемся');
+  const pair = publicPair();
+  if (!pair.unicode || pair.unicode === pair.ascii) throw new Error('обе формы не отдаются интерфейсу');
+  if (savedUrl === undefined) delete process.env.PULSE_PUBLIC_URL; else process.env.PULSE_PUBLIC_URL = savedUrl;
+  if (savedDomain !== undefined) process.env.PULSE_DOMAIN = savedDomain;
+
+  // redirect_uri OAuth: латиница даже если в Host пришла кириллица
+  const fakeReq = {
+    headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'edu.каркастайги.рф' },
+    protocol: 'http',
+    get: () => 'edu.каркастайги.рф',
+  };
+  const origin = originFromRequest(fakeReq);
+  if (/Ѐ-ӿ/.test(origin) || !origin.startsWith('https://')) throw new Error(`redirect_uri не латиницей: ${origin}`);
+
+  ok('домен: кириллица и punycode', `${uni.unicode} → ${uni.ascii}`);
+} catch (err) { fail('домен: кириллица и punycode', err); }
+
+try {
+  // Сессия в cookie: без неё на телефоне вход молча не срабатывал
+  // (localStorage недоступен в приватном режиме и во встроенных браузерах).
+  const { sessionCookie, clearCookie, parseCookies, cookieDomain, issueToken, verifyToken, SESSION_COOKIE } = await import('../src/modules/auth.js');
+
+  const https = { headers: { 'x-forwarded-proto': 'https' }, secure: true };
+  const http = { headers: {}, secure: false };
+  const token = issueToken();
+  if (!verifyToken(token)) throw new Error('токен не проверяется');
+
+  const c = sessionCookie(https, token);
+  for (const flag of ['HttpOnly', 'SameSite=Lax', 'Path=/', 'Secure', 'Max-Age=']) {
+    if (!c.includes(flag)) throw new Error(`в cookie нет ${flag}`);
+  }
+  // значение cookie не должно ломать сам заголовок: base64url безопасен,
+  // но проверяем не «сырой/не сырой», а что разделители не просочились
+  const value = c.split(';')[0].split('=').slice(1).join('=');
+  if (/[;,\s]/.test(value)) throw new Error(`значение cookie с недопустимыми символами: ${value}`);
+  if (decodeURIComponent(value) !== token) throw new Error('значение cookie не совпадает с токеном');
+  if (sessionCookie(http, token).includes('Secure')) throw new Error('Secure на http сломает вход локально');
+
+  const parsed = parseCookies(`${SESSION_COOKIE}=${encodeURIComponent(token)}; другой=1`);
+  if (parsed[SESSION_COOKIE] !== token) throw new Error('cookie не читается обратно');
+
+  const cleared = clearCookie(https);
+  if (!cleared.includes('Max-Age=0')) throw new Error('выход не стирает cookie');
+
+  // кириллический cookie-домен должен превратиться в латиницу, иначе браузер
+  // выбросит cookie и вход будет «слетать»
+  const savedCd = process.env.PULSE_COOKIE_DOMAIN;
+  process.env.PULSE_COOKIE_DOMAIN = 'edu.каркастайги.рф';
+  const cd = cookieDomain();
+  if (!cd || /Ѐ-ӿ/.test(cd)) throw new Error(`cookie-домен не переведён: ${cd}`);
+  if (!sessionCookie(https, token).includes(`Domain=${cd}`)) throw new Error('домен не попал в cookie');
+  if (savedCd === undefined) delete process.env.PULSE_COOKIE_DOMAIN; else process.env.PULSE_COOKIE_DOMAIN = savedCd;
+
+  ok('сессия в cookie', 'HttpOnly + SameSite=Lax, Secure только на https, кириллический домен → punycode');
+} catch (err) { fail('сессия в cookie', err); }
+
+try {
+  // Скрипты обновления и разбора домена: LF, shebang и реальный перевод домена.
+  // Именно здесь раньше «ругался update.sh»: не-ASCII в sed и Caddy без punycode.
+  const { execFileSync } = await import('node:child_process');
+  for (const file of ['deploy/domain.sh', 'deploy/update.sh']) {
+    const body = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+    if (body.includes('\r')) throw new Error(`${file}: CRLF`);
+    if (!body.startsWith('#!/')) throw new Error(`${file}: нет shebang`);
+  }
+  const sh = (code) => execFileSync('sh', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }).trim();
+  const asciiFromShell = sh('. deploy/domain.sh; pulse_to_ascii edu.каркастайги.рф');
+  if (!/^xn--|^edu\.xn--/.test(asciiFromShell)) throw new Error(`shell не перевёл домен: ${asciiFromShell}`);
+  const urlFromShell = sh('. deploy/domain.sh; pulse_public_url edu.каркастайги.рф');
+  if (!urlFromShell.startsWith('https://')) throw new Error('shell не добавил схему');
+  const sameForPunycode = sh(`. deploy/domain.sh; pulse_to_ascii ${asciiFromShell}`);
+  if (sameForPunycode !== asciiFromShell) throw new Error('повторный перевод меняет домен');
+
+  // Caddy получает домен из .env — там должен оказаться punycode
+  const install = fs.readFileSync(path.join(process.cwd(), 'deploy/install.sh'), 'utf8');
+  if (!install.includes('pulse_to_ascii')) throw new Error('install.sh не нормализует домен');
+  const compose = fs.readFileSync(path.join(process.cwd(), 'docker-compose.yml'), 'utf8');
+  if (!compose.includes('PULSE_DOMAIN')) throw new Error('compose не передаёт домен в Caddy');
+  const entry = fs.readFileSync(path.join(process.cwd(), 'docker-entrypoint.sh'), 'utf8');
+  if (!entry.includes('pulse-domain.sh')) throw new Error('entrypoint не подхватывает разбор домена');
+
+  ok('скрипты: домен и обновление', `deploy/update.sh, install.sh и entrypoint переводят домен сами (${asciiFromShell})`);
+} catch (err) { fail('скрипты: домен и обновление', err); }
+
+try {
+  // Кэш статики: index.html нельзя кэшировать, иначе после обновления телефон
+  // открывает старую страницу с уже удалёнными файлами — «белый экран».
+  const src = fs.readFileSync(path.join(process.cwd(), 'server/src/index.js'), 'utf8');
+  if (!src.includes("res.set('Cache-Control', 'no-cache, must-revalidate')")) throw new Error('index.html кэшируется');
+  if (!src.includes('immutable: true')) throw new Error('файлы с хешем не кэшируются надолго');
+  const vite = fs.readFileSync(path.join(process.cwd(), 'web/vite.config.js'), 'utf8');
+  if (!vite.includes('safari13')) throw new Error('сборка не рассчитана на старые телефоны');
+  ok('телефон: кэш и совместимость', 'index.html без кэша, assets immutable, сборка под es2019/safari13');
+} catch (err) { fail('телефон: кэш и совместимость', err); }
+
+try {
   // Навигация: пять разделов, у каждого — вкладки, и у каждой вкладки есть экран.
   // Проверка ловит типичную ошибку рефакторинга: вкладку добавили в меню, а
   // компонент не подключили — получается пустой экран без ошибки в консоли.
@@ -1405,7 +1550,7 @@ try {
 
   // Переводы строк: CRLF в shell-скриптах даёт "No such file or directory" и код 127
   // ещё до старта контейнера. Проверяем и файлы, и то, что Dockerfile это лечит.
-  for (const file of ['docker-entrypoint.sh', 'deploy/install.sh', 'deploy/railway.sh', 'deploy/tunnel.sh']) {
+  for (const file of ['docker-entrypoint.sh', 'deploy/install.sh', 'deploy/railway.sh', 'deploy/tunnel.sh', 'deploy/update.sh', 'deploy/domain.sh']) {
     const body = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
     if (body.includes('\r')) throw new Error(`${file}: CRLF в shell-скрипте`);
     if (!body.startsWith('#!')) throw new Error(`${file}: нет shebang`);

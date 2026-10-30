@@ -55,8 +55,27 @@ app.get('/t/:token', (req, res) => {
 // ── Статика SPA ─────────────────────────────────────────────────────────────
 const webDist = path.resolve(__dirname, '../../web/dist');
 if (fs.existsSync(webDist)) {
-  app.use(express.static(webDist, { index: false, maxAge: '1h', extensions: ['html'] }));
-  app.get(/^\/(?!api).*/, (_req, res) => res.sendFile(path.join(webDist, 'index.html')));
+  // Кэш разделён по типу файла, и это не микрооптимизация.
+  // Файлы в /assets содержат хеш в имени — их можно кэшировать навсегда.
+  // А index.html кэшировать нельзя: после обновления телефон ещё час открывал
+  // старую страницу, которая ссылалась на уже удалённые файлы, и показывал
+  // пустой экран. Со стороны это «с мобильного вообще не заходит», хотя сервер
+  // отвечает 200.
+  app.use('/assets', express.static(path.join(webDist, 'assets'), {
+    maxAge: '365d',
+    immutable: true,
+  }));
+  app.use(express.static(webDist, {
+    index: false,
+    extensions: ['html'],
+    setHeaders: (res, file) => {
+      if (file.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    },
+  }));
+  app.get(/^\/(?!api).*/, (_req, res) => {
+    res.set('Cache-Control', 'no-cache, must-revalidate');
+    res.sendFile(path.join(webDist, 'index.html'));
+  });
 } else {
   app.get('/', (_req, res) => res.type('html').send(`
     <body style="background:#0b0710;color:#eee;font-family:system-ui;padding:48px;line-height:1.6">

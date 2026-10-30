@@ -16,6 +16,10 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: false,
+    // Телефоны не всегда свежие: iPhone с iOS 13–15 и старые Android ещё в ходу,
+    // а «не заходит с мобильного» чаще всего означает именно это — белый экран
+    // на синтаксисе, который браузер не понимает. Собираем под es2019/safari13.
+    target: ['es2019', 'safari13', 'chrome79', 'firefox72'],
     // React и ReactDOM меняются редко: отдельный чанк кешируется браузером
     // между деплоями и не тянет за собой весь интерфейс.
     rollupOptions: {

@@ -1195,3 +1195,64 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 /* Кнопки и чипы: одинаковая геометрия на всех экранах */
 .chip { border-radius: 10px; }
 .badge { padding: 3px 9px; }
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   Телефон (v17)
+   Три вещи, которые на мобильном ломались или мешали:
+   1) 100vh — на iPhone это высота БЕЗ адресной строки, поэтому низ уезжал под
+      панель браузера; берём dvh с обычным фолбэком;
+   2) поле ввода 13px — iOS зумит страницу при фокусе, и вёрстка «разъезжается»;
+   3) кнопки ниже 44px и мелкие отступы — по ним неудобно попадать пальцем.
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.app { min-height: 100vh; min-height: 100dvh; }
+.sidebar { height: 100vh; height: 100dvh; }
+
+.login-wrap {
+  min-height: 100vh; min-height: 100dvh;
+  padding: max(20px, env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom));
+}
+
+@media (max-width: 920px) {
+  /* 16px — порог, ниже которого iOS включает зум при фокусе */
+  .input, .textarea, .select, input, select, textarea { font-size: 16px; }
+
+  .main { padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
+  .sidebar { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .mobile-bar { padding-top: max(12px, env(safe-area-inset-top)); }
+
+  /* палец попадает: минимум ~42px по высоте у всего, что нажимается */
+  .btn { min-height: 42px; }
+  .btn-sm { min-height: 36px; }
+  .btn-icon { min-width: 42px; }
+  .nav-item { padding: 12px; }
+  .section-tabs .tab { padding: 9px 14px; }
+
+  .page-h1 { font-size: 23px; }
+  .card-head p { max-width: 100%; font-size: 12px; }
+  /* таблицы: сначала уменьшаем плотность, при нехватке — горизонтальный скролл */
+  table.tbl { font-size: 12px; }
+  table.tbl th, table.tbl td { padding: 9px 8px 9px 0; }
+}
+
+@supports selector(:has(*)) {
+  @media (max-width: 640px) {
+    .card:has(table.tbl) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  }
+}
+
+/* Карточка ролика и тосты на телефоне — на всю ширину, с учётом «домашней» полосы */
+@media (max-width: 640px) {
+  .drawer { width: 100vw; padding: 16px 14px calc(32px + env(safe-area-inset-bottom)); }
+  .drawer-head { top: -16px; margin: -16px -14px 14px; padding: 14px; }
+  .toasts {
+    left: 12px; right: 12px; max-width: none;
+    bottom: calc(14px + env(safe-area-inset-bottom));
+  }
+}
+
+/* Ландшафт на телефоне: липкая панель съедает половину высоты — отключаем липкость */
+@media (max-width: 920px) and (orientation: landscape) and (max-height: 460px) {
+  .mobile-bar { position: static; }
+  .main { padding-bottom: 24px; }
+}

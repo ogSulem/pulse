@@ -164,6 +164,8 @@ sudo docker compose --profile tls up -d # с HTTPS через Caddy
 | `PULSE_DB_PATH` | путь к SQLite | `<data>/pulse.db` |
 | `PULSE_MEDIA_DIR` | путь к готовым файлам | `<data>/media` |
 | `PULSE_PUBLIC_URL` | публичный адрес; нужен Instagram для забора видео | — |
+| `PULSE_DOMAIN` | домен для HTTPS-профиля Caddy; можно писать по-русски | — |
+| `PULSE_COOKIE_DOMAIN` | домен для cookie сессии, если панель на нескольких поддоменах | не задан (cookie привязана к хосту) |
 | `PULSE_TZ` | часовой пояс расписания | `Europe/Moscow` |
 | `PULSE_RENDER_QUALITY` | `high` / `balanced` / `fast` | `high` |
 | `PULSE_RENDER` | `off` отключает рендер (экономия CPU на слабом хосте) | `on` |
@@ -171,6 +173,30 @@ sudo docker compose --profile tls up -d # с HTTPS через Caddy
 
 Ключи провайдеров (`NVIDIA_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `RUNWAY_API_KEY`, …) нужны только
 в `live`. Полный список — в `.env.example`.
+
+### Домен с кириллицей
+
+Домен можно записывать так, как он выглядит в браузере — `edu.каркастайги.рф`.
+Схему (`https://`) добавлять не нужно, переводить в латиницу (`xn--…`) тоже:
+
+```bash
+PULSE_DOMAIN=edu.каркастайги.рф
+# приложение само превратит его в
+#   PULSE_PUBLIC_URL=https://edu.xn--80aaamzedb7cml.xn--p1ai
+```
+
+Что происходит под капотом: `deploy/domain.sh` переводит домен в punycode (через `idn2`,
+`python3` или `node` — что найдётся), `install.sh`/`update.sh` пишут в `.env` уже латиницу,
+Caddy получает рабочее имя и выпускает сертификат. В интерфейсе («Настройки → Хостинг»)
+показываются обе формы: русская — для глаза, латинская — та, что в конфигах.
+
+Если домен всё-таки не разобрался, панель скажет об этом одной строкой и подскажет, что писать —
+«адрес без HTTPS» на правильную настройку больше не появляется.
+
+Cookie сессии ставит сервер (`HttpOnly`, `SameSite=Lax`, `Secure` на https), поэтому вход
+работает и там, где браузер запрещает `localStorage` — приватный режим Safari, встроенные
+браузеры Telegram/Instagram. `PULSE_COOKIE_DOMAIN` нужен только для нескольких поддоменов;
+кириллицу в нём тоже можно не переводить.
 
 ### Как запустить без вложений
 
@@ -302,8 +328,19 @@ tar czf pulse-media-$(date +%F).tgz -C /opt/pulse/data media
 ## 7. Обновления
 
 ```bash
-cd /opt/pulse && sudo bash deploy/install.sh     # git pull + пересборка + рестарт
+cd /opt/pulse
+sudo bash deploy/update.sh                          # обычное обновление
+sudo bash deploy/update.sh --domain edu.каркастайги.рф   # + сменить домен
 ```
+
+`deploy/update.sh` делает ровно одно: забирает свежий `main`, пересобирает образ, поднимает
+контейнер и ждёт `/api/health`. Он **не трогает** `.env` (пароль, секрет, ключи) и `./data`.
+Если новая версия не поднялась — печатает последние строки лога и готовую команду отката
+на прошлый коммит, данные при этом целы.
+
+Домен в `.env` можно держать кириллицей: скрипт сам переведёт его в punycode и обновит
+`PULSE_PUBLIC_URL`. Именно на этом раньше спотыкались сторонние скрипты обновления —
+не-ASCII в `sed` и Caddy без латиницы.
 
 База мигрируется сама при старте (`migrate()` + `ensureColumns()`), данные не теряются.
 Перед обновлением на всякий случай: `docker compose exec pulse npm run backup`.
@@ -314,6 +351,7 @@ cd /opt/pulse && sudo bash deploy/install.sh     # git pull + пересборк
 
 - [ ] `GET /api/health` → `{"ok":true,"mode":"demo"}` (или `"live"`).
 - [ ] Панель открывается по HTTPS, вход работает, «Выйти» возвращает на логин.
+- [ ] Вход работает **с телефона** — в том числе в приватном режиме Safari (сессия в cookie).
 - [ ] `GET /api/transparency` → в ответе `render.available: true`, `render.ffmpegSource` (системный или installer).
 - [ ] «Рост» → «Студия» → собрать ролик: файл появляется в `/media/...` и играется в браузере.
 - [ ] Перезапуск контейнера не стирает данные: после `docker compose restart` ролик и аккаунты на месте.

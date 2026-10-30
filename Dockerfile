@@ -80,9 +80,14 @@ RUN mkdir -p /app/data && chown -R node:node /app
 # .gitattributes в репозитории уже хранит LF, но образ должен быть неуязвим
 # к тому, как именно его склонировали.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && head -n1 /usr/local/bin/docker-entrypoint.sh | grep -qx '#!/bin/sh'
+# deploy/domain.sh — общий разбор домена (кириллица → punycode). Копируем рядом:
+# entrypoint подхватывает его, чтобы PULSE_PUBLIC_URL и PULSE_DOMAIN были рабочими
+# даже если человек записал домен по-русски.
+COPY deploy/domain.sh /usr/local/bin/pulse-domain.sh
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/bin/pulse-domain.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/pulse-domain.sh \
+    && head -n1 /usr/local/bin/docker-entrypoint.sh | grep -qx '#!/bin/sh' \
+    && head -n1 /usr/local/bin/pulse-domain.sh | grep -qx '#!/bin/sh'
 
 EXPOSE 8080
 VOLUME ["/app/data"]

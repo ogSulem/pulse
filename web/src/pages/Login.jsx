@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { api, setToken } from '../lib/api.js';
+import { api, setToken, storageBlocked } from '../lib/api.js';
 import Icon, { Logo } from '../components/Icons.jsx';
 
 export default function Login({ onSuccess }) {
@@ -16,7 +16,14 @@ export default function Login({ onSuccess }) {
       setToken(res.token);
       onSuccess();
     } catch (err) {
-      setError(err.message || 'Не удалось войти');
+      // Раньше любая сетевая ошибка показывалась как «Требуется вход», и на
+      // телефоне это выглядело как «пароль не подходит». Теперь причина названа.
+      setError(
+        err.status === 401 ? 'Неверный пароль'
+          : err.status === 429 ? 'Слишком много попыток — подождите минуту'
+            : err.status ? `Сервер ответил ${err.status}. ${err.message || ''}`.trim()
+              : 'Нет связи с сервером: проверьте адрес и интернет',
+      );
     } finally {
       setBusy(false);
     }
@@ -70,7 +77,9 @@ export default function Login({ onSuccess }) {
             {busy ? 'Проверяем…' : 'Войти'} <Icon name="arrowUpRight" size={15} />
           </button>
           <p className="field-hint" style={{ marginTop: 14, textAlign: 'center' }}>
-            Пароль задаётся переменной <code className="mono">PULSE_PASSWORD</code> в <code className="mono">.env</code>
+            {storageBlocked()
+              ? 'Браузер блокирует локальное хранилище — вход сохранится в cookie сессии.'
+              : <>Пароль задаётся переменной <code className="mono">PULSE_PASSWORD</code> в <code className="mono">.env</code></>}
           </p>
         </form>
       </div>

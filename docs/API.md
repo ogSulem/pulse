@@ -2,14 +2,19 @@
 
 Базовый URL: `http://<host>:<port>/api` · формат: JSON · кодировка: UTF-8.
 Авторизация: `Authorization: Bearer <token>` (кроме `/health`, `/covers/*`, `/auth/login`).
+Тот же вход принимается cookie `pulse_session` — она ставится при логине (`HttpOnly`, `SameSite=Lax`,
+`Secure` на https) и нужна устройствам, где браузер запрещает `localStorage`.
 
 ```bash
 # вход
 curl -s -X POST http://localhost:8080/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"password":"pulse"}'
-# → { "token": "eyJzdWIi…", "user": { "name": "Owner", "role": "owner" } }
+# → { "token": "eyJzdWIi…", "cookie": true, "user": { "name": "Owner", "role": "owner" } }
+# + Set-Cookie: pulse_session=…; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600
 ```
+
+Выход: `POST /api/auth/logout` — стирает cookie (`Max-Age=0`). Клиент дополнительно чистит токен.
 
 Дальше во всех примерах `TOKEN` — это значение `token`.
 
