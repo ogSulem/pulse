@@ -11,14 +11,24 @@ mkdir -p "$DATA"
 # строку в двух переменных.
 # Домен может быть записан по-русски (edu.каркастайги.рф). Приложению и площадкам
 # нужен punycode, поэтому переводим здесь же — один раз, при старте.
-if [ -f /usr/local/bin/pulse-domain.sh ]; then
-  . /usr/local/bin/pulse-domain.sh
-else
-  pulse_to_ascii() { printf '%s' "$1"; }
-  pulse_public_url() {
-    case "$1" in http://*) printf 'http://%s' "$(printf '%s' "$1" | sed 's|^http://||')" ;; *) printf 'https://%s' "$1" ;; esac
-  }
-fi
+# В образе всегда есть node, поэтому конвертер надёжный; если node вдруг нет —
+# оставляем строку как есть, чтобы контейнер всё равно поднялся.
+pulse_to_ascii() {
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+      const raw = String(process.argv[1] || "").replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split("/")[0];
+      try { process.stdout.write(new URL("http://" + raw).host); } catch (e) { process.stdout.write(raw); }
+    ' "$1"
+  else
+    printf '%s' "$1" | sed -e 's|^[A-Za-z][A-Za-z0-9+.-]*://||' -e 's|/.*$||'
+  fi
+}
+pulse_public_url() {
+  case "$1" in
+    http://*) printf 'http://%s' "$(pulse_to_ascii "$1")" ;;
+    *) printf 'https://%s' "$(pulse_to_ascii "$1")" ;;
+  esac
+}
 
 if [ -n "${PULSE_DOMAIN}" ] && [ "${PULSE_DOMAIN}" != "localhost" ]; then
   ASCII_DOMAIN="$(pulse_to_ascii "${PULSE_DOMAIN}")"

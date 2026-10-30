@@ -209,11 +209,11 @@ api.get('/oauth/:platform/callback', async (req, res) => {
     const done = await finishFlow(platform, { code: req.query.code, state: req.query.state, origin });
     log({ level: 'success', actor: 'oauth', action: 'account.connected', entityType: 'account', entityId: done.accountId, message: `@${done.handle} подключён через OAuth` });
     const qs = new URLSearchParams({ connected: done.accountId, handle: String(done.handle || ''), platform });
-    return res.redirect(302, `/#/accounts?${qs.toString()}`);
+    return res.redirect(302, `/#/channels/accounts?${qs.toString()}`);
   } catch (err) {
     log({ level: 'error', actor: 'oauth', action: 'oauth.failed', message: String(err.message || err).slice(0, 300) });
     const qs = new URLSearchParams({ error: String(err.message || err).slice(0, 200), platform });
-    return res.redirect(302, `/#/accounts?${qs.toString()}`);
+    return res.redirect(302, `/#/channels/accounts?${qs.toString()}`);
   }
 });
 

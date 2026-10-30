@@ -1504,8 +1504,15 @@ try {
   if (!install.includes('pulse_to_ascii')) throw new Error('install.sh не нормализует домен');
   const compose = fs.readFileSync(path.join(process.cwd(), 'docker-compose.yml'), 'utf8');
   if (!compose.includes('PULSE_DOMAIN')) throw new Error('compose не передаёт домен в Caddy');
+  // entrypoint не может зависеть от каталога deploy: его нет в образе
+  // (.dockerignore). В контейнере конвертер делает node.
   const entry = fs.readFileSync(path.join(process.cwd(), 'docker-entrypoint.sh'), 'utf8');
-  if (!entry.includes('pulse-domain.sh')) throw new Error('entrypoint не подхватывает разбор домена');
+  if (!entry.includes('pulse_to_ascii')) throw new Error('entrypoint не переводит домен');
+  if (entry.includes('pulse-domain.sh')) throw new Error('entrypoint ссылается на файл вне образа');
+  const dockerignore = fs.readFileSync(path.join(process.cwd(), '.dockerignore'), 'utf8');
+  if (/^deploy$/m.test(dockerignore) && entry.includes('deploy/')) {
+    throw new Error('entrypoint читает deploy/, а каталог исключён из образа');
+  }
 
   ok('скрипты: домен и обновление', `deploy/update.sh, install.sh и entrypoint переводят домен сами (${asciiFromShell})`);
 } catch (err) { fail('скрипты: домен и обновление', err); }
