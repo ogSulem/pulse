@@ -1,9 +1,36 @@
 const TOKEN_KEY = 'pulse.token';
 
+// Токен держим в двух местах: localStorage и памяти вкладки.
+//
+// Зачем память. На телефоне localStorage бывает недоступен — приватный режим
+// Safari, «Блокировать все cookie», встроенный браузер мессенджера. Раньше вход
+// в этом случае молча не срабатывал: пароль верный, токен не сохранился, и
+// первый же запрос уходил без него (401 → снова экран входа). Теперь сессия
+// живёт до перезагрузки в памяти, а сервер дополнительно ставит HttpOnly-cookie,
+// поэтому вход держится и после перезагрузки.
+let memoryToken = null;
+
+/** Есть ли рабочее хранилище. Нужно, чтобы честно предупредить человека. */
+export function storageBlocked() {
+  try {
+    const probe = '__pulse_probe__';
+    localStorage.setItem(probe, '1');
+    localStorage.removeItem(probe);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 export const getToken = () => {
-  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+  try {
+    const saved = localStorage.getItem(TOKEN_KEY);
+    if (saved) return saved;
+  } catch { /* хранилище недоступно — живём на памяти и cookie */ }
+  return memoryToken;
 };
 export const setToken = (token) => {
+  memoryToken = token || null;
   try { token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY); } catch {}
 };
 
@@ -21,7 +48,7 @@ async function request(path, { method = 'GET', body, raw = false } = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`/api${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const res = await fetch(`/api${path}`, { method, headers, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
   if (res.status === 401) {
     setToken(null);
     if (!path.startsWith('/auth/login')) {
@@ -41,6 +68,7 @@ async function request(path, { method = 'GET', body, raw = false } = {}) {
 
 export const api = {
   login: (password) => request('/auth/login', { method: 'POST', body: { password } }),
+  logout: () => request('/auth/logout', { method: 'POST', body: {} }),
   me: () => request('/auth/me'),
   bootstrap: () => request('/bootstrap'),
 

@@ -106,7 +106,7 @@ SVG-типографика → sharp → слойный монтаж в ffmpeg (
 | **ffmpeg на любой архитектуре** | `PULSE_FFMPEG_PATH` → installer → системный бинарь; в образ ставится apt-ffmpeg, поэтому ARM (Oracle Ampere) тоже рендерит |
 | **Честная рамка demo** | в панели видна полоса «Демо-режим: реальных выплат нет»; в `live` она исчезает |
 | **Бэкапы** | `npm run backup` — консистентный дамп SQLite через `db.backup()`, хранит 14 копий, знает про медиа |
-| **CI** | GitHub Actions: сборка панели, 76 проверок smoke и сборка Docker-образа на каждый push |
+| **CI** | GitHub Actions: сборка панели, 80 проверок smoke и сборка Docker-образа на каждый push |
 
 ## Что нового в v8: сериалы — длинные истории 8–20 минут
 
@@ -212,6 +212,8 @@ curl -fsSL https://raw.githubusercontent.com/ogSulem/pulse/main/deploy/install.s
 
 Скрипт поставит Docker, сгенерирует пароль и секрет, соберёт образ, поднимет контейнер и
 напечатает адрес и пароль. Домен и HTTPS: `sudo PULSE_DOMAIN=pulse.example.com bash deploy/install.sh`.
+Домен можно писать по-русски (`PULSE_DOMAIN=edu.каркастайги.рф`) — скрипт сам переведёт его
+в punycode для Caddy. Обновление потом: `sudo bash deploy/update.sh`.
 
 **Полная инструкция:** [`docs/DEPLOY.md`](docs/DEPLOY.md) — Railway по шагам, бесплатный Oracle,
 переезд, бэкапы, переменные окружения и честный путь к первым деньгам.
@@ -381,10 +383,12 @@ pulse/
 │  ├─ Caddyfile        # HTTPS для docker compose --profile tls
 │  ├─ tunnel.sh        # бесплатный публичный https-адрес (Cloudflare Quick Tunnel)
 │  ├─ railway.sh       # Railway: проект, том, переменные, деплой одной командой
-│  └─ install.sh       # установка на чистый сервер одной командой
+│  ├─ install.sh       # установка на чистый сервер одной командой
+│  ├─ update.sh        # обновление: код, домен, пересборка, проверка /api/health
+│  └─ domain.sh        # кириллица → punycode, один разбор на все скрипты
 ├─ Dockerfile · docker-compose.yml · .env.example
 ├─ railway.json · render.yaml · fly.toml   # конфиги площадок
-├─ .github/workflows/ci.yml                # сборка + 76 проверок smoke на каждый push
+├─ .github/workflows/ci.yml                # сборка + 80 проверок smoke на каждый push
 └─ data/               # SQLite, медиа, бэкапы (том контейнера, в git не попадает)
 ```
 
@@ -544,7 +548,7 @@ npm run smoke
 # ✓ деньги длинного формата (часы, RPM, путь к 4000 ч) · ✓ расписание серий без дублей
 ```
 
-Сейчас это **76 проверок**; падение любой — ненулевой код выхода, поэтому smoke можно ставить в CI.
+Сейчас это **80 проверок**; падение любой — ненулевой код выхода, поэтому smoke можно ставить в CI.
 
 **Отдельная проверка ИИ-контура** (локальный мок-провайдер, наружу ничего не уходит, ~1 секунда):
 

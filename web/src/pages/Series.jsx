@@ -298,7 +298,7 @@ function EpisodeDrawer({ episodeId, onClose, onChanged }) {
           {tab === 'script' && (
             <div className="col" style={{ gap: 12 }}>
               {ep.video_path && (
-                <video className="series-video" src={ep.video_path} controls poster={ep.cover_paths?.A} />
+                <video className="series-video" src={ep.video_path} controls playsInline preload="metadata" poster={ep.cover_paths?.A} />
               )}
               <div className="chapters">
                 {ep.chapters.map((c, i) => (

@@ -33,7 +33,8 @@ import {
 import { buildEpisode } from '../engine/serial.js';
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkPassword, issueToken, verifyToken } from './auth.js';
+import { checkPassword, issueToken, verifyToken, tokenFromRequest, sessionCookie, clearCookie, SESSION_COOKIE } from './auth.js';
+import { originFromRequest } from '../core/publicurl.js';
 import { oauthStatus, startFlow, finishFlow } from '../engine/oauth.js';
 import { boot } from '../core/boot.js';
 import { framesStatus } from '../engine/frames.js';
@@ -183,7 +184,17 @@ api.post('/auth/login', (req, res) => {
     return res.status(401).json({ error: 'invalid_password', message: 'Неверный пароль' });
   }
   loginAttempts.delete(ip);
-  res.json({ token: issueToken(), user: { name: 'Owner', role: 'owner' } });
+  const token = issueToken();
+  // Cookie — страховка для телефонов, где localStorage недоступен (приватный
+  // режим Safari, встроенные браузеры): без неё вход молча «слетал».
+  res.set('Set-Cookie', sessionCookie(req, token));
+  res.json({ token, cookie: true, user: { name: 'Owner', role: 'owner' } });
+});
+
+// Выход: стираем cookie (клиент дополнительно чистит localStorage).
+api.post('/auth/logout', (req, res) => {
+  res.set('Set-Cookie', clearCookie(req));
+  res.json({ ok: true });
 });
 
 // ─── OAuth каналов ──────────────────────────────────────────────────────────
@@ -191,28 +202,37 @@ api.post('/auth/login', (req, res) => {
 // защита в state (одноразовый, 10 минут) и PKCE.
 api.get('/oauth/:platform/callback', async (req, res) => {
   const platform = String(req.params.platform || '');
-  const origin = `${req.protocol}://${req.get('host')}`;
+  // redirect_uri собирается латиницей: площадки сравнивают его посимвольно,
+  // а за нестандартным прокси в Host бывает кириллица.
+  const origin = originFromRequest(req);
   try {
     const done = await finishFlow(platform, { code: req.query.code, state: req.query.state, origin });
     log({ level: 'success', actor: 'oauth', action: 'account.connected', entityType: 'account', entityId: done.accountId, message: `@${done.handle} подключён через OAuth` });
     const qs = new URLSearchParams({ connected: done.accountId, handle: String(done.handle || ''), platform });
-    return res.redirect(302, `/#/accounts?${qs.toString()}`);
+    return res.redirect(302, `/#/channels/accounts?${qs.toString()}`);
   } catch (err) {
     log({ level: 'error', actor: 'oauth', action: 'oauth.failed', message: String(err.message || err).slice(0, 300) });
     const qs = new URLSearchParams({ error: String(err.message || err).slice(0, 200), platform });
-    return res.redirect(302, `/#/accounts?${qs.toString()}`);
+    return res.redirect(302, `/#/channels/accounts?${qs.toString()}`);
   }
 });
 
 // ─── Всё ниже требует авторизации ──────────────────────────────────────────
 api.use((req, res, next) => {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : req.query.token;
-  if (!verifyToken(token)) return res.status(401).json({ error: 'unauthorized', message: 'Требуется вход в панель' });
+  // Один разбор токена на всё API: Bearer → cookie → ?token=. Cookie нужна
+  // телефонам, где localStorage недоступен; раньше здесь читался только заголовок,
+  // и вход с такого устройства не держался.
+  if (!verifyToken(tokenFromRequest(req))) {
+    return res.status(401).json({ error: 'unauthorized', message: 'Требуется вход в панель' });
+  }
   next();
 });
 
-api.get('/auth/me', (_req, res) => res.json({ user: { name: 'Owner', role: 'owner' }, mode: process.env.PULSE_MODE || 'demo' }));
+api.get('/auth/me', (req, res) => {
+  // Сессия может прийти cookie-ем — тогда токена на клиенте нет, но вход есть.
+  const hasCookie = Boolean(String(req.headers.cookie || '').includes(`${SESSION_COOKIE}=`));
+  res.json({ user: { name: 'Owner', role: 'owner' }, mode: process.env.PULSE_MODE || 'demo', cookie: hasCookie });
+});
 
 // ─── Bootstrap: один запрос для первого рендера SPA ─────────────────────────
 api.get('/bootstrap', (_req, res) => {
@@ -626,7 +646,7 @@ api.post('/pipeline/requeue', (_req, res) => {
 
 // ─── Аккаунты ───────────────────────────────────────────────────────────────
 api.get('/oauth/status', (req, res) => {
-  const origin = `${req.protocol}://${req.get('host')}`;
+  const origin = originFromRequest(req);
   res.json({
     configured: oauthStatus().some((p) => p.configured),
     publicUrl: publicBase(),
@@ -636,7 +656,7 @@ api.get('/oauth/status', (req, res) => {
 
 api.get('/oauth/:platform/start', (req, res) => {
   try {
-    const origin = `${req.protocol}://${req.get('host')}`;
+    const origin = originFromRequest(req);
     res.json(startFlow(req.params.platform, { origin, accountId: req.query.accountId || null }));
   } catch (err) {
     res.status(400).json({ error: 'oauth_not_configured', message: String(err.message || err) });

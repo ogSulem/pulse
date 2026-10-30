@@ -189,7 +189,13 @@ function Shell({ data, refresh, refreshLight, loading }) {
             <button className="btn btn-ghost btn-icon" title="Тема" onClick={toggleTheme}>
               <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={15} />
             </button>
-            <button className="btn btn-ghost btn-icon" title="Выйти" onClick={() => { setToken(null); window.location.reload(); }}>
+            <button className="btn btn-ghost btn-icon" title="Выйти" onClick={async () => {
+              // Сначала гасим cookie на сервере, иначе на телефоне вход вернётся
+              // при следующей загрузке (cookie осталась бы живой).
+              try { await api.logout(); } catch { /* уже не авторизованы — не страшно */ }
+              setToken(null);
+              window.location.reload();
+            }}>
               <Icon name="logout" size={15} />
             </button>
           </div>
@@ -285,13 +291,19 @@ export default function App() {
   const [authed, setAuthed] = useState(Boolean(getToken()));
   const [data, setData] = useState({ projects: [], accounts: [], products: [], settings: {}, pipeline: {}, episodes: [], logs: [] });
   const [loading, setLoading] = useState(true);
+  // Ошибка загрузки. Раньше сбой сети или 500 оставлял пустой экран без единого
+  // слова — на телефоне это выглядело как «панель не работает». Теперь причина
+  // и кнопка «Повторить» на виду.
+  const [loadError, setLoadError] = useState('');
 
   const load = useCallback(async () => {
     try {
       const res = await api.bootstrap();
       setData(res);
+      setLoadError('');
     } catch (err) {
       if (err.status === 401) setAuthed(false);
+      else setLoadError(err.status ? `Сервер ответил ${err.status}. ${err.message || ''}`.trim() : 'Нет связи с сервером');
     } finally {
       setLoading(false);
     }
@@ -334,7 +346,33 @@ export default function App() {
   return (
     <ToastProvider>
       <AppCtx.Provider value={value}>
-        <Shell data={data} refresh={load} refreshLight={refreshLight} loading={loading} />
+        {loadError && !data.pipeline?.queued && !data.projects.length ? (
+          <div className="login-wrap">
+            <div className="login-card" style={{ textAlign: 'center' }}>
+              <div className="row" style={{ justifyContent: 'center', marginBottom: 14 }}><Logo size={34} /></div>
+              <h1 style={{ fontSize: 18 }}>Панель не отвечает</h1>
+              <p className="lead" style={{ marginTop: 6 }}>{loadError}</p>
+              <div className="row" style={{ gap: 8, marginTop: 18, justifyContent: 'center', flexWrap: 'wrap' }}>
+                <button className="btn btn-primary" onClick={() => { setLoading(true); load().then(() => refreshLight()); }}>
+                  <Icon name="refresh" size={14} />Повторить
+                </button>
+                <button className="btn btn-ghost" onClick={async () => {
+                  try { await api.logout(); } catch { /* не авторизованы */ }
+                  setToken(null);
+                  window.location.reload();
+                }}>
+                  Войти заново
+                </button>
+              </div>
+              <p className="field-hint" style={{ marginTop: 14 }}>
+                Если панель открыта по IP без HTTPS, проверьте, что контейнер поднят:
+                <span className="mono"> docker compose ps</span>
+              </p>
+            </div>
+          </div>
+        ) : (
+          <Shell data={data} refresh={load} refreshLight={refreshLight} loading={loading} />
+        )}
       </AppCtx.Provider>
     </ToastProvider>
   );

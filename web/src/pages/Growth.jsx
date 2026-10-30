@@ -4,6 +4,7 @@ import { useApp } from '../App.jsx';
 import Icon, { PlatformIcon } from '../components/Icons.jsx';
 import { Badge, Field, Modal, Progress, Segmented, Empty, ScoreRing, useToast } from '../components/ui.jsx';
 import { fmt, money, pct, plural, platformLabel } from '../lib/format.js';
+import { copyText as copyToClipboard } from '../lib/clipboard.js';
 
 const STATUS = {
   healthy: { label: 'активен', tone: 'success' },
@@ -111,10 +112,11 @@ export default function Growth() {
   };
 
   const copy = async (text) => {
-    try {
-      await navigator.clipboard.writeText(text);
+    // navigate.clipboard есть только по https — на http и в старых WebView
+    // кнопка молча не работала. Теперь есть запасной путь.
+    if (await copyToClipboard(text)) {
       toast.push({ tone: 'success', title: 'Скопировано', text: 'Хук готов к вставке в сценарий' });
-    } catch {
+    } else {
       toast.push({ tone: 'info', title: 'Скопируйте вручную', text });
     }
   };
@@ -1007,11 +1009,10 @@ function StudioTab({ toast }) {
     } finally { setBusy(false); }
   };
 
-  const copyText = async (text) => {
-    try {
-      await navigator.clipboard.writeText(text);
+  const copyDescription = async (text) => {
+    if (await copyToClipboard(text)) {
       toast.push({ tone: 'success', title: 'Описание скопировано', text: 'Можно вставить в публикацию вручную' });
-    } catch {
+    } else {
       toast.push({ tone: 'info', title: 'Скопируйте вручную', text: String(text).slice(0, 160) });
     }
   };
@@ -1221,7 +1222,7 @@ function StudioTab({ toast }) {
                 <button className="btn btn-ghost" onClick={build} disabled={busy}>
                   <Icon name="refresh" size={14} />Пересобрать
                 </button>
-                <button className="btn btn-ghost" onClick={() => copyText(best.captions?.[captionTab])}>
+                <button className="btn btn-ghost" onClick={() => copyDescription(best.captions?.[captionTab])}>
                   <Icon name="copy" size={14} />Описание
                 </button>
               </div>

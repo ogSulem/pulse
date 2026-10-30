@@ -68,10 +68,22 @@ export default function HostingCard() {
             </div>
             <div className="row-between">
               <span style={{ color: 'var(--muted)' }}>Публичный адрес</span>
-              <span className="mono" style={{ fontSize: 10.5, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {deploy.publicUrl || '—'}
+              {/* Если домен кириллический — показываем привычное написание, а
+                  латиницу (punycode) оставляем в подсказке: именно она уходит в
+                  конфиги, и человек должен видеть, что это одно и то же. */}
+              <span
+                className="mono"
+                title={deploy.publicUrlUnicode && deploy.publicUrlUnicode !== deploy.publicUrlAscii ? `В конфигах: ${deploy.publicUrlAscii}` : deploy.publicUrl}
+                style={{ fontSize: 10.5, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              >
+                {deploy.publicUrlUnicode || deploy.publicUrl || '—'}
               </span>
             </div>
+            {deploy.publicUrlUnicode && deploy.publicUrlUnicode !== deploy.publicUrlAscii && (
+              <div style={{ fontSize: 10.5, color: 'var(--muted)', lineHeight: 1.5, marginTop: -4 }}>
+                в конфигах: <span className="mono">{deploy.publicUrlAscii}</span>
+              </div>
+            )}
             <div className="row-between">
               <span style={{ color: 'var(--muted)' }}>Каталог данных</span>
               <span className="mono" style={{ fontSize: 10.5 }}>{deploy.dataDir}</span>

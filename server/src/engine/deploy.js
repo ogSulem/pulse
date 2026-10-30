@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { DATA_DIR } from '../core/boot.js';
-import { publicBase, publicHint, isHosted, publicSource } from '../core/publicurl.js';
+import { publicBase, publicHint, isHosted, publicSource, publicPair, normalizeDomain } from '../core/publicurl.js';
 import { renderInfo, MEDIA_DIR } from './render.js';
 import { notifyConfig } from './notify.js';
 import { status as llmStatus } from '../providers/llm.js';
@@ -135,16 +135,45 @@ export function deployReadiness({ env: e = env } = {}) {
 
   // ── 3. публичный адрес ────────────────────────────────────────────────────
   const hint = publicHint(e);
-  if (!hint.url) {
+  const pair = publicPair(e);
+  if (hint.error) {
+    // Адрес задан, но не разобрался. Раньше это выглядело как «адрес без HTTPS»
+    // и человек шёл переписывать домен в punycode руками — теперь говорим прямо,
+    // что писать и в каком виде.
+    checks.push(check(
+      'public_url', 'error', 'Публичный адрес не разобрался',
+      `${hint.error}. Кириллицу переводить вручную не нужно: панель делает это сама.`,
+      'В PULSE_DOMAIN / PULSE_PUBLIC_URL пишите домен как в браузере: edu.каркастайги.рф — схему https:// и латиницу (xn--…) добавим сами.',
+    ));
+  } else if (!hint.url) {
     checks.push(check(
       'public_url', 'warn', 'Публичный адрес неизвестен',
       'YouTube публикует файлом и это переживёт, но Instagram и TikTok забирают видео по ссылке — без адреса они не работают.',
-      'Railway/Render/Fly подставляют адрес сами; локально — deploy/tunnel.sh (бесплатный https).',
+      'Railway/Render/Fly подставляют адрес сами; свой сервер — PULSE_DOMAIN=ваш.домен; локально — deploy/tunnel.sh (бесплатный https).',
     ));
   } else if (!/^https:\/\//i.test(hint.url)) {
     checks.push(check('public_url', 'warn', 'Адрес без HTTPS', `${hint.url} — площадки требуют https для скачивания видео.`, 'Включите HTTPS (Railway даёт его из коробки) или Caddy: docker compose --profile tls up -d.'));
   } else {
     checks.push(check('public_url', 'ok', 'Публичный адрес есть', hint.note));
+  }
+
+  // ── 3b. кириллический домен ───────────────────────────────────────────────
+  // Отдельная проверка, потому что это самый частый случай «панель ругается, а
+  // я всё сделал правильно»: домен верный, но в конфигах нужен punycode.
+  if (pair.ascii && pair.unicode && pair.unicode !== pair.ascii) {
+    checks.push(check(
+      'domain_idn', 'ok', 'Домен с кириллицей',
+      `В браузере — ${pair.unicode}, в конфигах — ${pair.ascii}. Обе формы рабочие, менять ничего не нужно.`,
+    ));
+  }
+  // Cookie сессии: если домен задан явно, он должен быть латиницей — иначе браузер
+  // молча выбросит cookie и вход будет «слетать» (главная причина «не заходит»).
+  const cookieDomainRaw = String(e.PULSE_COOKIE_DOMAIN || '').trim();
+  if (cookieDomainRaw) {
+    const cd = normalizeDomain(cookieDomainRaw);
+    checks.push(cd.ascii
+      ? check('cookie_domain', 'ok', 'Cookie привязаны к домену', `PULSE_COOKIE_DOMAIN=${cd.ascii}${cd.unicode !== cd.ascii ? ` (${cd.unicode})` : ''}`)
+      : check('cookie_domain', 'warn', 'Cookie-домен не разобрался', `PULSE_COOKIE_DOMAIN=${cookieDomainRaw}: ${cd.error}. Cookie уйдут на текущий хост — вход работать будет.`, 'Оставьте PULSE_COOKIE_DOMAIN пустым или укажите домен вида edu.example.ru.'));
   }
 
   // ── 4. режим работы ───────────────────────────────────────────────────────
@@ -232,6 +261,10 @@ export function deployReadiness({ env: e = env } = {}) {
     counts,
     blockers,
     publicUrl: publicBase(e),
+    // то же самое, но привычными буквами — для подписи в интерфейсе
+    publicUrlUnicode: pair.unicode || '',
+    publicUrlAscii: pair.ascii || '',
+    domainError: hint.error || '',
     publicSource: publicSource(e),
     mediaUrl: hint.url ? `${hint.url}/media` : '',
     dataDir,
