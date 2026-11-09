@@ -215,6 +215,18 @@ export function deployReadiness({ env: e = env } = {}) {
     } else {
       checks.push(check('storage', 'ok', 'Место под медиа', `${mb(storage.bytes)} занято, свободно ${mb(storage.freeBytes)}`));
     }
+
+    // Копии базы: на VPS, который стоит годами, единственная страховка от
+    // «диск умер / образ пересоздан» — регулярный бэкап. Он делается сам.
+    const backups = storage.backups || { count: 0, lastAt: null };
+    const ageDays = backups.lastAt ? (Date.now() - new Date(backups.lastAt).getTime()) / 86400000 : Infinity;
+    if (!backups.count) {
+      checks.push(check('backup', 'warn', 'Копий базы пока нет', 'Первая копия появится автоматически в ближайший час (или POST /api/storage/backup).', 'Копии хранятся в data/backups, 7 последних'));
+    } else if (ageDays > 3) {
+      checks.push(check('backup', 'warn', 'Копия базы устарела', `Последняя копия ${Math.round(ageDays)} дн. назад — автобэкап не отрабатывает.`, 'POST /api/storage/backup — сделать копию сейчас'));
+    } else {
+      checks.push(check('backup', 'ok', 'Копии базы', `${backups.count} шт., последняя ${Math.round(ageDays * 24)} ч назад`));
+    }
   } catch {
     checks.push(check('storage', 'warn', 'Не удалось посчитать место', `Каталог ${MEDIA_DIR} недоступен.`, null));
   }

@@ -12,6 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -21,7 +22,15 @@ const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let sharp = null;
-try { sharp = require('sharp'); } catch { sharp = null; }
+try {
+  sharp = require('sharp');
+  // libvips по умолчанию держит кэш файлов и пул потоков по числу ядер. На
+  // небольшом VPS (1–2 ГБ) это давало постоянные 500–600 МБ RSS и заметный CPU
+  // даже без работы. Кэш памяти ограничен, кэш файлов выключен: обложки и слои
+  // читаются один раз и всё равно удаляются после рендера.
+  sharp.cache({ memory: 64, files: 0, items: 40 });
+  sharp.concurrency(Math.max(1, Math.min(2, os.cpus().length)));
+} catch { sharp = null; }
 
 // ffmpeg: env → @ffmpeg-installer → системный бинарь (см. core/ffmpeg.js).
 const ffmpegPath = resolveFfmpeg();
@@ -287,9 +296,14 @@ async function renderOne({ episode, project, scenes, handle, audioPath }) {
     '-shortest', '-movflags', '+faststart', '-y', videoAbs,
   ];
 
-  await runFfmpeg(args, 300000);
-
-  fs.rmSync(workDir, { recursive: true, force: true });
+  // try/finally: если ffmpeg упал или не уложился в лимит, рабочий каталог
+  // (bg.png 1080×1920 + слой на каждую сцену) раньше оставался на диске
+  // навсегда. За годы это десятки гигабайт «невидимого» мусора.
+  try {
+    await runFfmpeg(args, 300000);
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
   const stat = fs.statSync(videoAbs);
 
   return {

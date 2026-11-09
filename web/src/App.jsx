@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { api, getToken, setToken } from './lib/api.js';
 import Icon, { Logo } from './components/Icons.jsx';
 import { Badge, ToastProvider, useToast } from './components/ui.jsx';
@@ -309,7 +309,12 @@ export default function App() {
     }
   }, []);
 
+  const refreshing = useRef(false);
   const refreshLight = useCallback(async () => {
+    // Один запрос за раз: на медленном мобильном интернете ответы приходят
+    // позже следующего тика, и без флага они наслаивались друг на друга.
+    if (refreshing.current) return;
+    refreshing.current = true;
     try {
       const [pipeline, episodes, logs, projects, settings] = await Promise.all([
         api.pipelineStatus(), api.episodes({ limit: 14 }), api.logs({ limit: 16 }), api.projects(), api.settings(),
@@ -317,14 +322,24 @@ export default function App() {
       setData((prev) => ({ ...prev, pipeline: { ...pipeline.byStatus, queue: pipeline.queue, active: pipeline.active, upcoming: pipeline.upcoming }, episodes, logs, projects, settings }));
     } catch (err) {
       if (err.status === 401) setAuthed(false);
+    } finally {
+      refreshing.current = false;
     }
   }, []);
 
   useEffect(() => {
     if (!authed) return;
     load().then(() => refreshLight());
-    const t = setInterval(refreshLight, 6000);
-    return () => clearInterval(t);
+    // Опрос идёт только когда панель видна. Со свёрнутой вкладкой телефон
+    // тратил трафик и батарею на запросы, которых никто не видел.
+    const beat = () => { if (!document.hidden) refreshLight(); };
+    const t = setInterval(beat, 6000);
+    const onVisible = () => { if (!document.hidden) refreshLight(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [authed, load, refreshLight]);
 
   useEffect(() => {

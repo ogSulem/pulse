@@ -48,6 +48,15 @@ const { publicBase, publicHint, mediaBase } = publicUrl;
 
 export const api = express.Router();
 
+// Ответы API отдаём с ETag и «no-cache»: браузер хранит копию, но каждый раз
+// переспрашивает. Если ничего не изменилось, сервер отвечает 304 без тела.
+// Для телефона это разница в разы: панель обновляет данные каждые 6 секунд, и
+// без условных запросов это десятки мегабайт мобильного трафика за час.
+api.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') res.set('Cache-Control', 'no-cache');
+  next();
+});
+
 const STATUS_LABELS = {
   queued: 'В очереди', generating: 'В генерации', review: 'На проверке',
   scheduled: 'Запланирован', published: 'Опубликован', failed: 'Ошибка', paused: 'Пауза',
@@ -170,20 +179,52 @@ api.post('/postback', (req, res) => {
 });
 
 // ─── Авторизация ────────────────────────────────────────────────────────────
-const loginAttempts = new Map();
+// Лимит попыток. Раньше он считался только по req.ip, а за Caddy включён
+// `trust proxy`: значит, заголовком X-Forwarded-For можно было подставить любой
+// адрес и обойти лимит, перебирая пароль бесконечно. Теперь два счётчика —
+// на адрес и общий на сервер — и периодическая чистка карты, чтобы она не
+// росла от случайных сканеров.
+const LOGIN_WINDOW_MS = 60000;
+const LOGIN_PER_IP = 12;
+const LOGIN_GLOBAL = 20;
+const loginAttempts = new Map(); // ip → { n, reset }
+const globalAttempts = { n: 0, reset: 0 };
+let attemptsSweptAt = 0;
+
+function sweepAttempts(now) {
+  if (now - attemptsSweptAt < 60000) return;
+  attemptsSweptAt = now;
+  for (const [ip, bucket] of loginAttempts) {
+    if (now > bucket.reset + 300000) loginAttempts.delete(ip);
+  }
+}
+
 api.post('/auth/login', (req, res) => {
-  const ip = req.ip;
   const now = Date.now();
-  const bucket = loginAttempts.get(ip) || { n: 0, reset: now + 60000 };
-  if (now > bucket.reset) { bucket.n = 0; bucket.reset = now + 60000; }
-  if (bucket.n >= 12) return res.status(429).json({ error: 'too_many_attempts', message: 'Слишком много попыток. Подождите минуту.' });
+  sweepAttempts(now);
+
+  const ip = String(req.ip || 'unknown');
+  const bucket = loginAttempts.get(ip) || { n: 0, reset: now + LOGIN_WINDOW_MS };
+  if (now > bucket.reset) { bucket.n = 0; bucket.reset = now + LOGIN_WINDOW_MS; }
+  if (now > globalAttempts.reset) { globalAttempts.n = 0; globalAttempts.reset = now + LOGIN_WINDOW_MS; }
+
+  const retryAfter = Math.max(1, Math.ceil((Math.max(bucket.reset, globalAttempts.reset) - now) / 1000));
+  if (bucket.n >= LOGIN_PER_IP || globalAttempts.n >= LOGIN_GLOBAL) {
+    res.set('Retry-After', String(retryAfter));
+    return res.status(429).json({ error: 'too_many_attempts', message: `Слишком много попыток входа. Повторите через ${retryAfter} с.`, retryAfter });
+  }
+
   const { password } = req.body || {};
   if (!checkPassword(password)) {
     bucket.n += 1;
+    globalAttempts.n += 1;
     loginAttempts.set(ip, bucket);
+    // неудачные попытки — часть аудита: видно, что панель кто-то перебирает
+    log({ level: 'warn', actor: 'auth', action: 'auth.failed', message: `Неудачный вход (${bucket.n} за минуту)`, meta: { ip } });
     return res.status(401).json({ error: 'invalid_password', message: 'Неверный пароль' });
   }
   loginAttempts.delete(ip);
+  globalAttempts.n = 0;
   const token = issueToken();
   // Cookie — страховка для телефонов, где localStorage недоступен (приватный
   // режим Safari, встроенные браузеры): без неё вход молча «слетал».
@@ -229,9 +270,11 @@ api.use((req, res, next) => {
 });
 
 api.get('/auth/me', (req, res) => {
-  // Сессия может прийти cookie-ем — тогда токена на клиенте нет, но вход есть.
-  const hasCookie = Boolean(String(req.headers.cookie || '').includes(`${SESSION_COOKIE}=`));
-  res.json({ user: { name: 'Owner', role: 'owner' }, mode: process.env.PULSE_MODE || 'demo', cookie: hasCookie });
+  // Каким способом подтверждён вход. Раньше здесь была эвристика «есть заголовок
+  // Cookie» — она врала (cookie могла быть просроченной). Теперь точный ответ.
+  const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  const via = bearer ? 'header' : (String(req.headers.cookie || '').includes(`${SESSION_COOKIE}=`) ? 'cookie' : 'query');
+  res.json({ user: { name: 'Owner', role: 'owner' }, mode: process.env.PULSE_MODE || 'demo', cookie: via === 'cookie', via });
 });
 
 // ─── Bootstrap: один запрос для первого рендера SPA ─────────────────────────
@@ -579,12 +622,33 @@ api.post('/episodes/:id/action', (req, res) => {
   res.json({ ok: true, episode: episodeRow(db.prepare('SELECT * FROM episodes WHERE id = ?').get(e.id)) });
 });
 
+// Удаление ролика удаляет и его файлы. Раньше mp4, две обложки и озвучка
+// оставались на диске до плановой уборки — а если роликов удаляют много, это
+// гигабайты «ничьих» файлов, которые в интерфейсе уже нигде не видны.
+function removeEpisodeFiles(episode) {
+  try {
+    const paths = [];
+    const clean = (p) => (typeof p === 'string' && p.startsWith('/media/') ? p.slice('/media/'.length) : null);
+    if (episode.video_path) paths.push(clean(episode.video_path));
+    if (episode.audio_path) paths.push(clean(episode.audio_path));
+    const covers = parseJson(episode.cover_paths, {});
+    for (const value of Object.values(covers || {})) paths.push(clean(value));
+    for (const rel of paths.filter(Boolean)) {
+      const abs = path.join(MEDIA_DIR, rel);
+      // защита от «../»: удаляем только то, что действительно лежит в media
+      if (!abs.startsWith(MEDIA_DIR + path.sep)) continue;
+      try { fs.rmSync(abs, { force: true }); } catch { /* файл занят рендером */ }
+    }
+  } catch { /* удаление файлов не должно мешать удалению записи */ }
+}
+
 api.delete('/episodes/:id', (req, res) => {
   const e = db.prepare('SELECT * FROM episodes WHERE id = ?').get(req.params.id);
   if (!e) return res.status(404).json({ error: 'not_found' });
   db.prepare("UPDATE jobs SET status = 'done' WHERE status IN ('pending','running') AND payload LIKE ?").run(`%${e.id}%`);
   db.prepare('DELETE FROM episodes WHERE id = ?').run(e.id);
-  log({ level: 'warn', actor: 'user', action: 'episode.deleted', entityType: 'episode', entityId: e.id, message: `Ролик «${e.title}» удалён из очереди` });
+  removeEpisodeFiles(e);
+  log({ level: 'warn', actor: 'user', action: 'episode.deleted', entityType: 'episode', entityId: e.id, message: `Ролик «${e.title}» удалён вместе с файлами` });
   res.json({ ok: true });
 });
 
@@ -1389,6 +1453,18 @@ api.get('/storage', async (_req, res) => {
   res.json(storageUsage());
 });
 
+// Копия базы по кнопке: то же, что делает ежедневное обслуживание
+api.post('/storage/backup', async (_req, res) => {
+  const { backupDatabase } = await import('../engine/housekeeping.js');
+  try {
+    const done = await backupDatabase({ keep: 7 });
+    log({ level: 'success', actor: 'user', action: 'backup.created', message: `Копия базы создана: ${Math.round(done.size / 1024)} КБ` });
+    res.json({ ok: true, ...done });
+  } catch (err) {
+    res.status(500).json({ error: 'backup_failed', message: String(err.message || err) });
+  }
+});
+
 api.post('/storage/prune', async (req, res) => {
   const { pruneMedia } = await import('../engine/housekeeping.js');
   const days = num(req.body?.days, 0) || null;
@@ -1803,23 +1879,49 @@ api.get('/export/:type', (req, res) => {
   res.send(csv);
 });
 
+// JSON-бэкап: все таблицы, а не «почти все». Раньше сюда не попадали клики,
+// конверсии, кампании и сериалы — файл назывался полным, но восстановить из
+// него заработок и рекламу было нельзя.
+const BACKUP_TABLES = [
+  'settings', 'projects', 'accounts', 'accounts_daily', 'products', 'ideas', 'scripts',
+  'episodes', 'publications', 'metrics_daily', 'clicks', 'conversions',
+  'brands', 'campaigns', 'campaign_posts', 'series', 'series_episodes',
+];
+
 api.get('/backup', (_req, res) => {
   const dump = {
     exported_at: nowIso(),
     version: '1.0.0',
-    settings: getSettings(),
-    projects: db.prepare('SELECT * FROM projects').all(),
-    accounts: db.prepare('SELECT * FROM accounts').all(),
-    products: db.prepare('SELECT * FROM products').all(),
-    ideas: db.prepare('SELECT * FROM ideas').all(),
-    scripts: db.prepare('SELECT * FROM scripts').all(),
-    episodes: db.prepare('SELECT * FROM episodes').all(),
-    publications: db.prepare('SELECT * FROM publications').all(),
-    metrics_daily: db.prepare('SELECT * FROM metrics_daily').all(),
+    note: 'Токены аккаунтов зашифрованы PULSE_SECRET — для восстановления нужен тот же ключ',
+    tables: BACKUP_TABLES,
+    data: Object.fromEntries(BACKUP_TABLES.map((t) => {
+      try { return [t, db.prepare(`SELECT * FROM ${t}`).all()]; } catch { return [t, []]; }
+    })),
   };
-  log({ level: 'info', actor: 'user', action: 'backup.export', message: 'Выгружен полный бэкап данных' });
+  // плоские ключи оставляем: старые скрипты читают dump.projects и т.п.
+  Object.assign(dump, dump.data);
+  log({ level: 'info', actor: 'user', action: 'backup.export', message: `Выгружен бэкап данных: ${BACKUP_TABLES.length} таблиц` });
   res.set('Content-Disposition', `attachment; filename="pulse-backup-${nowIso().slice(0, 10)}.json"`);
   res.json(dump);
+});
+
+// Копия самой базы: это то, что реально восстанавливается — файл кладётся
+// обратно в data/pulse.db. JSON удобен для просмотра, .db — для восстановления.
+api.get('/backup/db', async (_req, res) => {
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const file = path.join(os.tmpdir(), `pulse-${Date.now()}.db`);
+  try {
+    await db.backup(file);
+    log({ level: 'info', actor: 'user', action: 'backup.download', message: 'Скачана копия базы (.db)' });
+    res.download(file, `pulse-${nowIso().slice(0, 10)}.db`, () => {
+      try { fs.rmSync(file, { force: true }); } catch { /* временный файл */ }
+    });
+  } catch (err) {
+    try { fs.rmSync(file, { force: true }); } catch { /* уже нет */ }
+    res.status(500).json({ error: 'backup_failed', message: String(err.message || err) });
+  }
 });
 
 // ─── Демо-утилиты (полезны на стенде) ───────────────────────────────────────
@@ -2058,7 +2160,22 @@ api.get('/series/:id/economics', (req, res) => {
 });
 
 api.use((req, res) => res.status(404).json({ error: 'not_found', message: `Нет маршрута ${req.method} ${req.path}` }));
-api.use((err, _req, res, _next) => {
-  log({ level: 'error', actor: 'api', action: 'api.error', message: String(err.message || err) });
-  res.status(500).json({ error: 'server_error', message: String(err.message || 'Внутренняя ошибка') });
+api.use((err, req, res, _next) => {
+  // В журнал — всё, наружу — понятная фраза и номер, по которому запись
+  // находится в журнале. Раньше клиенту уходил текст исключения
+  // («Input buffers must have the same byte length» и подобное): и на телефоне
+  // это выглядело как поломка панели, и наружу утекали внутренности.
+  const ref = Math.random().toString(36).slice(2, 8);
+  log({
+    level: 'error', actor: 'api', action: 'api.error',
+    message: `${req.method} ${req.path}: ${String(err?.message || err)}`,
+    meta: { ref, stack: String(err?.stack || '').slice(0, 1500) },
+  });
+  const debug = (process.env.PULSE_MODE || 'demo') !== 'live' || String(process.env.PULSE_DEBUG) === '1';
+  res.status(500).json({
+    error: 'server_error',
+    message: debug ? String(err?.message || err) : 'Внутренняя ошибка сервера',
+    ref,
+    hint: `Подробности — в журнале (Настройки → Журнал), запись ${ref}`,
+  });
 });

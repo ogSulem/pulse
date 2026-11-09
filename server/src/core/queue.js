@@ -144,11 +144,15 @@ export async function drain(limit = 8) {
   return jobs.length;
 }
 
-// Держим таблицу задач компактной: выполненные старше 3 дней не нужны для диагностики
+// Держим таблицу задач компактной. Выполненные и упавшие старше 3 дней не нужны
+// для диагностики, dead-letter — старше 30 (его ещё может понадобиться разобрать).
+// Раньше dead-задачи не удалялись никогда: за годы на VPS это тысячи строк.
 export function cleanupJobs() {
-  const cutoff = new Date(Date.now() - 3 * 86400000).toISOString();
-  const res = db.prepare("DELETE FROM jobs WHERE status = 'done' AND updated_at < ?").run(cutoff);
-  return res.changes;
+  const doneCutoff = new Date(Date.now() - 3 * 86400000).toISOString();
+  const deadCutoff = new Date(Date.now() - 30 * 86400000).toISOString();
+  const done = db.prepare("DELETE FROM jobs WHERE status IN ('done','failed') AND updated_at < ?").run(doneCutoff);
+  const dead = db.prepare("DELETE FROM jobs WHERE status = 'dead' AND updated_at < ?").run(deadCutoff);
+  return done.changes + dead.changes;
 }
 
 export function requeueDead(limit = 50) {

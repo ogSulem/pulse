@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon from '../components/Icons.jsx';
+import DownloadButton from '../components/DownloadButton.jsx';
 import { Badge, Toggle, Field, Confirm, useToast } from '../components/ui.jsx';
 
 const NumberField = ({ label, hint, value, suffix, onSave, busy }) => {
@@ -319,10 +320,11 @@ export default function Settings({ refresh }) {
           <div className="card">
             <div className="card-title"><h3>Данные и бэкап</h3></div>
             <div className="col" style={{ gap: 8 }}>
-              <a className="btn btn-sm btn-block" href={api.backupUrl()}><Icon name="database" size={13} />Скачать бэкап (JSON)</a>
-              <a className="btn btn-sm btn-block" href={api.exportUrl('ideas')}><Icon name="download" size={13} />Темы → CSV</a>
-              <a className="btn btn-sm btn-block" href={api.exportUrl('scripts')}><Icon name="download" size={13} />Сценарии → CSV</a>
-              <a className="btn btn-sm btn-block" href={api.exportUrl('analytics')}><Icon name="download" size={13} />Статистика → CSV</a>
+              <DownloadButton label="Скачать базу (.db)" icon="database" action={() => api.backupDb()} />
+              <DownloadButton label="Бэкап данных (JSON)" icon="database" action={() => api.backupFile()} />
+              <DownloadButton label="Темы → CSV" action={() => api.exportFile('ideas')} />
+              <DownloadButton label="Сценарии → CSV" action={() => api.exportFile('scripts')} />
+              <DownloadButton label="Статистика → CSV" action={() => api.exportFile('analytics')} />
             </div>
             <div className="divider" style={{ margin: '12px -18px' }} />
             <button className="btn btn-danger btn-sm btn-block" onClick={() => setConfirmReset(true)} disabled={busy}>
