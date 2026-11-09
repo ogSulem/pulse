@@ -46,6 +46,9 @@ export default function Growth() {
   const [planDays, setPlanDays] = useState(7);
   const [knowledge, setKnowledge] = useState(null);
   const [audit, setAudit] = useState(null);
+  // полный список для селектора гейта: раньше брались обрезанные 12 из опроса,
+  // и часть роликов просто не появлялась в выборе
+  const [episodeList, setEpisodeList] = useState([]);
 
   const load = async () => {
     try {
@@ -60,6 +63,9 @@ export default function Growth() {
   };
 
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    api.episodes({ limit: 40, light: 1 }).then(setEpisodeList).catch(() => {});
+  }, [data.revs?.episodes]);
 
   // План и база знаний грузятся лениво: не тормозим первый экран лишними расчётами
   useEffect(() => {
@@ -126,7 +132,7 @@ export default function Growth() {
   const accounts = portfolio?.accounts || [];
   const trends = overview?.trends?.trends || [];
   const monetization = overview?.monetization;
-  const episodes = data.episodes || [];
+  const episodes = episodeList.length ? episodeList : (data.episodes || []);
   const attention = accounts.filter((a) => a.health < 70);
 
   const platformCards = useMemo(() => portfolio?.platforms || [], [portfolio]);

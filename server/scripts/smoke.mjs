@@ -1192,6 +1192,68 @@ try {
 } catch (err) { fail('Telegram-сводка', err); }
 
 try {
+  // Лёгкий опрос панели: отпечатки, «без изменений» и инкрементальные срезы.
+  // Это поведение нельзя проверить чтением исходников — только живым HTTP.
+  const express = (await import('express')).default;
+  const { api } = await import('../src/modules/api.js');
+  // пароль берём тот, с которым приложение уже поднялось: он читается при
+  // загрузке модуля auth.js, и подменять env после этого бессмысленно
+  const { appPassword } = await import('../src/core/boot.js');
+  const pass = appPassword();
+  const { db } = await import('../src/core/db.js');
+  const app = express();
+  app.use(express.json());
+  app.use('/api', api);
+  const srv = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+  const base = `http://127.0.0.1:${srv.address().port}/api`;
+  try {
+    const login = await (await fetch(`${base}/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: pass }),
+    })).json();
+    if (!login.token) throw new Error('вход для проверки опроса не сработал');
+    const H = { Authorization: `Bearer ${login.token}` };
+    const get = async (path) => {
+      const res = await fetch(base + path, { headers: H });
+      const text = await res.text();
+      return { size: Buffer.byteLength(text), json: JSON.parse(text) };
+    };
+
+    const full = await get('/live');
+    if (!full.json.rev || !full.json.revs?.episodes) throw new Error('нет отпечатков');
+    if (!full.json.pipeline?.queue) throw new Error('полный ответ без счётчиков конвейера');
+    if (full.json.episodes) throw new Error('лента эпизодов ушла в общий опрос — это лишние килобайты');
+
+    const same = await get(`/live?rev=${full.json.rev}`);
+    if (!same.json.unchanged) throw new Error('совпавший отпечаток не распознан');
+    if (same.size > 600) throw new Error(`ответ «без изменений» весит ${same.size} Б`);
+
+    // меняем состояние: отпечаток обязан измениться, и прийти должен только
+    // затронутый срез
+    const ep = db.prepare("SELECT id, progress FROM episodes ORDER BY updated_at DESC LIMIT 1").get();
+    if (!ep) throw new Error('в базе нет эпизодов для проверки');
+    db.prepare('UPDATE episodes SET progress = (COALESCE(progress, 0) + 7) % 100 WHERE id = ?').run(ep.id);
+    // возвращаем как было: следующие проверки не должны зависеть от этой
+    process.on('exit', () => db.prepare('UPDATE episodes SET progress = ? WHERE id = ?').run(ep.progress, ep.id));
+    const params = new URLSearchParams({
+      rev: full.json.rev, ep: full.json.revs.episodes, pl: full.json.revs.pipeline,
+      lg: full.json.revs.logs, pj: full.json.revs.projects, st: full.json.revs.settings,
+    });
+    const changed = await get(`/live?${params}`);
+    if (changed.json.unchanged) throw new Error('изменение не замечено');
+    if (changed.json.revs.episodes === full.json.revs.episodes) throw new Error('отпечаток эпизодов не сдвинулся');
+    if (changed.json.revs.logs !== full.json.revs.logs) throw new Error('отпечаток журнала сдвинулся без записей');
+    if (changed.json.logs || changed.json.projects || changed.json.settings) throw new Error('присланы неизменившиеся срезы');
+    if (!changed.json.pipeline) throw new Error('прогресс ролика не попал в снимок конвейера');
+    // Ответ «с изменениями» должен быть в разы меньше прежних пяти запросов (117 КБ)
+    if (changed.size > 20000) throw new Error(`инкрементальный ответ слишком большой: ${changed.size} Б`);
+
+    ok('опрос панели: отпечатки', `полный ${Math.round(full.size / 1024)} КБ · без изменений ${same.size} Б · изменения ${Math.round(changed.size / 1024)} КБ`);
+  } finally {
+    srv.close();
+  }
+} catch (err) { fail('опрос панели: отпечатки', err); }
+
+try {
   // Ссылка продукта — единственное место, где трафик превращается в деньги.
   // Проверяем на своём локальном сервере: 200, 404, редирект на другой хост, мусор.
   const http = await import('node:http');
@@ -1801,7 +1863,7 @@ try {
   // Экономия мобильного трафика: у GET-ответов есть ETag и Cache-Control
   // no-cache — повторный опрос отдаёт 304 без тела.
   const apiSrc = fs.readFileSync(path.join(process.cwd(), 'server/src/modules/api.js'), 'utf8');
-  if (!apiSrc.includes("res.set('Cache-Control', 'no-cache')")) throw new Error('нет условного кеширования API');
+  if (!/res\.set\('Cache-Control', '(private, )?no-cache'\)/.test(apiSrc)) throw new Error('нет условного кеширования API');
   if (!/If-None-Match|etag/i.test(apiSrc) && !apiSrc.includes('no-cache')) throw new Error('ETag не используется');
   const app = fs.readFileSync(path.join(process.cwd(), 'web/src/App.jsx'), 'utf8');
   if (!app.includes("document.addEventListener('visibilitychange'")) throw new Error('опрос не останавливается в фоне');

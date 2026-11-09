@@ -26,23 +26,24 @@ export default function Today({ onLaunch }) {
   const [moneyData, setMoneyData] = useState(null);
   const [audit, setAudit] = useState(null);
   const [ready, setReady] = useState(null);
-  const [pipeline, setPipeline] = useState(null);
   const [chain, setChain] = useState(null);
 
   useEffect(() => {
     api.aiChain().then(setChain).catch(() => {});
     api.deployReady().then(setReady).catch(() => {});
     api.growthAudit().then(setAudit).catch(() => {});
-    api.pipelineStatus().then(setPipeline).catch(() => {});
   }, []);
 
+  // money перезапрашиваем только когда на сервере изменились публикации,
+  // просмотры, клики или конверсии — а не на каждый тик опроса
   useEffect(() => {
     api.money({ days: 30 }).then(setMoneyData).catch(() => {});
-  }, [data.pipeline?.published]);
+  }, [data.revs?.money]);
 
   const settings = data.settings || {};
   const isDemo = (settings.mode || 'demo') !== 'live';
   const totals = moneyData?.totals || {};
+  // снимок конвейера уже пришёл с bootstrap/live — отдельный запрос не нужен
   const live = data.pipeline || {};
   const accounts = data.accounts || [];
   const products = data.products || [];
@@ -251,12 +252,12 @@ export default function Today({ onLaunch }) {
               <a className="link-btn" href={routeHash('create', 'queue')}>очередь <Icon name="chevronRight" size={12} /></a>
             </div>
             <div className="row wrap" style={{ gap: 18 }}>
-              <div className="hr-stat"><span className="v">{(pipeline?.active || []).length}</span><span className="l">в работе</span></div>
+              <div className="hr-stat"><span className="v">{(live.active || []).length}</span><span className="l">в работе</span></div>
               <div className="hr-stat"><span className="v">{live.review || 0}</span><span className="l">ждут «да»</span></div>
               <div className="hr-stat"><span className="v">{live.scheduled || 0}</span><span className="l">в расписании</span></div>
               <div className="hr-stat"><span className="v">{live.queue?.pending ?? 0}</span><span className="l">задач</span></div>
             </div>
-            {(pipeline?.active || []).slice(0, 2).map((e) => (
+            {(live.active || []).slice(0, 2).map((e) => (
               <div key={e.id} style={{ marginTop: 10 }}>
                 <div className="row-between" style={{ fontSize: 11.5, gap: 8 }}>
                   <span className="truncate">{e.title}</span>

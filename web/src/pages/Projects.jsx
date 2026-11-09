@@ -44,7 +44,8 @@ export default function Projects() {
     }
   };
 
-  useEffect(() => { loadIdeas(project?.id); }, [project?.id, data.pipeline]);
+  // идеи создаются конвейером: обновляем по отпечатку, а не каждые 6 секунд
+  useEffect(() => { loadIdeas(project?.id); }, [project?.id, data.revs?.pipeline]);
 
   const generate = async () => {
     setBusy(true);

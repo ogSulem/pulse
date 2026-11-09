@@ -12,15 +12,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { createRequire } from 'node:module';
 import { MEDIA_DIR } from './render.js';
+import { sharp } from '../core/sharp.js';
 import { image } from '../providers/image.js';
 import { log } from '../core/logger.js';
 import { getSettings } from '../core/db.js';
-
-const require = createRequire(import.meta.url);
-let sharp = null;
-try { sharp = require('sharp'); } catch { sharp = null; }
 
 export const FRAME_DIR = path.join(MEDIA_DIR, 'frames');
 fs.mkdirSync(FRAME_DIR, { recursive: true });

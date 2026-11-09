@@ -89,6 +89,10 @@ function Shell({ data, refresh, refreshLight, loading }) {
     const next = theme === 'dark' ? 'light' : 'dark';
     setTheme(next);
     document.documentElement.dataset.theme = next;
+    // адресная строка мобильного браузера тоже меняет цвет — иначе светлая
+    // тема на телефоне остаётся с чёрной полосой сверху
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', next === 'light' ? '#f7f5fb' : '#07050b');
     try { localStorage.setItem('pulse.theme', next); } catch {}
   };
 
@@ -240,7 +244,7 @@ function Shell({ data, refresh, refreshLight, loading }) {
             </div>
           </div>
           <div className="topbar-actions">
-            <button className="btn btn-ghost btn-sm" onClick={() => { refreshLight(); toast.push({ title: 'Данные обновлены', tone: 'info' }); }} title="Обновить">
+            <button className="btn btn-ghost btn-sm" onClick={() => { refreshLight({ full: true }); toast.push({ title: 'Данные обновлены', tone: 'info' }); }} title="Обновить">
               <Icon name="refresh" size={14} className={loading ? 'spin' : ''} />
             </button>
             <button className={`btn btn-sm ${String(data.settings?.autopilot_global) === '1' ? 'btn-soft' : ''}`}
@@ -289,16 +293,44 @@ function Shell({ data, refresh, refreshLight, loading }) {
 
 export default function App() {
   const [authed, setAuthed] = useState(Boolean(getToken()));
-  const [data, setData] = useState({ projects: [], accounts: [], products: [], settings: {}, pipeline: {}, episodes: [], logs: [] });
+  // Срезы, которые сервер обновляет по отдельности (см. GET /api/live).
+  const [data, setData] = useState({ projects: [], accounts: [], products: [], settings: {}, pipeline: {}, episodes: [], logs: [], revs: {} });
   const [loading, setLoading] = useState(true);
   // Ошибка загрузки. Раньше сбой сети или 500 оставлял пустой экран без единого
   // слова — на телефоне это выглядело как «панель не работает». Теперь причина
   // и кнопка «Повторить» на виду.
   const [loadError, setLoadError] = useState('');
 
+  // Отпечатки, которые уже показаны на экране. Уходят в следующий опрос, чтобы
+  // сервер не присылал то же самое второй раз.
+  const known = useRef({ rev: '', slices: {} });
+  const remember = (res) => { if (res?.rev) known.current = { rev: res.rev, slices: res.revs || {} }; };
+
+  /* Накатываем ответ /api/live по срезам.
+     Ключевое: не пришедший срез остаётся тем же объектом. Страницы подписаны на
+     конкретные значения (data.revs.episodes, data.pipeline.published) и не
+     перезапускают загрузку, если их срез не менялся. Если не поменялось ничего
+     вообще — возвращаем прежнее состояние, React не перерисовывает ничего. */
+  const apply = useCallback((res) => {
+    setData((prev) => {
+      const next = { ...prev };
+      let dirty = false;
+      for (const key of ['pipeline', 'logs', 'projects', 'settings']) {
+        if (res[key] !== undefined) { next[key] = res[key]; dirty = true; }
+      }
+      const prevRevs = prev.revs || {};
+      if (res.revs && Object.keys(res.revs).some((k) => prevRevs[k] !== res.revs[k])) {
+        next.revs = res.revs;
+        dirty = true;
+      }
+      return dirty ? next : prev;
+    });
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const res = await api.bootstrap();
+      remember(res);
       setData(res);
       setLoadError('');
     } catch (err) {
@@ -310,34 +342,64 @@ export default function App() {
   }, []);
 
   const refreshing = useRef(false);
-  const refreshLight = useCallback(async () => {
+  // Возвращает true, если на сервере что-то изменилось: по этому признаку
+  // опрос замедляется, когда панель открыта «на посмотреть».
+  const refreshLight = useCallback(async (opts = {}) => {
     // Один запрос за раз: на медленном мобильном интернете ответы приходят
     // позже следующего тика, и без флага они наслаивались друг на друга.
-    if (refreshing.current) return;
+    if (refreshing.current) return false;
     refreshing.current = true;
     try {
-      const [pipeline, episodes, logs, projects, settings] = await Promise.all([
-        api.pipelineStatus(), api.episodes({ limit: 14 }), api.logs({ limit: 16 }), api.projects(), api.settings(),
-      ]);
-      setData((prev) => ({ ...prev, pipeline: { ...pipeline.byStatus, queue: pipeline.queue, active: pipeline.active, upcoming: pipeline.upcoming }, episodes, logs, projects, settings }));
+      const query = opts.full ? {} : { rev: known.current.rev, ...known.current.slices };
+      const res = await api.live(query);
+      remember(res);
+      // Ничего не изменилось — не трогаем состояние и не перерисовываем панель
+      if (res?.unchanged) return false;
+      apply(res);
+      return true;
     } catch (err) {
       if (err.status === 401) setAuthed(false);
+      return false;
     } finally {
       refreshing.current = false;
     }
-  }, []);
+  }, [apply]);
 
   useEffect(() => {
     if (!authed) return;
-    load().then(() => refreshLight());
-    // Опрос идёт только когда панель видна. Со свёрнутой вкладкой телефон
-    // тратил трафик и батарею на запросы, которых никто не видел.
-    const beat = () => { if (!document.hidden) refreshLight(); };
-    const t = setInterval(beat, 6000);
-    const onVisible = () => { if (!document.hidden) refreshLight(); };
+    load();
+
+    // Опрос адаптивный: пока в панели что-то происходит — раз в 6 секунд,
+    // если пять тиков подряд ничего не изменилось — реже (12 → 20 → 60 с).
+    // Панель часто оставляют открытой на весь день; ровный шестисекундный
+    // стук тратил батарею телефона без всякой пользы. Как только данные
+    // сдвинулись (или человек вернулся на вкладку) — снова 6 секунд.
+    let stopped = false;
+    let idle = 0;
+    let timer = null;
+    const delay = () => (idle >= 20 ? 60000 : idle >= 10 ? 20000 : idle >= 5 ? 12000 : 6000);
+
+    const tick = async () => {
+      if (stopped) return;
+      if (!document.hidden) {
+        const changed = await refreshLight();
+        idle = changed ? 0 : idle + 1;
+      }
+      if (!stopped) timer = setTimeout(tick, delay());
+    };
+
+    timer = setTimeout(tick, 6000);
+    const onVisible = () => {
+      // Вернулись на вкладку — показываем актуальное сразу и возвращаем частоту
+      if (document.hidden || stopped) return;
+      idle = 0;
+      clearTimeout(timer);
+      tick();
+    };
     document.addEventListener('visibilitychange', onVisible);
     return () => {
-      clearInterval(t);
+      stopped = true;
+      clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [authed, load, refreshLight]);

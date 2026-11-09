@@ -18,11 +18,11 @@ export default function Calendar() {
   const [sched, setSched] = useState(null);
 
   const load = async () => {
-    setLoading(true);
+    if (!episodes.length) setLoading(true);
     try {
       const [scheduled, published] = await Promise.all([
-        api.episodes({ status: 'scheduled', limit: 100 }),
-        api.episodes({ status: 'published', limit: 40 }),
+        api.episodes({ status: 'scheduled', limit: 100, light: 1 }),
+        api.episodes({ status: 'published', limit: 40, light: 1 }),
       ]);
       setEpisodes([...scheduled, ...published]);
     } finally {
@@ -30,7 +30,8 @@ export default function Calendar() {
     }
   };
 
-  useEffect(() => { load(); }, [data.pipeline]);
+  // только при фактическом изменении роликов — а не на каждый тик опроса
+  useEffect(() => { load(); }, [data.revs?.episodes]);
 
   useEffect(() => {
     let alive = true;
@@ -227,7 +228,7 @@ export default function Calendar() {
           })}
         </div>
 
-        {loading && <div className="skeleton" style={{ height: 60, marginTop: 12 }} />}
+        {loading && !episodes.length && <div className="skeleton" style={{ height: 60, marginTop: 12 }} />}
       </div>
 
       <div className="page-grid grid-2">
