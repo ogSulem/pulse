@@ -890,6 +890,16 @@ export function contentPlan({ days = 7, projectId = null } = {}) {
   const perPlatform = { reels: 0, tiktok: 0, youtube: 0 };
   let expectedViews = 0;
   let expectedRevenue = 0;
+  // аккаунт площадки ищем один раз на проект, а не на каждый день недели
+  const accountCache = new Map();
+  const accountFor = (platform, projectId) => {
+    const key = `${platform}|${projectId}`;
+    if (!accountCache.has(key)) {
+      accountCache.set(key, db.prepare(`SELECT * FROM accounts WHERE platform = ? AND status IN ('healthy','warmup')
+        AND (project_id IS NULL OR project_id = ?) ORDER BY quality DESC LIMIT 1`).get(platform, projectId));
+    }
+    return accountCache.get(key);
+  };
 
   for (const [brandIndex, project] of projects.entries()) {
     // темы: сначала неиспользованная библиотека проекта, потом добор из мозга
@@ -907,8 +917,7 @@ export function contentPlan({ days = 7, projectId = null } = {}) {
       for (const platform of ['tiktok', 'reels', 'youtube']) {
         if (!PLATFORM_DAYS[platform].includes(dow)) continue;
         // аккаунт площадки этого бренда должен существовать — иначе слот фантомный
-        const acc = db.prepare(`SELECT * FROM accounts WHERE platform = ? AND status IN ('healthy','warmup')
-            AND (project_id IS NULL OR project_id = ?) ORDER BY quality DESC LIMIT 1`).get(platform, project.id);
+        const acc = accountFor(platform, project.id);
         if (!acc) continue;
         // не больше постов в день, чем разрешает квота аккаунта
         const perDay = platform === 'youtube' ? 1 : Math.min(2, num(acc.daily_limit, 2));

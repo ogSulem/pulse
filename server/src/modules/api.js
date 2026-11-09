@@ -2,6 +2,7 @@ import express from 'express';
 import { db, getSettings, setSettings, nowIso } from '../core/db.js';
 import { enqueue, jobStats, drain, requeueDead, recoverStale } from '../core/queue.js';
 import { log, recentLogs } from '../core/logger.js';
+import { liveFacts, liveRevs } from '../core/rev.js';
 import { uid, parseJson, clamp, num, slugify, addDays, addMinutes, fmtNum } from '../core/utils.js';
 import { FORMAT_LABELS, FORMATS, generateIdeas, hashtagsFor, coverSvg, nicheFor, riskScore, NICHES_LIST } from '../engine/brain.js';
 import { createEpisode, nextSlot, nextSlotPlan, pickAccount, platformQuota, collectAnalytics, sweepDueEpisodes, recoverEpisodeStates, touchEpisode } from '../engine/pipeline.js';
@@ -53,7 +54,9 @@ export const api = express.Router();
 // Для телефона это разница в разы: панель обновляет данные каждые 6 секунд, и
 // без условных запросов это десятки мегабайт мобильного трафика за час.
 api.use((req, res, next) => {
-  if (req.method === 'GET' || req.method === 'HEAD') res.set('Cache-Control', 'no-cache');
+  // private: ответы API принадлежат владельцу панели, их нельзя хранить в общих
+  // прокси; no-cache — браузер обязан переспросить, но 304 экономит трафик.
+  if (req.method === 'GET' || req.method === 'HEAD') res.set('Cache-Control', 'private, no-cache');
   next();
 });
 
@@ -84,6 +87,87 @@ const episodeRow = (e) => e && ({
   statusLabel: STATUS_LABELS[e.status] || e.status,
   stageLabel: STAGE_LABELS[e.stage] || e.stage,
 });
+
+/* ── Карточка ролика для списков ────────────────────────────────────────────
+   Полная запись эпизода несёт сценарий, креатив, паспорт ИИ и комплаенс — это
+   ~4 КБ на строку. Для лент (очередь, календарь, «сегодня», селекторы) хватает
+   карточки: всё, что видно в списке, без тяжёлых полей. Полную запись отдаёт
+   /episodes/:id, когда ролик открывают в дровере. */
+const CARD_COLS = `e.id, e.project_id, e.account_id, e.campaign_id, e.title, e.format, e.topic,
+  e.cover_seed, e.cover_paths, e.status, e.stage, e.progress, e.risk, e.error, e.attempts,
+  e.autopilot, e.ab_test, e.scheduled_at, e.published_at, e.created_at, e.updated_at,
+  e.video_path, e.video_bytes, e.render_ms, e.cost_cents, e.ad_disclosure, e.promo,
+  e.compliance, e.viral, e.ai_meta`;
+
+const episodeCard = (e) => {
+  if (!e) return e;
+  const raw = parseJson(e.compliance, null);
+  return {
+    ...e,
+    // в списке нужен автор текста (модель или шаблон), а не весь паспорт ИИ
+    author: scriptAuthor(e.ai_meta),
+    ai_meta: undefined,
+    cover_paths: parseJson(e.cover_paths, {}),
+    // пустой {} значит «проверку ещё не делали», а не «нарушение» — иначе бейдж
+    // «правила» висел на каждом новом ролике и пугал без причины
+    compliance: raw && Object.keys(raw).length ? { ok: raw.ok !== false, blocking: (raw.blocking || []).slice(0, 1) } : null,
+    autopilot: !!e.autopilot,
+    ab_test: !!e.ab_test,
+    statusLabel: STATUS_LABELS[e.status] || e.status,
+    stageLabel: STAGE_LABELS[e.stage] || e.stage,
+  };
+};
+
+/** Список карточек: один запрос, только лёгкие колонки. */
+function episodeCards({ limit = 40, status, projectId } = {}) {
+  const where = [];
+  const params = [];
+  if (status && status !== 'all') {
+    if (status === 'active') where.push("e.status IN ('queued','generating','review','scheduled')");
+    else { where.push('e.status = ?'); params.push(status); }
+  }
+  if (projectId) { where.push('e.project_id = ?'); params.push(projectId); }
+  const rows = db.prepare(`SELECT ${CARD_COLS}, p.name project_name, p.color project_color,
+      (SELECT COUNT(*) FROM publications pb WHERE pb.episode_id = e.id) pubs,
+      (SELECT c.name FROM campaigns c WHERE c.id = e.campaign_id) campaign_name,
+      (SELECT b.name FROM campaigns c JOIN brands b ON b.id = c.brand_id WHERE c.id = e.campaign_id) campaign_brand
+    FROM episodes e LEFT JOIN projects p ON p.id = e.project_id
+    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY COALESCE(e.scheduled_at, e.updated_at) DESC LIMIT ?`)
+    .all(...params, clamp(num(limit, 40), 1, 200));
+  return rows.map(episodeCard);
+}
+
+/** Проекты с числом роликов — одним запросом вместо COUNT на каждый проект. */
+function projectCards() {
+  const rows = db.prepare(`SELECT p.*, COALESCE((
+      SELECT COUNT(*) FROM episodes e WHERE e.project_id = p.id), 0) episodes
+    FROM projects p WHERE p.archived = 0 ORDER BY p.created_at ASC`).all();
+  return rows.map(projectRow);
+}
+
+/** Совсем лёгкая карточка для счётчиков и ленты «в работе» (Today.jsx). */
+const MINI_COLS = `e.id, e.title, e.status, e.stage, e.progress, e.updated_at,
+  e.scheduled_at, e.published_at`;
+const miniCard = (e) => ({ ...e, statusLabel: STATUS_LABELS[e.status] || e.status, stageLabel: STAGE_LABELS[e.stage] || e.stage });
+
+/** Снимок конвейера: счётчики, активные ролики, расписание. */
+function pipelineSnapshot(facts = null) {
+  const counts = facts ? facts.byStatus : db.prepare('SELECT status, COUNT(*) n FROM episodes GROUP BY status').all();
+  const byStatus = Object.fromEntries(Object.keys(STATUS_LABELS).map((k) => [k, 0]));
+  for (const c of counts) byStatus[c.status] = c.n;
+  const stages = db.prepare("SELECT stage, COUNT(*) n FROM episodes WHERE status IN ('queued','generating') GROUP BY stage").all();
+  const active = db.prepare(`SELECT ${MINI_COLS}, p.name project_name FROM episodes e
+      LEFT JOIN projects p ON p.id = e.project_id
+      WHERE e.status IN ('queued','generating','review') ORDER BY e.updated_at DESC LIMIT 8`).all().map(miniCard);
+  const upcoming = db.prepare(`SELECT ${MINI_COLS}, p.name project_name FROM episodes e
+      LEFT JOIN projects p ON p.id = e.project_id
+      WHERE e.status = 'scheduled' ORDER BY e.scheduled_at ASC LIMIT 6`).all().map(miniCard);
+  return { ...byStatus, byStatus, stages, queue: jobStats(), active, upcoming };
+}
+
+/** Последние события без тяжёлого meta — журнала хватает и без него. */
+const liveLogs = (limit) => recentLogs({ limit }).map(({ meta, ...row }) => row);
 
 function accountRow(a) {
   if (!a) return a;
@@ -283,15 +367,14 @@ api.get('/bootstrap', (_req, res) => {
   // панель должна сразу перестать показывать «демо», даже если база старая.
   const envMode = String(process.env.PULSE_MODE || 'demo') === 'live' ? 'live' : 'demo';
   const settings = { ...getSettings(), mode: envMode };
-  const projects = db.prepare('SELECT * FROM projects WHERE archived = 0 ORDER BY created_at ASC').all().map(projectRow);
   const accounts = db.prepare('SELECT * FROM accounts ORDER BY platform, created_at').all().map(accountRow);
   const products = db.prepare('SELECT * FROM products ORDER BY created_at DESC').all();
-  const counts = db.prepare('SELECT status, COUNT(*) n FROM episodes GROUP BY status').all();
-  const byStatus = Object.fromEntries(Object.keys(STATUS_LABELS).map((k) => [k, 0]));
-  for (const c of counts) byStatus[c.status] = c.n;
+  // отпечатки отдаём сразу: следующий опрос будет инкрементальным, без повторной
+  // отправки того, что панель уже показала
+  const { rev, revs } = liveRevs();
   res.json({
     settings,
-    projects,
+    projects: projectCards(),
     accounts,
     products,
     meta: {
@@ -300,25 +383,44 @@ api.get('/bootstrap', (_req, res) => {
       stages: STAGE_LABELS,
       providers: providers.status(),
     },
-    pipeline: {
-      ...byStatus,
-      queue: jobStats(),
-      active: db.prepare(`SELECT e.*, p.name project_name FROM episodes e LEFT JOIN projects p ON p.id = e.project_id
-        WHERE e.status IN ('queued','generating','review') ORDER BY e.updated_at DESC LIMIT 8`).all().map(episodeRow),
-      upcoming: db.prepare(`SELECT e.*, p.name project_name FROM episodes e LEFT JOIN projects p ON p.id = e.project_id
-        WHERE e.status = 'scheduled' ORDER BY e.scheduled_at ASC LIMIT 6`).all().map(episodeRow),
-    },
-    episodes: db.prepare(`SELECT e.*, p.name project_name, p.color project_color FROM episodes e
-      LEFT JOIN projects p ON p.id = e.project_id ORDER BY e.updated_at DESC LIMIT 12`).all().map(episodeRow),
-    logs: recentLogs({ limit: 14 }),
+    pipeline: pipelineSnapshot(),
+    episodes: episodeCards({ limit: 12 }),
+    logs: liveLogs(14),
+    rev,
+    revs,
   });
 });
 
-// ─── Проекты ────────────────────────────────────────────────────────────────
-api.get('/projects', (_req, res) => {
-  const rows = db.prepare('SELECT * FROM projects WHERE archived = 0 ORDER BY created_at ASC').all().map(projectRow);
-  res.json(rows.map((p) => ({ ...p, episodes: db.prepare('SELECT COUNT(*) n FROM episodes WHERE project_id = ?').get(p.id).n })));
+/* ─── Лёгкий опрос: одно дешёвое обновление вместо пяти запросов ─────────────
+   Клиент присылает отпечатки, которые у него уже есть (core/rev.js):
+     rev  — общий; ep / pl / lg / pj / st — по срезам.
+   Совпал общий — ответ ~120 байт и ни одной перерисовки в панели.
+   Расходится — приходит только изменившееся, остальное панель оставляет как
+   было (ссылки на прежние объекты не меняются, эффекты страниц не бегут). */
+api.get('/live', (req, res) => {
+  const facts = liveFacts();
+  const { rev, revs } = liveRevs(facts);
+  const known = String(req.query.rev || '');
+  // срез не нужен, только если клиент назвал его отпечаток И он совпал
+  const unchanged = (key, param) => Boolean(known && req.query[param]) && String(req.query[param]) === revs[key];
+
+  if (known && known === rev) return res.json({ rev, revs, unchanged: true });
+
+  const out = { rev, revs };
+  // Ленты (очередь, календарь, журнал) остаются на своих страницах: им нужен
+  // больший лимит и другой фильтр, а держать их в общем опросе — это десятки
+  // килобайт каждые 6 секунд. Здесь только счётчики пайплайна и события.
+  if (!unchanged('pipeline', 'pl')) out.pipeline = pipelineSnapshot(facts);
+  if (!unchanged('logs', 'lg')) out.logs = liveLogs(12);
+  if (!unchanged('projects', 'pj')) out.projects = projectCards();
+  if (!unchanged('settings', 'st')) out.settings = { ...getSettings(), mode: String(process.env.PULSE_MODE || 'demo') === 'live' ? 'live' : 'demo' };
+  // money — только отпечаток: «Аналитика» и «Деньги» сами решат, пора ли
+  // перезапрашивать свои отчёты
+  res.json(out);
 });
+
+// ─── Проекты ────────────────────────────────────────────────────────────────
+api.get('/projects', (_req, res) => res.json(projectCards()));
 
 api.post('/projects', (req, res) => {
   const b = req.body || {};
@@ -511,7 +613,12 @@ api.patch('/scripts/:id', (req, res) => {
 
 // ─── Эпизоды ────────────────────────────────────────────────────────────────
 api.get('/episodes', (req, res) => {
-  const { status, projectId, limit = 60 } = req.query;
+  const { status, projectId, limit = 60, light } = req.query;
+  // light=1 — карточки для лент (в 8 раз меньше трафика). Полную запись ролика
+  // отдаёт /episodes/:id: сценарий с правками нужен только в дровере.
+  if (light === '1' || light === 'true') {
+    return res.json(episodeCards({ limit: clamp(num(limit, 60), 1, 200), status, projectId }));
+  }
   const where = [];
   const params = [];
   if (status && status !== 'all') {
@@ -668,15 +775,7 @@ api.post('/pipeline/run', async (req, res) => {
 });
 
 api.get('/pipeline/status', (_req, res) => {
-  const counts = db.prepare('SELECT status, COUNT(*) n FROM episodes GROUP BY status').all();
-  const byStatus = Object.fromEntries(Object.keys(STATUS_LABELS).map((k) => [k, 0]));
-  for (const c of counts) byStatus[c.status] = c.n;
-  const stages = db.prepare("SELECT stage, COUNT(*) n FROM episodes WHERE status IN ('queued','generating') GROUP BY stage").all();
-  const active = db.prepare(`SELECT e.*, p.name project_name FROM episodes e LEFT JOIN projects p ON p.id = e.project_id
-    WHERE e.status IN ('queued','generating','review') ORDER BY e.updated_at DESC LIMIT 8`).all().map(episodeRow);
-  const upcoming = db.prepare(`SELECT e.*, p.name project_name FROM episodes e LEFT JOIN projects p ON p.id = e.project_id
-    WHERE e.status = 'scheduled' ORDER BY e.scheduled_at ASC LIMIT 6`).all().map(episodeRow);
-  res.json({ byStatus, stages, queue: jobStats(), active, upcoming, providers: providers.status() });
+  res.json({ ...pipelineSnapshot(), providers: providers.status() });
 });
 
 api.post('/pipeline/drain', async (req, res) => {
@@ -1391,13 +1490,21 @@ api.get('/analytics/overview', (req, res) => {
 api.get('/analytics/publications', (req, res) => {
   const limit = clamp(num(req.query.limit, 60), 1, 300);
   const projectId = req.query.projectId && req.query.projectId !== 'all' ? req.query.projectId : null;
-  const rows = db.prepare(`SELECT pb.*, e.topic, e.format, p.name project_name, p.color project_color, a.handle
+  // light=1 — таблица «Аналитики»: без описаний и хештегов, которые в ней не
+  // показываются (каждая строка была на ~700 байт тяжелее нужного)
+  const light = req.query.light === '1' || req.query.light === 'true';
+  const cols = light
+    ? `pb.id, pb.episode_id, pb.project_id, pb.platform, pb.variant, pb.title,
+       pb.published_at, pb.views, pb.likes, pb.comments, pb.shares, pb.clicks, pb.cover_seed`
+    : 'pb.*';
+  const rows = db.prepare(`SELECT ${cols}, e.topic, e.format, p.name project_name, p.color project_color, a.handle
     FROM publications pb JOIN episodes e ON e.id = pb.episode_id
     LEFT JOIN projects p ON p.id = pb.project_id LEFT JOIN accounts a ON a.id = pb.account_id
     ${projectId ? 'WHERE pb.project_id = ?' : ''}
     ORDER BY pb.published_at DESC LIMIT ?`).all(...(projectId ? [projectId] : []), limit);
   res.json(rows.map((p) => ({
-    ...p, hashtags: parseJson(p.hashtags, []),
+    ...p,
+    hashtags: light ? undefined : parseJson(p.hashtags, []),
     ctr: p.views ? Math.round((p.clicks / p.views) * 1000) / 10 : 0,
     engagement: p.views ? Math.round(((p.likes + p.comments + p.shares) / p.views) * 1000) / 10 : 0,
   })));
@@ -1406,10 +1513,16 @@ api.get('/analytics/publications', (req, res) => {
 // ─── Логи ───────────────────────────────────────────────────────────────────
 api.get('/logs', (req, res) => {
   const limit = clamp(num(req.query.limit, 80), 1, 500);
-  const rows = recentLogs({ limit, level: req.query.level, entityId: req.query.entityId });
-  const q = String(req.query.q || '').toLowerCase();
-  res.json(rows.filter((r) => !q || `${r.message} ${r.action} ${r.actor}`.toLowerCase().includes(q))
-    .map((r) => ({ ...r, meta: parseJson(r.meta, {}) })));
+  const rows = recentLogs({
+    limit,
+    level: req.query.level && req.query.level !== 'all' ? req.query.level : undefined,
+    entityId: req.query.entityId,
+    q: String(req.query.q || '').trim() || undefined,
+  });
+  // light=1 — для таблицы журнала: meta (служебный JSON) в ней не рисуется,
+  // а весит больше половины ответа. Полный вид отдаёт /logs/:id и экспорт.
+  const light = req.query.light === '1' || req.query.light === 'true';
+  res.json(rows.map((r) => (light ? { ...r, meta: undefined } : { ...r, meta: parseJson(r.meta, {}) })));
 });
 
 // ─── Настройки ──────────────────────────────────────────────────────────────

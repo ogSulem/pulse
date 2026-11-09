@@ -54,12 +54,15 @@ export function simulateTraffic({ onlyMissing = true, budget = 400 } = {}) {
   let addedConv = 0;
   const insClick = db.prepare('INSERT INTO clicks (id, publication_id, project_id, ts, ua, ref, ip_hash) VALUES (?, ?, ?, ?, ?, ?, ?)');
   const insConv = db.prepare('INSERT INTO conversions (id, click_id, publication_id, project_id, value_cents, status, ts) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  // один агрегат вместо COUNT(*) на каждую публикацию (было N+1 раз в 20 секунд)
+  const clicksByPub = new Map(db.prepare('SELECT publication_id, COUNT(*) n FROM clicks GROUP BY publication_id')
+    .all().map((r) => [r.publication_id, r.n]));
 
   db.transaction(() => {
     for (const p of pubs) {
       if (addedClicks >= budget) break;
       const expected = Math.round(p.views * ctr * (0.85 + (hashish(p.id) % 30) / 100));
-      const have = db.prepare('SELECT COUNT(*) n FROM clicks WHERE publication_id = ?').get(p.id).n;
+      const have = clicksByPub.get(p.id) || 0;
       if (onlyMissing && have >= expected) continue;
       const missing = Math.max(0, Math.min(expected - have, 400, budget - addedClicks));
       const base = new Date(p.published_at || nowIso()).getTime();

@@ -8,9 +8,23 @@ ensureDirs();
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 export const db = new Database(DB_PATH);
+
+// ── Настройки соединения ────────────────────────────────────────────────────
+// WAL + NORMAL: транзакция фиксируется без fsync на каждую запись, при сбое
+// питания теряются только последние доли секунды, база не бьётся. Для VPS с
+// ежедневной копией это правильный размен: запись в разы быстрее, а целостность
+// обеспечивает WAL. FULL (по умолчанию) на HDD/сетевом диске даёт заметные лаги.
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
+db.pragma('temp_store = MEMORY');
+// кэш страниц 16 МБ вместо 2 МБ по умолчанию — меньше чтений с диска на отчётах
+db.pragma('cache_size = -16000');
+// 64 МБ отображения в память: чтения идут без копирования, RSS растёт лениво
+db.pragma('mmap_size = 67108864');
+// не даём WAL разрастаться: после авточекпоинта файл ужимается до 64 МБ
+db.pragma('journal_size_limit = 67108864');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (
@@ -128,6 +142,12 @@ CREATE TABLE IF NOT EXISTS episodes (
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
+-- лента пайплайна: «последние N в статусе X» без сортировки всей таблицы
+CREATE INDEX IF NOT EXISTS ix_ep_status_updated ON episodes(status, updated_at);
+-- календарь и автопостинг: ближайшие запланированные
+CREATE INDEX IF NOT EXISTS ix_ep_scheduled ON episodes(status, scheduled_at);
+-- фильтр по проекту (страница «Очередь»)
+CREATE INDEX IF NOT EXISTS ix_ep_project ON episodes(project_id, status);
 
 CREATE TABLE IF NOT EXISTS publications (
   id            TEXT PRIMARY KEY,
@@ -155,6 +175,12 @@ CREATE TABLE IF NOT EXISTS publications (
   target_views  INTEGER DEFAULT 0,
   created_at    TEXT NOT NULL
 );
+-- публикации эпизода: самый частый запрос (карточки, каскадное удаление)
+CREATE INDEX IF NOT EXISTS ix_pub_episode ON publications(episode_id);
+-- вышедшие за период: аналитика и сбор метрик
+CREATE INDEX IF NOT EXISTS ix_pub_recent ON publications(status, published_at);
+CREATE INDEX IF NOT EXISTS ix_pub_account ON publications(account_id, published_at);
+CREATE INDEX IF NOT EXISTS ix_pub_project ON publications(project_id, published_at);
 
 CREATE TABLE IF NOT EXISTS metrics_daily (
   id             TEXT PRIMARY KEY,
@@ -168,6 +194,7 @@ CREATE TABLE IF NOT EXISTS metrics_daily (
   followers      INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_metrics_day ON metrics_daily(day);
+CREATE INDEX IF NOT EXISTS ix_metrics_pub ON metrics_daily(publication_id, day);
 
 CREATE TABLE IF NOT EXISTS jobs (
   id           TEXT PRIMARY KEY,
@@ -184,6 +211,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_due ON jobs(status, run_after);
+CREATE INDEX IF NOT EXISTS ix_jobs_type ON jobs(type, status);
 
 CREATE TABLE IF NOT EXISTS logs (
   id          TEXT PRIMARY KEY,
@@ -208,6 +236,7 @@ CREATE TABLE IF NOT EXISTS clicks (
   ip_hash       TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_clicks_pub ON clicks(publication_id);
+CREATE INDEX IF NOT EXISTS ix_clicks_ts ON clicks(ts);
 
 CREATE TABLE IF NOT EXISTS conversions (
   id            TEXT PRIMARY KEY,
@@ -220,6 +249,7 @@ CREATE TABLE IF NOT EXISTS conversions (
   ts            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_conv_pub ON conversions(publication_id);
+CREATE INDEX IF NOT EXISTS ix_conv_click ON conversions(click_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ix_conv_ext ON conversions(external_id) WHERE external_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS accounts_daily (
@@ -543,10 +573,17 @@ export function ensureSettings() {
   for (const [key, value] of Object.entries(settingsDefaults)) insert.run(key, String(value));
 }
 
+// Настройки читаются на каждом шаге конвейера и на каждой карточке аккаунта.
+// Кэшировать значения нельзя: часть кода (seed, тесты, обслуживание) пишет в
+// таблицу напрямую, и кэш отдавал бы устаревший флаг. Кэшируем только сам
+// подготовленный запрос — это убирает перекомпиляцию SQL на каждый вызов,
+// оставляя чтение честным.
+let settingsStmt = null;
+
 export function getSettings() {
-  const rows = db.prepare('SELECT key, value FROM settings').all();
+  if (!settingsStmt) settingsStmt = db.prepare('SELECT key, value FROM settings');
   const out = {};
-  for (const r of rows) out[r.key] = r.value;
+  for (const r of settingsStmt.all()) out[r.key] = r.value;
   return out;
 }
 

@@ -16,19 +16,22 @@ export default function Analytics() {
   const [abOpen, setAbOpen] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Отчёты перезапрашиваем, только когда на сервере обновились публикации,
+  // просмотры, клики или конверсии (data.revs.money). Раньше эффект висел на
+  // всём объекте data.pipeline и пересчитывал аналитику каждые 6 секунд без повода.
   useEffect(() => {
     let alive = true;
     setLoading(true);
     Promise.all([
       api.analytics({ days, projectId }),
-      api.publications({ limit: 80, projectId }),
+      api.publications({ limit: 80, projectId, light: 1 }),
     ]).then(([o, p]) => {
       if (!alive) return;
       setOverview(o);
       setPublications(p);
     }).finally(() => alive && setLoading(false));
     return () => { alive = false; };
-  }, [days, projectId, data.pipeline]);
+  }, [days, projectId, data.revs?.money]);
 
   const series = overview?.series || [];
   const totals = overview?.totals;

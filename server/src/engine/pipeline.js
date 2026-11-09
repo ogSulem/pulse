@@ -1038,52 +1038,63 @@ export async function collectAnalytics() {
     }
   }
 
-  for (const p of pubs) {
-    // реальные счётчики площадки перекрывают модель
-    if (liveRows.has(p.id)) {
-      const row = liveRows.get(p.id);
-      const dViews = Math.max(0, row.views - p.views);
-      db.prepare('UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, saves = ? WHERE id = ?')
-        .run(row.views, row.likes ?? p.likes, row.comments ?? p.comments, row.shares ?? p.shares, row.saves ?? p.saves, p.id);
-      if (dViews > 0) {
-        db.prepare(`INSERT INTO metrics_daily (id, publication_id, day, views, likes, comments, shares, clicks, followers)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
-          ON CONFLICT(id) DO UPDATE SET views = views + excluded.views, likes = likes + excluded.likes,
-            comments = comments + excluded.comments, shares = shares + excluded.shares`)
-          .run(`${p.id}:${day}`, p.id, day, dViews, Math.max(0, (row.likes || 0) - p.likes), Math.max(0, (row.comments || 0) - p.comments), Math.max(0, (row.shares || 0) - p.shares));
-      }
-      updated++;
-      continue;
-    }
+  // Подготовленные выражения поднимаем из цикла: раньше на каждую публикацию
+  // заново компилировался SQL и отдельно запрашивалось качество аккаунта —
+  // десятки лишних подготовок каждые 20 секунд.
+  const stmtUpdateLive = db.prepare('UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, saves = ? WHERE id = ?');
+  const stmtInsertLiveDay = db.prepare(`INSERT INTO metrics_daily (id, publication_id, day, views, likes, comments, shares, clicks, followers)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
+    ON CONFLICT(id) DO UPDATE SET views = views + excluded.views, likes = likes + excluded.likes,
+      comments = comments + excluded.comments, shares = shares + excluded.shares`);
+  const stmtUpdateModel = db.prepare(`UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, clicks = ?, followers = ?, watch_avg = ?
+    WHERE id = ?`);
+  const qualityByAccount = new Map(db.prepare('SELECT id, quality FROM accounts').all().map((a) => [a.id, a.quality]));
 
-    const ageHours = (Date.now() - new Date(p.published_at).getTime()) / 3600000;
-    const curve = growthCurve(ageHours);
-    const wobble = 1 + Math.sin(ageHours / 7 + p.id.charCodeAt(2)) * 0.03;
-    const views = Math.round(p.target_views * curve * wobble);
-    if (views <= p.views) continue;
-    const likes = Math.round(views * (0.055 + (p.id.charCodeAt(3) % 7) / 100));
-    const comments = Math.round(views * 0.006);
-    const shares = Math.round(views * 0.009);
-    const clicks = Math.round(views * (0.012 + (p.id.charCodeAt(4) % 5) / 400));
-    const followers = Math.round(views * 0.0035);
-    // удержание в demo: база площадки + качество аккаунта + «зашло ли» ролик.
-    // Формула та же по смыслу, что и в seed, поэтому графики сходятся.
-    const accountQuality = db.prepare('SELECT quality FROM accounts WHERE id = ?').get(p.account_id)?.quality ?? 75;
-    const baseRetention = p.platform === 'youtube' ? 52 : p.platform === 'tiktok' ? 46 : 50;
-    const retained = clamp(baseRetention + (accountQuality - 70) * 0.25 + (p.id.charCodeAt(5) % 12) + 4, 35, 88);
-    db.prepare(`UPDATE publications SET views = ?, likes = ?, comments = ?, shares = ?, clicks = ?, followers = ?, watch_avg = ?
-      WHERE id = ?`).run(views, likes, comments, shares, clicks, followers, Math.round(retained * 10) / 10, p.id);
-    // пишем только прирост относительно уже сохранённого итога публикации
-    const dViews = views - p.views;
-    const dLikes = Math.max(0, likes - p.likes);
-    const dComments = Math.max(0, comments - p.comments);
-    const dShares = Math.max(0, shares - p.shares);
-    const dClicks = Math.max(0, clicks - p.clicks);
-    const dFollowers = Math.max(0, followers - p.followers);
-    if (dViews > 0) upsertDay.run(`${p.id}:${day}`, p.id, day, dViews, dLikes, dComments, dShares, dClicks, dFollowers);
-    if (!isLive) followerDelta.set(p.account_id, (followerDelta.get(p.account_id) || 0) + dFollowers);
-    updated++;
-  }
+  // Одна транзакция на пачку публикаций: в WAL это один fsync вместо сотни, а
+  // при сбое питания база не остаётся с половиной обновлённых счётчиков.
+  const runUpdates = db.transaction(() => {
+    for (const p of pubs) {
+      // реальные счётчики площадки перекрывают модель
+      if (liveRows.has(p.id)) {
+        const row = liveRows.get(p.id);
+        const dViews = Math.max(0, row.views - p.views);
+        stmtUpdateLive.run(row.views, row.likes ?? p.likes, row.comments ?? p.comments, row.shares ?? p.shares, row.saves ?? p.saves, p.id);
+        if (dViews > 0) {
+          stmtInsertLiveDay.run(`${p.id}:${day}`, p.id, day, dViews, Math.max(0, (row.likes || 0) - p.likes), Math.max(0, (row.comments || 0) - p.comments), Math.max(0, (row.shares || 0) - p.shares));
+        }
+        updated++;
+        continue;
+      }
+
+      const ageHours = (Date.now() - new Date(p.published_at).getTime()) / 3600000;
+      const curve = growthCurve(ageHours);
+      const wobble = 1 + Math.sin(ageHours / 7 + p.id.charCodeAt(2)) * 0.03;
+      const views = Math.round(p.target_views * curve * wobble);
+      if (views <= p.views) continue;
+      const likes = Math.round(views * (0.055 + (p.id.charCodeAt(3) % 7) / 100));
+      const comments = Math.round(views * 0.006);
+      const shares = Math.round(views * 0.009);
+      const clicks = Math.round(views * (0.012 + (p.id.charCodeAt(4) % 5) / 400));
+      const followers = Math.round(views * 0.0035);
+      // удержание в demo: база площадки + качество аккаунта + «зашло ли» ролик.
+      // Формула та же по смыслу, что и в seed, поэтому графики сходятся.
+      const accountQuality = qualityByAccount.get(p.account_id) ?? 75;
+      const baseRetention = p.platform === 'youtube' ? 52 : p.platform === 'tiktok' ? 46 : 50;
+      const retained = clamp(baseRetention + (accountQuality - 70) * 0.25 + (p.id.charCodeAt(5) % 12) + 4, 35, 88);
+      stmtUpdateModel.run(views, likes, comments, shares, clicks, followers, Math.round(retained * 10) / 10, p.id);
+      // пишем только прирост относительно уже сохранённого итога публикации
+      const dViews = views - p.views;
+      const dLikes = Math.max(0, likes - p.likes);
+      const dComments = Math.max(0, comments - p.comments);
+      const dShares = Math.max(0, shares - p.shares);
+      const dClicks = Math.max(0, clicks - p.clicks);
+      const dFollowers = Math.max(0, followers - p.followers);
+      if (dViews > 0) upsertDay.run(`${p.id}:${day}`, p.id, day, dViews, dLikes, dComments, dShares, dClicks, dFollowers);
+      if (!isLive) followerDelta.set(p.account_id, (followerDelta.get(p.account_id) || 0) + dFollowers);
+      updated++;
+    }
+  });
+  runUpdates();
   // в demo подписчики аккаунта растут из факта: сколько подписок принесли наши ролики
   for (const [accountId, delta] of followerDelta) {
     if (!accountId || !delta) continue;

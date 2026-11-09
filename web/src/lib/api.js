@@ -125,6 +125,8 @@ export const api = {
   deleteEpisode: (id) => request(`/episodes/${id}`, { method: 'DELETE' }),
 
   pipelineStatus: () => request('/pipeline/status'),
+  // Лёгкий опрос: сервер сравнивает отпечатки и отвечает только изменившимся
+  live: (params = {}) => request(`/live?${new URLSearchParams(params)}`),
   runPipeline: (payload) => request('/pipeline/run', { method: 'POST', body: payload }),
   drain: () => request('/pipeline/drain', { method: 'POST', body: {} }),
   requeue: () => request('/pipeline/requeue', { method: 'POST', body: {} }),

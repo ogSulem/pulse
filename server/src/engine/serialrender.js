@@ -17,7 +17,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { buildSeriesPlate, buildSeriesCaption, buildSeriesCover, buildTextOverlay, splitCaptions, PALETTES, hash, sanitize } from './scene.js';
 import { MEDIA_DIR } from './render.js';
 import { framesForEpisode, framesStatus } from './frames.js';
@@ -25,10 +24,7 @@ import { getSettings } from '../core/db.js';
 import { num } from '../core/utils.js';
 
 import { resolveFfmpeg, ffmpegSource } from '../core/ffmpeg.js';
-const require = createRequire(import.meta.url);
-
-let sharp = null;
-try { sharp = require('sharp'); } catch { sharp = null; }
+import { sharp } from '../core/sharp.js';
 // ffmpeg: env → @ffmpeg-installer → системный бинарь (см. core/ffmpeg.js).
 const ffmpegPath = resolveFfmpeg();
 
@@ -222,204 +218,209 @@ export async function renderSeriesEpisode({
   fs.rmSync(workDir, { recursive: true, force: true });
   fs.mkdirSync(workDir, { recursive: true });
 
-  const audioDurations = await Promise.all(audioPaths.map((p) => (p ? probeDuration(p) : null)));
-  const { scenes: timed, durationSec: rawDuration } = buildTimeline({ scenes, sections, audioDurations });
+  try {
+    const audioDurations = await Promise.all(audioPaths.map((p) => (p ? probeDuration(p) : null)));
+    const { scenes: timed, durationSec: rawDuration } = buildTimeline({ scenes, sections, audioDurations });
 
-  // жёсткий потолок: длиннее 20 минут YouTube-сериал не нужен, а VPS не переживёт
-  let acc = 0;
-  const kept = [];
-  for (const sc of timed) {
-    if (acc >= maxSec) break;
-    const seconds = Math.min(sc.seconds, maxSec - acc);
-    if (seconds < 1) break;
-    kept.push({ ...sc, seconds: Math.round(seconds * 10) / 10 });
-    acc += seconds;
-  }
-  const durationSec = Math.round(acc * 10) / 10;
+    // жёсткий потолок: длиннее 20 минут YouTube-сериал не нужен, а VPS не переживёт
+    let acc = 0;
+    const kept = [];
+    for (const sc of timed) {
+      if (acc >= maxSec) break;
+      const seconds = Math.min(sc.seconds, maxSec - acc);
+      if (seconds < 1) break;
+      kept.push({ ...sc, seconds: Math.round(seconds * 10) / 10 });
+      acc += seconds;
+    }
+    const durationSec = Math.round(acc * 10) / 10;
 
-  const palette = PALETTES[hash(`${series.id || series.title}-${episode.episode_no || 1}`) % PALETTES.length];
-  const paletteIndex = PALETTES.indexOf(palette);
-  const title = series.title || 'Сериал';
-  const episodeLabel = `Серия ${episode.episode_no || 1}${episode.title ? ` · ${episode.title}` : ''}`;
+    const palette = PALETTES[hash(`${series.id || series.title}-${episode.episode_no || 1}`) % PALETTES.length];
+    const paletteIndex = PALETTES.indexOf(palette);
+    const title = series.title || 'Сериал';
+    const episodeLabel = `Серия ${episode.episode_no || 1}${episode.title ? ` · ${episode.title}` : ''}`;
 
-  // ── кадры фото-ряда ──────────────────────────────────────────────────────
-  // Сначала пробуем нейросетевой ряд (Flux и др.), затем — процедурные плашки.
-  // Отказ провайдера не должен ломать рендер: серия важнее картинки.
-  let neural = null;
-  const mode = frameMode || (() => { try { return getSettings().series_frames || 'auto'; } catch { return 'auto'; } })();
-  // auto = нейро-ряд, если провайдер доступен и включён (live или PULSE_IMAGES=on);
-  // в demo по умолчанию остаются процедурные плашки — быстро и без сети.
-  const wantNeural = mode === 'neural' || (mode === 'auto' && framesStatus().enabled);
-  if (wantNeural) {
-    const bible = (() => { try { return series.bible ? JSON.parse(series.bible) : {}; } catch { return {}; } })();
-    let maxFrames = 60;
-    try { maxFrames = num(getSettings().series_image_max, 60); } catch { /* default */ }
-    neural = await framesForEpisode({
-      scenes: kept,
-      look: bible?.visual?.look || '',
-      palette: bible?.visual?.palette || 'ash',
-      seed: `${series.id || ''}-${episode.episode_no || 1}`,
-      maxFrames,
+    // ── кадры фото-ряда ──────────────────────────────────────────────────────
+    // Сначала пробуем нейросетевой ряд (Flux и др.), затем — процедурные плашки.
+    // Отказ провайдера не должен ломать рендер: серия важнее картинки.
+    let neural = null;
+    const mode = frameMode || (() => { try { return getSettings().series_frames || 'auto'; } catch { return 'auto'; } })();
+    // auto = нейро-ряд, если провайдер доступен и включён (live или PULSE_IMAGES=on);
+    // в demo по умолчанию остаются процедурные плашки — быстро и без сети.
+    const wantNeural = mode === 'neural' || (mode === 'auto' && framesStatus().enabled);
+    if (wantNeural) {
+      const bible = (() => { try { return series.bible ? JSON.parse(series.bible) : {}; } catch { return {}; } })();
+      let maxFrames = 60;
+      try { maxFrames = num(getSettings().series_image_max, 60); } catch { /* default */ }
+      neural = await framesForEpisode({
+        scenes: kept,
+        look: bible?.visual?.look || '',
+        palette: bible?.visual?.palette || 'ash',
+        seed: `${series.id || ''}-${episode.episode_no || 1}`,
+        maxFrames,
+        width: SERIES_W,
+        height: SERIES_H,
+        variants: 2,
+        onProgress: (p) => onProgress && onProgress({ ...p, phase: 'frames' }),
+      });
+      if (neural.ok && onProgress) {
+        onProgress({ phase: 'frames', done: neural.unique, total: neural.unique, generated: neural.generated, cached: neural.cached });
+      }
+    }
+
+    const plateFiles = [];
+    for (const [i, sc] of kept.entries()) {
+      const frame = (Array.isArray(frames) && frames[i]) || sc.frame || {};
+
+      // есть нейро-кадр под этот план — используем его
+      const neuralPath = neural?.files?.get(i) || null;
+      if (neuralPath) {
+        plateFiles.push(neuralPath);
+        if (onProgress && i % 12 === 0) onProgress({ phase: 'plates', done: i + 1, total: kept.length });
+        continue;
+      }
+
+      const svg = buildSeriesPlate({
+        palette,
+        scenery: frame.scenery || sc.visual || 'room',
+        shot: frame.shot || sc.shot || 'wide',
+        seed: `${id}-${sc.n}`,
+        index: i,
+        title,
+        episodeLabel,
+      });
+      const file = path.join(workDir, `plate-${i}.png`);
+      await rasterize(svg, file, SERIES_W);
+      plateFiles.push(file);
+      if (onProgress && i % 12 === 0) onProgress({ phase: 'frames', done: i + 1, total: kept.length });
+    }
+
+    // ── субтитры ─────────────────────────────────────────────────────────────
+    const capFiles = [];
+    const capDurations = [];
+    let ci = 0;
+    for (const sc of kept) {
+      for (const chunk of captionsForScene(sc)) {
+        const svg = buildSeriesCaption({ text: chunk.text, palette });
+        const file = path.join(workDir, `cap-${ci}.png`);
+        await rasterize(svg, file, SERIES_W);
+        capFiles.push(file);
+        capDurations.push(chunk.seconds);
+        ci += 1;
+      }
+    }
+
+    // ── звук: склейка секций в один трек ─────────────────────────────────────
+    let audioTrack = null;
+    const existing = audioPaths.filter((p) => p && fs.existsSync(p));
+    if (existing.length) {
+      audioTrack = path.join(workDir, 'audio.mp3');
+      if (existing.length === 1) {
+        fs.copyFileSync(existing[0], audioTrack);
+      } else {
+        const list = path.join(workDir, 'audio.txt');
+        fs.writeFileSync(list, existing.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n'));
+        await run(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c:a', 'libmp3lame', '-b:a', '192k', '-y', audioTrack], { timeoutMs: 600000 });
+      }
+    }
+
+    // ── видео: concat планов + alpha-субтитры ────────────────────────────────
+    const writeConcat = (name, files, durations) => {
+      const lines = [];
+      for (const [i, f] of files.entries()) {
+        lines.push(`file '${f.replace(/'/g, "'\\''")}'`);
+        lines.push(`duration ${Math.max(0.5, Number(durations[i]) || 1).toFixed(3)}`);
+      }
+      if (files.length) lines.push(`file '${files[files.length - 1].replace(/'/g, "'\\''")}'`);
+      const p = path.join(workDir, name);
+      fs.writeFileSync(p, `${lines.join('\n')}\n`);
+      return p;
+    };
+    const platesList = writeConcat('plates.txt', plateFiles, kept.map((s) => s.seconds));
+    const capsList = writeConcat('caps.txt', capFiles, capDurations);
+
+    const quality = pickQuality();
+    const videoAbs = path.join(MEDIA_DIR, `${id}.mp4`);
+
+    // Мягкий наезд камеры на каждом плане: «фотография» оживает, но без
+    // дрожания и без панорам, от которых укачивает.
+    const zoom = `zoompan=z='min(1.06,1+0.06*on/(${FPS}*14))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${SERIES_W}x${SERIES_H}:fps=${FPS}`;
+    const filter = [
+      `[0:v]fps=${FPS},scale=${SERIES_W}:${SERIES_H},${zoom},setsar=1[bg]`,
+      `[1:v]format=rgba,fps=${FPS},scale=${SERIES_W}:${SERIES_H}[cap]`,
+      `[bg][cap]overlay=0:0:format=auto:eof_action=pass,fade=t=in:st=0:d=0.6,fade=t=out:st=${Math.max(0.5, durationSec - 0.8).toFixed(2)}:d=0.8,format=yuv420p[v]`,
+    ].join(';');
+
+    const args = [
+      '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1',
+      '-f', 'concat', '-safe', '0', '-i', platesList,
+      '-f', 'concat', '-safe', '0', '-i', capsList,
+      ...(audioTrack ? ['-i', audioTrack] : ['-f', 'lavfi', '-t', String(durationSec + 1), '-i', 'anullsrc=r=48000:cl=stereo']),
+      '-filter_complex', filter,
+      '-map', '[v]',
+      '-map', '2:a',
+      ...(audioTrack ? ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11'] : []),
+      '-c:v', 'libx264', '-preset', quality.preset, '-crf', String(quality.crf),
+      '-profile:v', 'high', '-level', '4.1', '-g', String(FPS * 2),
+      '-pix_fmt', 'yuv420p', '-r', String(FPS), '-t', String(durationSec),
+      '-c:a', 'aac', '-b:a', quality.audio, '-ar', '48000', '-ac', '2',
+      '-shortest', '-movflags', '+faststart', '-y', videoAbs,
+    ];
+
+    await run(ffmpegPath, args, {
+      timeoutMs: 3_600_000,
+      onProgress: (sec) => onProgress && onProgress({ phase: 'encode', done: Math.round(sec), total: Math.round(durationSec) }),
+    });
+
+    // ── обложки: 1280×720 под YouTube ────────────────────────────────────────
+    const coverPaths = {};
+    const scenarios = [...new Set(kept.map((s) => (s.frame || {}).scenery || s.visual || 'city'))].slice(0, 3);
+    for (const [i, letter] of ['A', 'B', 'C'].entries()) {
+      const svg = buildSeriesCover({
+        title: coverText || title,
+        episodeLabel,
+        projectName: series.project_name || 'PULSE',
+        handle,
+        palette,
+        seed: `${id}-${letter}`,
+        scenery: scenarios[i % Math.max(1, scenarios.length)] || 'city',
+        badge: series.genre_label || 'сериал',
+      });
+      const abs = path.join(MEDIA_DIR, `${id}-${letter}.jpg`);
+      // размер задаём явно: плотность sharp по умолчанию 72 dpi, и «96» дало бы 1.33×
+      await sharp(Buffer.from(svg), { density: 72 }).resize({ width: 1280, height: 720, fit: 'fill' }).jpeg({ quality: 90, mozjpeg: true }).toFile(abs);
+      coverPaths[letter] = `/media/${id}-${letter}.jpg`;
+    }
+
+    // постер серии для страницы (16:9, тот же кадр)
+    const posterAbs = path.join(MEDIA_DIR, `${id}-poster.jpg`);
+    await sharp(plateFiles[0]).resize({ width: 1280 }).jpeg({ quality: 88 }).toFile(posterAbs);
+
+    const stat = fs.statSync(videoAbs);
+
+    return {
+      ok: true,
+      videoPath: `/media/${id}.mp4`,
+      videoAbs,
+      posterPath: `/media/${id}-poster.jpg`,
+      coverPaths,
+      bytes: stat.size,
+      durationSec,
       width: SERIES_W,
       height: SERIES_H,
-      variants: 2,
-      onProgress: (p) => onProgress && onProgress({ ...p, phase: 'frames' }),
-    });
-    if (neural.ok && onProgress) {
-      onProgress({ phase: 'frames', done: neural.unique, total: neural.unique, generated: neural.generated, cached: neural.cached });
-    }
+      fps: FPS,
+      scenes: kept.length,
+      captions: capFiles.length,
+      audio: Boolean(audioTrack),
+      audioSec: Math.round((audioDurations.filter(Boolean).reduce((a, b) => a + b, 0) || 0) * 10) / 10,
+      renderMs: Date.now() - started,
+      palette: paletteIndex,
+      quality: quality.crf,
+    };
+  } finally {
+    // каталог рендера (кадры, аудио) убираем и при падении: иначе серия на
+    // 150 МБ остаётся в media/tmp до общей уборки через 6 часов
+    fs.rmSync(workDir, { recursive: true, force: true });
   }
-
-  const plateFiles = [];
-  for (const [i, sc] of kept.entries()) {
-    const frame = (Array.isArray(frames) && frames[i]) || sc.frame || {};
-
-    // есть нейро-кадр под этот план — используем его
-    const neuralPath = neural?.files?.get(i) || null;
-    if (neuralPath) {
-      plateFiles.push(neuralPath);
-      if (onProgress && i % 12 === 0) onProgress({ phase: 'plates', done: i + 1, total: kept.length });
-      continue;
-    }
-
-    const svg = buildSeriesPlate({
-      palette,
-      scenery: frame.scenery || sc.visual || 'room',
-      shot: frame.shot || sc.shot || 'wide',
-      seed: `${id}-${sc.n}`,
-      index: i,
-      title,
-      episodeLabel,
-    });
-    const file = path.join(workDir, `plate-${i}.png`);
-    await rasterize(svg, file, SERIES_W);
-    plateFiles.push(file);
-    if (onProgress && i % 12 === 0) onProgress({ phase: 'frames', done: i + 1, total: kept.length });
-  }
-
-  // ── субтитры ─────────────────────────────────────────────────────────────
-  const capFiles = [];
-  const capDurations = [];
-  let ci = 0;
-  for (const sc of kept) {
-    for (const chunk of captionsForScene(sc)) {
-      const svg = buildSeriesCaption({ text: chunk.text, palette });
-      const file = path.join(workDir, `cap-${ci}.png`);
-      await rasterize(svg, file, SERIES_W);
-      capFiles.push(file);
-      capDurations.push(chunk.seconds);
-      ci += 1;
-    }
-  }
-
-  // ── звук: склейка секций в один трек ─────────────────────────────────────
-  let audioTrack = null;
-  const existing = audioPaths.filter((p) => p && fs.existsSync(p));
-  if (existing.length) {
-    audioTrack = path.join(workDir, 'audio.mp3');
-    if (existing.length === 1) {
-      fs.copyFileSync(existing[0], audioTrack);
-    } else {
-      const list = path.join(workDir, 'audio.txt');
-      fs.writeFileSync(list, existing.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n'));
-      await run(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-c:a', 'libmp3lame', '-b:a', '192k', '-y', audioTrack], { timeoutMs: 600000 });
-    }
-  }
-
-  // ── видео: concat планов + alpha-субтитры ────────────────────────────────
-  const writeConcat = (name, files, durations) => {
-    const lines = [];
-    for (const [i, f] of files.entries()) {
-      lines.push(`file '${f.replace(/'/g, "'\\''")}'`);
-      lines.push(`duration ${Math.max(0.5, Number(durations[i]) || 1).toFixed(3)}`);
-    }
-    if (files.length) lines.push(`file '${files[files.length - 1].replace(/'/g, "'\\''")}'`);
-    const p = path.join(workDir, name);
-    fs.writeFileSync(p, `${lines.join('\n')}\n`);
-    return p;
-  };
-  const platesList = writeConcat('plates.txt', plateFiles, kept.map((s) => s.seconds));
-  const capsList = writeConcat('caps.txt', capFiles, capDurations);
-
-  const quality = pickQuality();
-  const videoAbs = path.join(MEDIA_DIR, `${id}.mp4`);
-
-  // Мягкий наезд камеры на каждом плане: «фотография» оживает, но без
-  // дрожания и без панорам, от которых укачивает.
-  const zoom = `zoompan=z='min(1.06,1+0.06*on/(${FPS}*14))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${SERIES_W}x${SERIES_H}:fps=${FPS}`;
-  const filter = [
-    `[0:v]fps=${FPS},scale=${SERIES_W}:${SERIES_H},${zoom},setsar=1[bg]`,
-    `[1:v]format=rgba,fps=${FPS},scale=${SERIES_W}:${SERIES_H}[cap]`,
-    `[bg][cap]overlay=0:0:format=auto:eof_action=pass,fade=t=in:st=0:d=0.6,fade=t=out:st=${Math.max(0.5, durationSec - 0.8).toFixed(2)}:d=0.8,format=yuv420p[v]`,
-  ].join(';');
-
-  const args = [
-    '-hide_banner', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1',
-    '-f', 'concat', '-safe', '0', '-i', platesList,
-    '-f', 'concat', '-safe', '0', '-i', capsList,
-    ...(audioTrack ? ['-i', audioTrack] : ['-f', 'lavfi', '-t', String(durationSec + 1), '-i', 'anullsrc=r=48000:cl=stereo']),
-    '-filter_complex', filter,
-    '-map', '[v]',
-    '-map', '2:a',
-    ...(audioTrack ? ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11'] : []),
-    '-c:v', 'libx264', '-preset', quality.preset, '-crf', String(quality.crf),
-    '-profile:v', 'high', '-level', '4.1', '-g', String(FPS * 2),
-    '-pix_fmt', 'yuv420p', '-r', String(FPS), '-t', String(durationSec),
-    '-c:a', 'aac', '-b:a', quality.audio, '-ar', '48000', '-ac', '2',
-    '-shortest', '-movflags', '+faststart', '-y', videoAbs,
-  ];
-
-  await run(ffmpegPath, args, {
-    timeoutMs: 3_600_000,
-    onProgress: (sec) => onProgress && onProgress({ phase: 'encode', done: Math.round(sec), total: Math.round(durationSec) }),
-  });
-
-  // ── обложки: 1280×720 под YouTube ────────────────────────────────────────
-  const coverPaths = {};
-  const scenarios = [...new Set(kept.map((s) => (s.frame || {}).scenery || s.visual || 'city'))].slice(0, 3);
-  for (const [i, letter] of ['A', 'B', 'C'].entries()) {
-    const svg = buildSeriesCover({
-      title: coverText || title,
-      episodeLabel,
-      projectName: series.project_name || 'PULSE',
-      handle,
-      palette,
-      seed: `${id}-${letter}`,
-      scenery: scenarios[i % Math.max(1, scenarios.length)] || 'city',
-      badge: series.genre_label || 'сериал',
-    });
-    const abs = path.join(MEDIA_DIR, `${id}-${letter}.jpg`);
-    // размер задаём явно: плотность sharp по умолчанию 72 dpi, и «96» дало бы 1.33×
-    await sharp(Buffer.from(svg), { density: 72 }).resize({ width: 1280, height: 720, fit: 'fill' }).jpeg({ quality: 90, mozjpeg: true }).toFile(abs);
-    coverPaths[letter] = `/media/${id}-${letter}.jpg`;
-  }
-
-  // постер серии для страницы (16:9, тот же кадр)
-  const posterAbs = path.join(MEDIA_DIR, `${id}-poster.jpg`);
-  await sharp(plateFiles[0]).resize({ width: 1280 }).jpeg({ quality: 88 }).toFile(posterAbs);
-
-  fs.rmSync(workDir, { recursive: true, force: true });
-  const stat = fs.statSync(videoAbs);
-
-  return {
-    ok: true,
-    videoPath: `/media/${id}.mp4`,
-    videoAbs,
-    posterPath: `/media/${id}-poster.jpg`,
-    coverPaths,
-    bytes: stat.size,
-    durationSec,
-    width: SERIES_W,
-    height: SERIES_H,
-    fps: FPS,
-    scenes: kept.length,
-    captions: capFiles.length,
-    audio: Boolean(audioTrack),
-    audioSec: Math.round((audioDurations.filter(Boolean).reduce((a, b) => a + b, 0) || 0) * 10) / 10,
-    renderMs: Date.now() - started,
-    palette: paletteIndex,
-    quality: quality.crf,
-  };
 }
 
 /**

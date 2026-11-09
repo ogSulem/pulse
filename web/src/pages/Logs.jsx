@@ -22,22 +22,34 @@ export default function Logs() {
   const [query, setQuery] = useState('');
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Журнал растёт, а таблица показывает первую сотню: тянем страницу и
+  // добавляем по требованию, вместо 200 записей на каждое новое событие.
+  const [limit, setLimit] = useState(80);
+  const [search, setSearch] = useState('');
+
+  // поиск с паузой: запрос уходит, когда человек перестал печатать
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(query.trim()), 350);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // новый фильтр/поиск — снова с первой страницы
+  useEffect(() => { setLimit(80); }, [level, search]);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    const params = { limit: 200 };
+    const params = { limit, light: 1 };
     if (level !== 'all') params.level = level;
+    if (search) params.q = search;
+    // подписка на отпечаток: перезапрос только когда в журнале появились записи
     api.logs(params).then((rows) => alive && setLogs(rows))
       .catch(() => {})
       .finally(() => alive && setLoading(false));
     return () => { alive = false; };
-  }, [level, data.pipeline]);
+  }, [level, limit, search, data.revs?.logs]);
 
-  const filtered = logs.filter((l) => {
-    const q = query.trim().toLowerCase();
-    return !q || `${l.message} ${l.actor} ${l.action}`.toLowerCase().includes(q);
-  });
+  const filtered = logs; // поиск и уровень фильтрует база, не браузер
 
   const counts = logs.reduce((acc, l) => ({ ...acc, [l.level]: (acc[l.level] || 0) + 1 }), {});
 
@@ -97,6 +109,13 @@ export default function Logs() {
             </tbody>
           </table>
         </div>
+        {logs.length >= limit && (
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 14 }}>
+            <button className="btn btn-ghost btn-sm" disabled={loading} onClick={() => setLimit((n) => n + 80)}>
+              <Icon name="chevronDown" size={13} />Показать ещё
+            </button>
+          </div>
+        )}
         {loading && !logs.length && <div className="skeleton" style={{ height: 200 }} />}
       </div>
 

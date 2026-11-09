@@ -25,10 +25,12 @@ export default function Queue({ onLaunch }) {
   const [selected, setSelected] = useState(null);
   const [query, setQuery] = useState('');
 
+  // light=1 — карточки вместо полных записей (сценарий и креатив не нужны в
+  // списке, они приходят при открытии ролика). Трафик меньше в разы.
   const load = async () => {
-    setLoading(true);
+    if (!episodes.length) setLoading(true);
     try {
-      const params = { limit: 120 };
+      const params = { limit: 120, light: 1 };
       if (filter !== 'all') params.status = filter;
       if (projectId !== 'all') params.projectId = projectId;
       setEpisodes(await api.episodes(params));
@@ -37,7 +39,11 @@ export default function Queue({ onLaunch }) {
     }
   };
 
-  useEffect(() => { load(); }, [filter, projectId, data.pipeline]);
+  // Перезагружаем только когда ролики реально изменились (data.revs.episodes
+  // меняется на сервере при создании/смене статуса/прогресса). Раньше эффект
+  // висел на объекте data.pipeline и перезапускался каждые 6 секунд — список
+  // мигал скелетонами, хотя на сервере ничего не происходило.
+  useEffect(() => { load(); }, [filter, projectId, data.revs?.episodes]);
 
   const counts = data.pipeline || {};
   const filtered = useMemo(() => {

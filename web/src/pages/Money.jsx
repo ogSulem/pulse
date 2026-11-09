@@ -34,12 +34,14 @@ export default function Money() {
   const [applying, setApplying] = useState(false);
   const toast = useToast();
 
+  // Доход и расход пересчитываем, когда обновились публикации, просмотры,
+  // клики или конверсии (отпечаток money), а не на каждый тик опроса.
   useEffect(() => {
     let alive = true;
     setLoading(true);
     api.money({ days, projectId }).then((res) => { if (alive) setMoney(res); }).catch(() => {}).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [days, projectId, data.pipeline?.published]);
+  }, [days, projectId, data.revs?.money]);
 
   useEffect(() => {
     let alive = true;

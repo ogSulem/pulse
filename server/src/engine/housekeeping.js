@@ -19,6 +19,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import fs from 'node:fs';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { db, nowIso } from '../core/db.js';
 import { DATA_DIR, MEDIA_DIR } from '../core/paths.js';
 import { log } from '../core/logger.js';
@@ -42,6 +43,12 @@ export const frameRetentionDays = () => {
 export const cacheRetentionDays = () => {
   const n = Number(env.PULSE_CACHE_RETENTION_DAYS);
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 7;
+};
+
+/** Сколько дней храним сырые события (клики/конверсии). По ним считается доход. */
+export const eventRetentionDays = () => {
+  const n = Number(env.PULSE_EVENT_RETENTION_DAYS);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 400;
 };
 
 /** Рабочий каталог рендера старше этого возраста считается брошенным. */
@@ -279,11 +286,62 @@ export async function backupDatabase({ keep = 7 } = {}) {
 }
 
 /**
+ * Обслуживание самой базы. SQLite годами живёт в контейнере, поэтому мало
+ * создать файл — его нужно вовремя «подшивать»:
+ *   • wal_checkpoint(TRUNCATE) переносит WAL в основной файл и обнуляет его:
+ *     без этого -wal растёт до гигабайт и копия базы тяжелее самой базы;
+ *   • PRAGMA optimize обновляет статистику планировщика, из-за которой после
+ *     месяцев работы запросы иначе выбирают индексы (SQLite сам решает, нужен
+ *     ли ANALYZE — это дешёвый вызов);
+ *   • журнал и сырые события чистим по сроку, чтобы панель не копила мусор.
+ */
+export function dbMaintenance() {
+  const out = { checkpoint: null, optimized: true, logs: 0, clicks: 0, conversions: 0 };
+  try {
+    const cp = db.pragma('wal_checkpoint(TRUNCATE)');
+    out.checkpoint = Array.isArray(cp) ? cp[0] : cp;
+  } catch (err) {
+    out.checkpoint = { error: String(err?.message || err).slice(0, 120) };
+  }
+  try { db.pragma('optimize'); } catch { out.optimized = false; }
+
+  // журнал: держим последние 2000 записей и не старше 30 дней
+  try {
+    out.logs = db.prepare("DELETE FROM logs WHERE ts < ?").run(new Date(Date.now() - 30 * 86400000).toISOString()).changes;
+    out.logs += db.prepare("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY ts DESC LIMIT -1 OFFSET 2000)").run().changes;
+  } catch { /* старая база — не критично */ }
+
+  // сырые события: по ним считается доход, поэтому срок длинный, но конечный
+  const cutoff = new Date(Date.now() - eventRetentionDays() * 86400000).toISOString();
+  try { out.clicks = db.prepare('DELETE FROM clicks WHERE ts < ?').run(cutoff).changes; } catch {}
+  try { out.conversions = db.prepare('DELETE FROM conversions WHERE ts < ?').run(cutoff).changes; } catch {}
+  return out;
+}
+
+/**
+ * Проверка копии: открываем её как отдельную базу и гоняем quick_check.
+ * Копия, которую нельзя открыть, — это не бэкап, а надежда.
+ */
+function verifyBackup(file) {
+  let copy = null;
+  try {
+    copy = new Database(file, { readonly: true, fileMustExist: true });
+    const row = copy.pragma('quick_check', { simple: true });
+    const tables = copy.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type = 'table'").get()?.n || 0;
+    return { ok: String(row) === 'ok', tables };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err).slice(0, 160) };
+  } finally {
+    try { copy?.close(); } catch { /* уже закрыта */ }
+  }
+}
+
+/**
  * Полное обслуживание: вызывается при старте (с задержкой) и раз в 6 часов.
  * Каждый шаг изолирован: сбой уборки кэша не должен оставить без бэкапа.
  */
 export async function maintenance({ force = false, backup = true } = {}) {
-  const summary = { at: nowIso(), temp: null, media: null, cache: null, jobs: 0, backup: null, integrity: null, errors: [] };
+  const summary = { at: nowIso(), temp: null, media: null, cache: null, jobs: 0, backup: null, integrity: null, db: null, errors: [] };
   const step = async (name, fn) => {
     try { return await fn(); } catch (err) {
       summary.errors.push(`${name}: ${String(err?.message || err).slice(0, 200)}`);
@@ -298,6 +356,7 @@ export async function maintenance({ force = false, backup = true } = {}) {
   if (force || usage?.staleFiles) summary.media = await step('media', () => pruneMedia());
 
   summary.jobs = (await step('jobs', () => cleanupJobs())) || 0;
+  summary.db = await step('db', () => dbMaintenance());
 
   // Раз в неделю — быстрая проверка целостности базы. SQLite на VPS годами
   // живёт в контейнере, который могут убить в момент записи; лучше узнать о
@@ -319,7 +378,18 @@ export async function maintenance({ force = false, backup = true } = {}) {
     const info = backupsInfo();
     const day = 24 * 3600 * 1000;
     const due = force || !info.lastAt || Date.now() - new Date(info.lastAt).getTime() > day;
-    if (due) summary.backup = await step('backup', () => backupDatabase({ keep: 7 }));
+    if (due) {
+      summary.backup = await step('backup', async () => {
+        const info = await backupDatabase({ keep: 7 });
+        // копию сразу проверяем: битый файл лучше увидеть сегодня, а не в день,
+        // когда он понадобился
+        const check = verifyBackup(info.file);
+        if (!check.ok) {
+          log({ level: 'error', actor: 'system', action: 'db.backup_check', message: `Копия базы не прошла проверку: ${check.error || 'quick_check'}`, meta: { file: info.file } });
+        }
+        return { ...info, verified: check.ok, tables: check.tables || 0 };
+      });
+    }
   }
 
   const freed = (summary.media?.freedBytes || 0) + (summary.temp?.freedBytes || 0) + (summary.cache?.freedBytes || 0);

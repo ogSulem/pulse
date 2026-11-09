@@ -50,7 +50,7 @@ if [ -d "$DIR/.git" ]; then
 else
   say "Клонируем $REPO в $DIR"
   if ! command -v git >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq git
+    apt-get update -qq && apt-get install -y -qq git sqlite3
   fi
   git clone --depth 1 "https://github.com/${REPO}.git" "$DIR"
 fi

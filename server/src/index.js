@@ -56,8 +56,12 @@ app.use('/api', api);
 // в браузере, скачивается и проверяется до публикации.
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
 app.use('/media', express.static(MEDIA_DIR, {
-  maxAge: '7d',
-  setHeaders: (res) => res.set('Cache-Control', 'public, max-age=604800, immutable'),
+  // Имя файла — id эпизода, и оно НЕ меняется при пересборке ролика. «immutable»
+  // на неделю означало бы, что после retry телефон ещё семь дней показывает
+  // старый mp4. Час кэша — компромисс: плеер не дёргает диск, а новая сборка
+  // видна сразу после истечения. Файлы приватные (панель одного владельца).
+  maxAge: '1h',
+  setHeaders: (res) => res.set('Cache-Control', 'private, max-age=3600'),
 }));
 
 // ── Короткая ссылка: клик → учёт → редирект на лендинг ─────────────────────
