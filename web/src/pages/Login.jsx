@@ -65,6 +65,14 @@ export default function Login({ onSuccess }) {
               placeholder="••••••"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              // На телефоне клавиатура по умолчанию делает первую букву заглавной
+              // и «исправляет» слова: пароль уходил другим, и вход не срабатывал.
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              autoComplete="current-password"
+              inputMode="text"
+              aria-label="Пароль доступа"
             />
           </div>
           {error && (

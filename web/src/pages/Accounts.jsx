@@ -346,11 +346,12 @@ export default function Accounts() {
           </div>
           <Field label="Access token" hint="Долгоживущий токен из кабинета разработчика площадки">
             <input className="input" type="password" value={tokenForm.token} autoComplete="off"
+              autoCapitalize="none" autoCorrect="off" spellCheck={false}
               onChange={(e) => setTokenForm({ ...tokenForm, token: e.target.value })} placeholder="вставьте токен" />
           </Field>
           <Field label={connecting?.platform === 'tiktok' ? 'Open ID (необязательно)' : connecting?.platform === 'youtube' ? 'Channel ID (необязательно)' : 'Instagram user id'}
             hint={connecting?.platform === 'youtube' ? 'Можно оставить пустым: канал определится по токену, подписчики подтянутся из API' : 'Для Instagram обязателен: по нему идут media и insights'}>
-            <input className="input" value={tokenForm.externalId}
+            <input className="input" value={tokenForm.externalId} autoCapitalize="none" autoCorrect="off" spellCheck={false}
               onChange={(e) => setTokenForm({ ...tokenForm, externalId: e.target.value })} placeholder="например, 17841400000000000" />
           </Field>
           <div className="field-hint">
