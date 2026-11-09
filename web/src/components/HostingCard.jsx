@@ -23,6 +23,18 @@ export default function HostingCard() {
   const [deploy, setDeploy] = useState(null);
   const [storage, setStorage] = useState(null);
   const [pruning, setPruning] = useState(false);
+  const [backingUp, setBackingUp] = useState(false);
+
+  const backupNow = async () => {
+    setBackingUp(true);
+    try {
+      const res = await api.storageBackup();
+      toast.push({ tone: 'success', title: 'Копия базы готова', text: `${formatMb(res.size)} · хранится последних ${res.kept} из ${res.keep}` });
+      load();
+    } catch (err) {
+      toast.push({ tone: 'error', title: 'Копия не создалась', text: err.message });
+    } finally { setBackingUp(false); }
+  };
 
   const load = () => {
     api.deployReady().then(setDeploy).catch(() => {});
@@ -112,13 +124,37 @@ export default function HostingCard() {
                     background: 'linear-gradient(90deg,#7c3aed,#c4b5fd)',
                   }} />
                 </div>
-                <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                {/* Что именно занимает место: видно, что уберётся само, а что останется */}
+                <div className="col" style={{ gap: 3, marginTop: 8, fontSize: 10.5, color: 'var(--muted)' }}>
+                  <div className="row-between"><span>Видео · {storage.retentionDays} дн.</span><span>{formatMb(storage.videoBytes)}</span></div>
+                  {(storage.imageBytes > 0) && <div className="row-between"><span>Обложки</span><span>{formatMb(storage.imageBytes)}</span></div>}
+                  {(storage.frameBytes > 0) && <div className="row-between"><span>Кадры · {storage.frameRetentionDays} дн.</span><span>{formatMb(storage.frameBytes)}</span></div>}
+                  {(storage.tmpBytes > 0) && <div className="row-between"><span>Рабочие файлы</span><span>{formatMb(storage.tmpBytes)}</span></div>}
+                  {(storage.cache?.bytes > 0) && <div className="row-between"><span>Кэш ИИ · {storage.cache.days} дн.</span><span>{formatMb(storage.cache.bytes)}</span></div>}
+                </div>
+
+                <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                   <button className="btn btn-soft btn-sm" onClick={prune} disabled={pruning}>
                     <Icon name="trash" size={12} />{pruning ? 'Убираем…' : `Почистить старше ${storage.retentionDays} дн.`}
                   </button>
                   {storage.staleFiles > 0 && (
                     <span className="muted" style={{ fontSize: 10.5, alignSelf: 'center' }}>{storage.staleFiles} файлов на {formatMb(storage.staleBytes)}</span>
                   )}
+                </div>
+
+                {/* Копии базы: делаются сами раз в сутки, но можно и руками */}
+                <div className="row-between" style={{ marginTop: 10, fontSize: 11.5 }}>
+                  <span style={{ color: 'var(--muted)' }}>
+                    Копии базы{storage.backups?.count ? `: ${storage.backups.count} шт.` : ': пока нет'}
+                  </span>
+                  <span style={{ fontSize: 10.5, color: 'var(--muted)' }}>
+                    {storage.backups?.lastAt ? `последняя ${new Date(storage.backups.lastAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : 'первая появится в ближайший час'}
+                  </span>
+                </div>
+                <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                  <button className="btn btn-sm" onClick={backupNow} disabled={backingUp}>
+                    <Icon name="database" size={12} />{backingUp ? 'Копируем…' : 'Сделать копию сейчас'}
+                  </button>
                 </div>
               </div>
             )}

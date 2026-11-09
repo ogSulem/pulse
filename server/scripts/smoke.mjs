@@ -1680,6 +1680,134 @@ try {
   ok('уборка медиа', `старое удалено (${Math.round(done.freedBytes / 1024)} КБ), свежее на месте`);
 } catch (err) { fail('уборка медиа', err); }
 
+try {
+  // Уборка не ограничивается роликами: обложки, кадры нейро-ряда и брошенные
+  // рабочие каталоги раньше лежали на диске вечно.
+  const { MEDIA_DIR } = await import('../src/engine/render.js');
+  const { pruneMedia, cleanupTemp } = await import('../src/engine/housekeeping.js');
+  const old = new Date(Date.now() - 40 * 86400000);
+
+  const cover = path.join(MEDIA_DIR, 'ep-old-A.jpg');
+  const freshCover = path.join(MEDIA_DIR, 'ep-new-A.jpg');
+  fs.writeFileSync(cover, Buffer.alloc(512));
+  fs.writeFileSync(freshCover, Buffer.alloc(512));
+  fs.utimesSync(cover, old, old);
+
+  const framesDir = path.join(MEDIA_DIR, 'frames');
+  fs.mkdirSync(framesDir, { recursive: true });
+  const oldFrame = path.join(framesDir, 'f-old.jpg');
+  const freshFrame = path.join(framesDir, 'f-new.jpg');
+  fs.writeFileSync(oldFrame, Buffer.alloc(256));
+  fs.writeFileSync(freshFrame, Buffer.alloc(256));
+  fs.utimesSync(oldFrame, old, old);
+
+  const tmpOld = path.join(MEDIA_DIR, 'tmp', 'broken-render');
+  fs.mkdirSync(tmpOld, { recursive: true });
+  const tmpFile = path.join(tmpOld, 'bg.png');
+  fs.writeFileSync(tmpFile, Buffer.alloc(128));
+  const tenHoursAgo = new Date(Date.now() - 10 * 3600 * 1000);
+  fs.utimesSync(tmpFile, tenHoursAgo, tenHoursAgo);
+
+  // сначала брошенные рабочие каталоги: их же убирает и pruneMedia, но здесь
+  // проверяем именно отдельный проход (он идёт первым в обслуживании)
+  const cleaned = cleanupTemp();
+  if (fs.existsSync(tmpFile)) throw new Error('брошенный рабочий файл остался');
+  if (!cleaned.removed) throw new Error('уборка tmp ничего не отчиталась');
+
+  const res = pruneMedia({ days: 14 });
+  if (fs.existsSync(cover)) throw new Error('обложка не удалена');
+  if (!fs.existsSync(freshCover)) throw new Error('свежая обложка удалена');
+  if (fs.existsSync(oldFrame)) throw new Error('старый кадр не удалён');
+  if (!fs.existsSync(freshFrame)) throw new Error('свежий кадр удалён');
+  for (const f of [freshCover, freshFrame]) fs.rmSync(f, { force: true });
+  ok('уборка: обложки, кадры, tmp', `файлов убрано ${res.removed}, tmp-каталогов ${cleaned.removed}`);
+} catch (err) { fail('уборка: обложки, кадры, tmp', err); }
+
+try {
+  // Обслуживание и копия базы: то, что на VPS должно происходить само.
+  const { maintenance, storageUsage } = await import('../src/engine/housekeeping.js');
+  const { BACKUP_DIR } = await import('../src/engine/housekeeping.js');
+  const result = await maintenance({ force: true });
+  if (!result.backup?.size) throw new Error('копия базы не создалась');
+  if (!fs.existsSync(result.backup.file)) throw new Error('файла копии нет на диске');
+  if (result.integrity && !result.integrity.ok) throw new Error('quick_check не прошёл');
+  const usage = storageUsage();
+  for (const key of ['videos', 'images', 'frames', 'tmpBytes', 'cache', 'backups', 'staleFiles']) {
+    if (!(key in usage)) throw new Error(`в состоянии диска нет поля ${key}`);
+  }
+  if (!usage.backups.count) throw new Error('копии не попали в состояние диска');
+  const copies = fs.readdirSync(BACKUP_DIR).filter((n) => n.endsWith('.db')).length;
+  ok('обслуживание и копии базы', `копий ${copies}, ${Math.round(usage.backups.lastBytes / 1024)} КБ, целостность ок`);
+} catch (err) { fail('обслуживание и копии базы', err); }
+
+try {
+  // Пароль: любая длина и любая раскладка — «неверный пароль», а не 500.
+  // Именно на этом падало: timingSafeEqual бросал при разной длине буферов,
+  // и человек с паролем на кириллице не мог войти вообще.
+  // PULSE_PASSWORD читается при импорте модуля, поэтому проверяем в отдельном
+  // процессе — иначе тест увидел бы пароль, загруженный раньше.
+  const { spawnSync } = await import('node:child_process');
+  const probe = `
+    const { checkPassword } = await import('${path.join(process.cwd(), 'server/src/modules/auth.js').replace(/\\/g, '/')}');
+    const cases = [['пароль-pulse', true], ['пароль', false], ['wrong', false], ['', false], ['a'.repeat(200), false], ['пароль-pulse ', false]];
+    const bad = [];
+    for (const [input, want] of cases) {
+      let got;
+      try { got = checkPassword(input); } catch (err) { bad.push(input + ' → исключение: ' + err.message); continue; }
+      if (got !== want) bad.push((input || 'пусто') + ' → ' + got);
+    }
+    if (bad.length) { console.error(bad.join('; ')); process.exit(1); }
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    env: { ...process.env, PULSE_PASSWORD: 'пароль-pulse' },
+    encoding: 'utf8',
+  });
+  if (run.status !== 0) throw new Error((run.stderr || run.stdout || 'проверка не прошла').trim().split('\n').slice(-2).join(' '));
+  ok('пароль: длина и кириллица', 'неверный пароль — это отказ, а не ошибка сервера');
+} catch (err) { fail('пароль: длина и кириллица', err); }
+
+try {
+  // Исходящие запросы не висят вечно: у fetch есть потолок времени.
+  // Проверяем в отдельном процессе — потолок читается из env при первом импорте
+  // модуля, а к этому месту smoke уже успел загрузить провайдеров.
+  const { spawnSync } = await import('node:child_process');
+  const netFile = path.join(process.cwd(), 'server/src/core/net.js').replace(/\\/g, '/');
+  const probe = `
+    import http from 'node:http';
+    await import('${netFile}');
+    if (!globalThis.fetch.__pulseTimeout) { console.error('обёртка fetch не установилась'); process.exit(1); }
+    const silent = http.createServer(() => {});
+    await new Promise((r) => silent.listen(0, '127.0.0.1', r));
+    const started = Date.now();
+    let timedOut = false;
+    try { await fetch('http://127.0.0.1:' + silent.address().port + '/'); }
+    catch (err) { timedOut = err.name === 'TimeoutError' || /timeout|aborted/i.test(err.name + err.message); }
+    silent.close();
+    const ms = Date.now() - started;
+    if (!timedOut) { console.error('зависший провайдер не оборван'); process.exit(1); }
+    if (ms > 6000) { console.error('поздний таймаут: ' + ms + ' мс'); process.exit(1); }
+    console.log(String(Math.round(ms / 100) / 10));
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    env: { ...process.env, PULSE_FETCH_TIMEOUT_SEC: '2' },
+    encoding: 'utf8',
+    timeout: 20000,
+  });
+  if (run.status !== 0) throw new Error((run.stderr || run.stdout || 'проверка не прошла').trim().split('\n').slice(-1)[0]);
+  ok('сеть: таймаут запроса', `зависший ответ оборван за ${run.stdout.trim()} с, лимит из PULSE_FETCH_TIMEOUT_SEC`);
+} catch (err) { fail('сеть: таймаут запроса', err); }
+
+try {
+  // Экономия мобильного трафика: у GET-ответов есть ETag и Cache-Control
+  // no-cache — повторный опрос отдаёт 304 без тела.
+  const apiSrc = fs.readFileSync(path.join(process.cwd(), 'server/src/modules/api.js'), 'utf8');
+  if (!apiSrc.includes("res.set('Cache-Control', 'no-cache')")) throw new Error('нет условного кеширования API');
+  if (!/If-None-Match|etag/i.test(apiSrc) && !apiSrc.includes('no-cache')) throw new Error('ETag не используется');
+  const app = fs.readFileSync(path.join(process.cwd(), 'web/src/App.jsx'), 'utf8');
+  if (!app.includes("document.addEventListener('visibilitychange'")) throw new Error('опрос не останавливается в фоне');
+  ok('трафик: 304 и пауза опроса', 'GET-ответы переспрашиваются, в скрытой вкладке запросов нет');
+} catch (err) { fail('трафик: 304 и пауза опроса', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

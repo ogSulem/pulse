@@ -73,9 +73,7 @@ export default function Analytics() {
           </div>
           <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
             {exportList.map((e) => (
-              <a key={e.type} className="btn btn-sm" href={api.exportUrl(e.type)} title={e.label}>
-                <Icon name="download" size={13} />{e.type === 'analytics' ? 'CSV' : e.type}
-              </a>
+              <DownloadButton key={e.type} className="btn btn-sm" action={() => api.exportFile(e.type)} label={e.type === 'analytics' ? 'CSV' : e.type} />
             ))}
           </div>
         </div>

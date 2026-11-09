@@ -6,7 +6,7 @@
 `Secure` на https) и нужна устройствам, где браузер запрещает `localStorage`.
 
 ```bash
-# вход
+# вход (лимит: 12 попыток на адрес и 20 на сервер в минуту, ответ 429 с Retry-After)
 curl -s -X POST http://localhost:8080/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"password":"pulse"}'
@@ -210,7 +210,8 @@ curl -s "http://localhost:8080/api/analytics/overview?days=14&projectId=all" \
 | GET | `/analytics/overview?days=&projectId=` | KPI, ряды, разрезы, топ, A/B |
 | GET | `/analytics/publications?limit=&projectId=` | таблица публикаций с CTR |
 | GET | `/export/{ideas\|episodes\|scripts\|analytics\|publications}` | CSV (UTF-8 BOM, `;`) |
-| GET | `/backup` | полный JSON-дамп |
+| GET | `/backup` | полный JSON-дамп (17 таблиц, включая клики и конверсии) |
+| GET | `/backup/db` | копия базы `.db` через SQLite Backup API — то, что реально восстанавливается |
 
 ---
 
@@ -971,17 +972,28 @@ plan, advice[]`.
 
 ```json
 GET  /api/storage
-{ "dir": "/app/data/media", "files": 128, "bytes": 4021, "videos": 96, "videoBytes": 3120,
-  "staleFiles": 40, "staleBytes": 2100, "retentionDays": 14, "freeBytes": 3489 }
+{ "dir": "/app/data/media", "files": 128, "bytes": 4021,
+  "videos": 96, "videoBytes": 3120, "images": 24, "imageBytes": 640,
+  "frames": 8, "frameBytes": 260, "tmpFiles": 0, "tmpBytes": 0,
+  "cache": { "files": 12, "bytes": 40, "days": 7 },
+  "backups": { "count": 7, "bytes": 180, "lastAt": "2026-01-01T04:00:00.000Z", "lastBytes": 25 },
+  "staleFiles": 40, "staleBytes": 2100, "retentionDays": 14, "frameRetentionDays": 30,
+  "freeBytes": 3489 }
 
 POST /api/storage/prune   { "days": 14, "dryRun": true }
 { "ok": true, "dryRun": true, "keepDays": 14, "removed": 40, "freedBytes": 2100 }
+
+POST /api/storage/backup
+{ "ok": true, "file": "/app/data/backups/pulse-2026-01-01-04-00.db", "size": 26214400, "kept": 7, "keep": 7 }
 ```
 
 Удаляются только файлы медиа старше `days` (по умолчанию `PULSE_MEDIA_RETENTION_DAYS`, 14 дней).
 Строки `episodes` и статистика остаются, ставится отметка `media_pruned_at` — поэтому история
-публикаций не ломается. Автоматически то же делает фоновая уборка раз в 6 часов; `includeAll`
-разрешает чистить и файлы, не привязанные к эпизоду.
+публикаций не ломается. Отдельные сроки у кадров нейро-ряда (`PULSE_FRAME_RETENTION_DAYS`, 30 дней)
+и кэша ответов ИИ (`PULSE_CACHE_RETENTION_DAYS`, 7 дней); рабочие каталоги рендера (`media/tmp`)
+живут 6 часов. Автоматически то же делает обслуживание — первый проход через полторы минуты
+после старта, дальше раз в 6 часов, плюс ежедневная копия базы (7 последних) и недельный
+`PRAGMA quick_check`). `includeAll` разрешает чистить и файлы, не привязанные к эпизоду.
 
 ### Аккаунты: тема и персона
 

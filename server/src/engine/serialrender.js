@@ -463,20 +463,23 @@ export async function renderSeriesCut({ series = {}, cut = {}, paletteIndex = 0,
     '[bg][ov]overlay=0:0:format=auto:eof_action=pass,format=yuv420p[v]',
   ].join(';');
 
-  await run(ffmpegPath, [
-    '-hide_banner', '-loglevel', 'error',
-    '-loop', '1', '-t', String(seconds + 1), '-i', plate,
-    '-loop', '1', '-t', String(seconds + 1), '-i', overlay,
-    '-f', 'lavfi', '-t', String(seconds + 1), '-i', 'anullsrc=r=48000:cl=stereo',
-    '-filter_complex', filter,
-    '-map', '[v]', '-map', '2:a',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22',
-    '-pix_fmt', 'yuv420p', '-r', String(FPS), '-t', String(seconds),
-    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
-    '-shortest', '-movflags', '+faststart', '-y', videoAbs,
-  ], { timeoutMs: 600000 });
-
-  fs.rmSync(workDir, { recursive: true, force: true });
+  // ошибка ffmpeg не должна оставлять рабочий каталог на диске навсегда
+  try {
+    await run(ffmpegPath, [
+      '-hide_banner', '-loglevel', 'error',
+      '-loop', '1', '-t', String(seconds + 1), '-i', plate,
+      '-loop', '1', '-t', String(seconds + 1), '-i', overlay,
+      '-f', 'lavfi', '-t', String(seconds + 1), '-i', 'anullsrc=r=48000:cl=stereo',
+      '-filter_complex', filter,
+      '-map', '[v]', '-map', '2:a',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22',
+      '-pix_fmt', 'yuv420p', '-r', String(FPS), '-t', String(seconds),
+      '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+      '-shortest', '-movflags', '+faststart', '-y', videoAbs,
+    ], { timeoutMs: 600000 });
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
   const stat = fs.statSync(videoAbs);
   return {
     ok: true,

@@ -66,6 +66,40 @@ async function request(path, { method = 'GET', body, raw = false } = {}) {
   return data;
 }
 
+/**
+ * Скачивание файла через fetch: токен уходит заголовком, а не в адресе.
+ * Раньше ссылка выглядела как `/api/backup?token=…` — токен попадал в историю
+ * браузера, в логи сервера и в Referer. Cookie-сессия это позволяла и раньше,
+ * но полагаться на неё одной мало: в приватном режиме её могло не быть.
+ */
+async function download(path, fallbackName = 'pulse-export') {
+  const token = getToken();
+  const res = await fetch(`/api${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    credentials: 'same-origin',
+  });
+  if (!res.ok) {
+    let message = `Не удалось скачать (${res.status})`;
+    try { message = (await res.json()).message || message; } catch { /* не JSON */ }
+    throw new HttpError(message, res.status);
+  }
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  const name = match ? match[1] : fallbackName;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // iOS Safari не всегда отпускает blob сразу — освобождаем с запасом
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return { ok: true, name, bytes: blob.size };
+}
+
 export const api = {
   login: (password) => request('/auth/login', { method: 'POST', body: { password } }),
   logout: () => request('/auth/logout', { method: 'POST', body: {} }),
@@ -145,6 +179,7 @@ export const api = {
   deployReady: () => request('/deploy/ready'),
   storage: () => request('/storage'),
   storagePrune: (payload = {}) => request('/storage/prune', { method: 'POST', body: payload }),
+  storageBackup: () => request('/storage/backup', { method: 'POST', body: {} }),
   aiStatus: () => request('/ai/status'),
   aiChain: () => request('/ai/chain'),
   aiTest: () => request('/ai/test', { method: 'POST', body: {} }),
@@ -204,8 +239,10 @@ export const api = {
   settings: () => request('/settings'),
   updateSettings: (payload) => request('/settings', { method: 'PATCH', body: payload }),
   reseed: () => request('/demo/reseed', { method: 'POST', body: {} }),
-  exportUrl: (type) => `/api/export/${type}?token=${encodeURIComponent(getToken() || '')}`,
-  backupUrl: () => `/api/backup?token=${encodeURIComponent(getToken() || '')}`,
+  // файлы скачиваются запросом с заголовком авторизации — без токена в адресе
+  exportFile: (type) => download(`/export/${type}`, `pulse-${type}.csv`),
+  backupFile: () => download('/backup', 'pulse-backup.json'),
+  backupDb: () => download('/backup/db', 'pulse.db'),
   coverUrl: (seed, title, sub, extra = '') =>
     `/api/covers/${encodeURIComponent(seed)}.svg?title=${encodeURIComponent(title || 'Pulse')}&sub=${encodeURIComponent(sub || 'reel')}${extra}`,
   health: () => fetch('/api/health').then((r) => r.json()),

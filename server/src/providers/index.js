@@ -3,6 +3,7 @@
 // Движки взаимозаменяемы: адаптер реализует контракт и регистрируется в реестре.
 // demo-адаптеры работают без ключей, live-адаптеры вызывают реальные API.
 // ─────────────────────────────────────────────────────────────────────────────
+import '../core/net.js';
 import { log } from '../core/logger.js';
 import { publicBase as publicBaseOf } from '../core/publicurl.js';
 import fs from 'node:fs';

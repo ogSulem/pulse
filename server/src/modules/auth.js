@@ -49,11 +49,24 @@ export function verifyToken(token) {
   }
 }
 
+/**
+ * Сверка пароля. Раньше здесь сравнивались буферы одинаковой ДЛИНЫ СИМВОЛОВ:
+ * `padEnd(64)` для кириллицы или эмодзи даёт другую длину в байтах, и
+ * timingSafeEqual бросал «Input buffers must have the same byte length».
+ * Наружу это выходило ошибкой 500 вместо «Неверный пароль» — то есть человек
+ * с паролем на русском вообще не мог войти, а панель молчала.
+ *
+ * Теперь сравниваются хеши: длина всегда 32 байта, сравнение по-прежнему
+ * постоянное по времени, а лишние символы и регистр не роняют сервер.
+ */
 export function checkPassword(password) {
-  if (typeof password !== 'string') return false;
-  const a = Buffer.from(password.padEnd(64).slice(0, 64));
-  const b = Buffer.from(PASSWORD.padEnd(64).slice(0, 64));
-  return crypto.timingSafeEqual(a, b) && password === PASSWORD;
+  if (typeof password !== 'string' || !password) return false;
+  const digest = (value) => crypto.createHash('sha256').update(String(value), 'utf8').digest();
+  try {
+    return crypto.timingSafeEqual(digest(password), digest(PASSWORD));
+  } catch {
+    return false;
+  }
 }
 
 /* ── Cookie ──────────────────────────────────────────────────────────────── */

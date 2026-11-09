@@ -1,3 +1,4 @@
+import './core/net.js'; // потолок времени на все исходящие запросы
 import { boot, bootBanner } from './core/boot.js';
 import express from 'express';
 import path from 'node:path';
@@ -26,10 +27,25 @@ app.use(express.json({ limit: '2mb' }));
 
 // Базовая гигиена ответов. Важно: не ставим X-Frame-Options — панель
 // открывается во встроенном предпросмотре и может быть встроена в iframe.
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('Referrer-Policy', 'same-origin');
   res.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  // CSP: панель грузит только свои файлы (шрифты теперь в сборке, внешних
+  // CDN нет), поэтому политику можно держать строгой. 'unsafe-inline' нужен
+  // инлайновому скрипту темы до первой отрисовки и style-атрибутам React.
+  // frame-ancestors оставлен открытым: панель открывают во встроенном
+  // предпросмотре, и X-Frame-Options мы сознательно не ставим.
+  res.set(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; " +
+    "form-action 'self'; base-uri 'self'; frame-ancestors *",
+  );
+  // HSTS — только когда запрос действительно пришёл по https (за Caddy).
+  if (String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https' || req.secure) {
+    res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
   next();
 });
 
@@ -135,16 +151,23 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 // ролика занимает минуту: пока он шёл, не обновлялась аналитика, не срабатывал
 // автопилот и не восстанавливались зависшие задачи — со стороны это выглядело
 // как «очередь стоит, обработано 0».
-// Уборка медиа: раз в 6 часов, только если есть что убирать. На Railway том
-// 5 ГБ — без этого рендеры падают на «нет места» через месяц работы.
-setInterval(() => {
-  import('./engine/housekeeping.js')
-    .then(({ autoPrune }) => {
-      const result = autoPrune();
-      if (result?.removed) console.log(`  ⌫ уборка медиа: ${result.removed} файлов, ${Math.round(result.freedBytes / 1024 ** 2)} МБ`);
-    })
-    .catch((err) => log({ level: 'warn', actor: 'system', action: 'storage.prune_failed', message: String(err?.message || err) }));
-}, 6 * 3600 * 1000).unref();
+// Обслуживание: уборка диска, кэшей, задач и копия базы. Раньше это был
+// единственный setInterval на 6 часов — то есть после каждого перезапуска
+// контейнера отсчёт начинался заново, и на Railway, где контейнер обновляется
+// регулярно, уборка не запускалась вообще никогда.
+// Теперь: первая уборка через полторы минуты после старта, дальше — раз в
+// 6 часов. Копия базы создаётся сама раз в сутки (хранится 7 штук).
+const runMaintenance = () => import('./engine/housekeeping.js')
+  .then(({ autoPrune }) => autoPrune())
+  .then((result) => {
+    if (result?.media?.removed || result?.temp?.removed || result?.cache?.removed || result?.backup) {
+      const freed = (result.media?.freedBytes || 0) + (result.temp?.freedBytes || 0) + (result.cache?.freedBytes || 0);
+      console.log(`  ⌫ обслуживание: освобождено ${Math.round(freed / 1024 ** 2)} МБ${result.backup ? ', копия базы готова' : ''}`);
+    }
+  })
+  .catch((err) => log({ level: 'warn', actor: 'system', action: 'storage.prune_failed', message: String(err?.message || err) }));
+setTimeout(runMaintenance, 90 * 1000).unref();
+setInterval(runMaintenance, 6 * 3600 * 1000).unref();
 
 let working = false;
 async function work() {
@@ -167,7 +190,10 @@ async function tick() {
     const lastAutopilot = Number(globalThis.__lastAutopilot || 0);
     if (Date.now() - lastAutopilot > 20000) {
       globalThis.__lastAutopilot = Date.now();
-      enqueue('autopilot.tick', {}, { delayMs: 0, priority: 8 });
+      // dedupe: пока предыдущий тик не разобран, второй не нужен. Иначе при
+      // занятой очереди (рендер идёт минуту) в pending копились десятки
+      // одинаковых тиков — каждый со своим проходом по всем проектам.
+      enqueue('autopilot.tick', {}, { delayMs: 0, priority: 8, dedupeKey: 'autopilot' });
       await collectAnalytics();
       simulateTraffic({ budget: 250 });
       sweepDueEpisodes();
@@ -219,4 +245,17 @@ process.on('SIGTERM', () => {
 
 process.on('unhandledRejection', (err) => {
   log({ level: 'error', actor: 'system', action: 'unhandled.rejection', message: String(err?.message || err) });
+  console.error('unhandledRejection:', err);
+});
+
+// Синхронное исключение вне try/catch раньше убивало процесс без следа в
+// журнале: в панели просто «всё пропало», в docker — рестарт по политике.
+// Теперь причина в базе и в логах контейнера, а супервизор перезапускает.
+process.on('uncaughtException', (err) => {
+  try {
+    log({ level: 'error', actor: 'system', action: 'uncaught.exception', message: String(err?.stack || err).slice(0, 900) });
+  } catch { /* база может быть уже недоступна */ }
+  console.error('uncaughtException:', err);
+  // даём минуту на завершение текущего ffmpeg и выходим: Docker поднимет заново
+  setTimeout(() => process.exit(1), 1000).unref();
 });

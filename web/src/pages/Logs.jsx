@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { useApp } from '../App.jsx';
 import Icon from '../components/Icons.jsx';
+import DownloadButton from '../components/DownloadButton.jsx';
 import { Badge, Empty } from '../components/ui.jsx';
 import { relative, dateTime } from '../lib/format.js';
 
@@ -129,9 +130,10 @@ export default function Logs() {
         <div className="card">
           <div className="card-title"><h3>Экспорт</h3></div>
           <div className="col" style={{ gap: 8 }}>
-            <a className="btn btn-sm btn-block" href={api.exportUrl('episodes')}><Icon name="download" size={13} />Ролики и статусы</a>
-            <a className="btn btn-sm btn-block" href={api.exportUrl('analytics')}><Icon name="download" size={13} />Статистика</a>
-            <a className="btn btn-sm btn-block" href={api.backupUrl()}><Icon name="database" size={13} />Полный бэкап (JSON)</a>
+            <DownloadButton label="Ролики и статусы" action={() => api.exportFile('episodes')} />
+            <DownloadButton label="Статистика" action={() => api.exportFile('analytics')} />
+            <DownloadButton label="Полный бэкап (JSON)" icon="database" action={() => api.backupFile()} />
+            <DownloadButton label="Копия базы (.db)" icon="database" action={() => api.backupDb()} />
           </div>
         </div>
       </div>

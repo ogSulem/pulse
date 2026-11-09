@@ -13,6 +13,7 @@
 //   • openai       — gpt-image-1 / dall-e-3.
 //   • stability    — SD 3.5 core.
 // ─────────────────────────────────────────────────────────────────────────────
+import '../core/net.js';
 import { log } from '../core/logger.js';
 
 const env = process.env;
