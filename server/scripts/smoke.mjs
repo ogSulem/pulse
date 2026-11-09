@@ -1767,6 +1767,37 @@ try {
 } catch (err) { fail('пароль: длина и кириллица', err); }
 
 try {
+  // Исходящие запросы не висят вечно: у fetch есть потолок времени.
+  // Проверяем в отдельном процессе — потолок читается из env при первом импорте
+  // модуля, а к этому месту smoke уже успел загрузить провайдеров.
+  const { spawnSync } = await import('node:child_process');
+  const netFile = path.join(process.cwd(), 'server/src/core/net.js').replace(/\\/g, '/');
+  const probe = `
+    import http from 'node:http';
+    await import('${netFile}');
+    if (!globalThis.fetch.__pulseTimeout) { console.error('обёртка fetch не установилась'); process.exit(1); }
+    const silent = http.createServer(() => {});
+    await new Promise((r) => silent.listen(0, '127.0.0.1', r));
+    const started = Date.now();
+    let timedOut = false;
+    try { await fetch('http://127.0.0.1:' + silent.address().port + '/'); }
+    catch (err) { timedOut = err.name === 'TimeoutError' || /timeout|aborted/i.test(err.name + err.message); }
+    silent.close();
+    const ms = Date.now() - started;
+    if (!timedOut) { console.error('зависший провайдер не оборван'); process.exit(1); }
+    if (ms > 6000) { console.error('поздний таймаут: ' + ms + ' мс'); process.exit(1); }
+    console.log(String(Math.round(ms / 100) / 10));
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    env: { ...process.env, PULSE_FETCH_TIMEOUT_SEC: '2' },
+    encoding: 'utf8',
+    timeout: 20000,
+  });
+  if (run.status !== 0) throw new Error((run.stderr || run.stdout || 'проверка не прошла').trim().split('\n').slice(-1)[0]);
+  ok('сеть: таймаут запроса', `зависший ответ оборван за ${run.stdout.trim()} с, лимит из PULSE_FETCH_TIMEOUT_SEC`);
+} catch (err) { fail('сеть: таймаут запроса', err); }
+
+try {
   // Экономия мобильного трафика: у GET-ответов есть ETag и Cache-Control
   // no-cache — повторный опрос отдаёт 304 без тела.
   const apiSrc = fs.readFileSync(path.join(process.cwd(), 'server/src/modules/api.js'), 'utf8');

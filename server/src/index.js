@@ -1,3 +1,4 @@
+import './core/net.js'; // потолок времени на все исходящие запросы
 import { boot, bootBanner } from './core/boot.js';
 import express from 'express';
 import path from 'node:path';

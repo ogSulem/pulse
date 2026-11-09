@@ -16,6 +16,7 @@
 // Порядок по умолчанию — «сначала бесплатное и лучшее для русского текста».
 // Переопределяется: PULSE_LLM_ORDER="gemini,groq", PULSE_LLM_PROVIDER=groq.
 // ─────────────────────────────────────────────────────────────────────────────
+import '../core/net.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
