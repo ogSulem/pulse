@@ -1284,3 +1284,107 @@ curl -s "http://localhost:8080/api/live?rev=1f9c…&ep=…&pl=…&lg=…&pj=…&
 
 Замер на демо-базе: опрос панели был 5 запросов × ~117 КБ каждые 6 секунд, стал
 ≈180 байт и ноль перерисовок, когда на сервере ничего не произошло.
+
+
+---
+
+## 20. Нарезка из фильма (v20)
+
+Исходник лежит в `PULSE_DATA_DIR/sources` (в образе `/app/data/sources`) и **не**
+раздаётся по `/media` — это гигабайты, которым нечего делать в кэше браузера.
+Готовые клипы — обычные mp4 в `/media`, их сразу видят плеер, очередь и публикация.
+
+### `GET /api/movies`
+
+Список исходников, суммы и возможности сервера.
+
+```json
+{
+  "sources": [{ "id": "src_…", "title": "Фильм", "duration": 7210.4, "width": 1920, "height": 1080,
+                "subtitleKind": "embedded", "status": "analyzed", "counts": { "ready": 3 },
+                "next": "Клипы готовы — поставьте в очередь" }],
+  "totals": { "sources": 1, "bytes": 2147483648, "clips": 5, "ready": 3, "queued": 1, "rendering": 1, "candidates": 0 },
+  "info": {
+    "available": true, "ffmpeg": true, "ffprobe": true, "sharp": true,
+    "uploadLimitMb": 4096, "sourceDir": "/app/data/sources",
+    "asr": { "enabled": true, "providers": [{ "id": "groq", "configured": true, "model": "whisper-large-v3-turbo" }] },
+    "defaults": { "count": 5, "minSec": 18, "maxSec": 45, "style": "blur", "hookSec": 4 }
+  }
+}
+```
+
+`GET /api/movies/info` — только блок `info` (без списка файлов).
+
+### `POST /api/movies/upload?name=film.mp4`
+
+Тело — сам файл (`Content-Type: application/octet-stream`), без multipart:
+сервер пишет поток на диск и считает байты. Лимит — `PULSE_MAX_UPLOAD_MB`
+(4096 по умолчанию), при превышении приём обрывается и файл удаляется.
+Ответ `201` — карточка исходника (как элемент `sources`).
+
+```bash
+curl -s -X POST "http://localhost:8080/api/movies/upload?name=film.mkv" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream' \
+  --data-binary @film.mkv
+```
+
+### `POST /api/movies/scan`
+
+Регистрирует файлы, скопированные в каталог исходников напрямую
+(`scp`, `rsync`, `docker cp`). Возвращает `{ added, sources, …список }`.
+
+### `POST /api/movies/{id}/analyze`
+
+```json
+{ "count": 5 }
+```
+
+Ставит задачу `movie.analyze`: ffprobe → текст (свои субтитры → встроенные →
+распознавание речи) → сцены и паузы → выбор моментов. Ответ приходит сразу,
+прогресс виден в `status`/`stage` исходника (`probe`, `text`, `scenes`, `asr`, `rank`).
+
+### `POST /api/movies/{id}/subtitles?name=film.srt`
+
+Тело — SRT или VTT как `text/plain` (до 8 МБ). Свои субтитры дают лучший
+результат и не тратят квоту распознавания.
+
+### `POST /api/movies/{id}/render`
+
+Ставит в очередь сборку всех черновых клипов. `{ "clipId": "clip_…" }` —
+только один клип. Каждый клип собирается отдельной задачей `movie.render`.
+
+### `POST /api/movies/{id}/queue`
+
+```json
+{ "count": 3, "clipIds": null, "startAt": null, "platform": "reels" }
+```
+
+Готовые клипы становятся эпизодами конвейера: файл уже есть, поэтому сценарий
+и рендер пропускаются. Возвращает созданные `episodes` и обновлённую карточку.
+Клип без `clipIds` берётся по оценке; слоты считает обычный `nextSlot`, дальше
+работает `sweepDueEpisodes` → `episode.publish` (аккаунты, лимиты, маркировка).
+
+### `GET /api/movies/{id}`
+
+Карточка исходника с клипами:
+
+```json
+{
+  "id": "src_…", "status": "analyzed", "subtitleKind": "asr", "duration": 7210.4,
+  "counts": { "ready": 2, "queued": 1 },
+  "clips": [{
+    "id": "clip_…", "idx": 1, "start": 312.5, "end": 341.2, "seconds": 28.7,
+    "title": "Он понял, кто его предал", "hook": "Ты был рядом всё это время?",
+    "transcript": "…", "reason": "5 реплик, 42 зн/с · есть вопрос",
+    "score": 88, "status": "ready", "videoPath": "/media/clip-clip_….mp4",
+    "width": 1080, "height": 1920, "coverPaths": { "A": "/media/…-A.jpg", "B": "/media/…-B.jpg" },
+    "episodeId": null, "error": null
+  }]
+}
+```
+
+### `PATCH /api/movies/{id}` · `DELETE /api/movies/{id}` · `DELETE /api/clips/{id}`
+
+`PATCH` меняет `title` и `projectId`. `DELETE` исходника удаляет файл и черновые
+клипы; если из него уже есть клипы в очереди — отвечает `400` с объяснением.
+Клип в очереди удалить нельзя: сначала ролик в «Очереди».

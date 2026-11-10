@@ -47,7 +47,10 @@ function activeProduct(projectId) {
 }
 
 // ── Создание эпизода ────────────────────────────────────────────────────────
-export function createEpisode({ projectId, ideaId = null, scriptId = null, productId = null, accountId = null, scheduledAt = null, autopilot = 1, title = null, topic = null }) {
+// prepared: ролик уже собран снаружи (нарезка из фильма, повторная публикация
+// готового файла). Тогда конвейер не должен заново придумывать сценарий и
+// рендерить — эпизод сразу становится готовым к публикации.
+export function createEpisode({ projectId, ideaId = null, scriptId = null, productId = null, accountId = null, scheduledAt = null, autopilot = 1, title = null, topic = null, prepared = false }) {
   const project = getProject(projectId);
   if (!project) throw new Error('Проект не найден');
   // Персона канала: тема аккаунта важнее темы проекта. Так один проект может
@@ -89,7 +92,7 @@ export function createEpisode({ projectId, ideaId = null, scriptId = null, produ
 
   if (ideaId) db.prepare("UPDATE ideas SET status = 'used' WHERE id = ?").run(ideaId);
   log({ level: 'info', actor: 'user', action: 'episode.created', entityType: 'episode', entityId: id, message: `Эпизод «${resolvedTitle}» поставлен в очередь`, meta: { projectId } });
-  enqueue('episode.prepare', { episodeId: id }, { delayMs: 600, priority: 3 });
+  if (!prepared) enqueue('episode.prepare', { episodeId: id }, { delayMs: 600, priority: 3 });
   return getEpisode(id);
 }
 

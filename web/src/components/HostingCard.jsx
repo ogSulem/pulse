@@ -131,6 +131,9 @@ export default function HostingCard() {
                   {(storage.frameBytes > 0) && <div className="row-between"><span>Кадры · {storage.frameRetentionDays} дн.</span><span>{formatMb(storage.frameBytes)}</span></div>}
                   {(storage.tmpBytes > 0) && <div className="row-between"><span>Рабочие файлы</span><span>{formatMb(storage.tmpBytes)}</span></div>}
                   {(storage.cache?.bytes > 0) && <div className="row-between"><span>Кэш ИИ · {storage.cache.days} дн.</span><span>{formatMb(storage.cache.bytes)}</span></div>}
+                  {(storage.sources?.bytes > 0) && (
+                    <div className="row-between"><span>Исходники нарезки · не удаляются сами</span><span>{formatMb(storage.sources.bytes)}</span></div>
+                  )}
                 </div>
 
                 <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: 'wrap' }}>

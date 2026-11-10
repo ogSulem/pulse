@@ -27,10 +27,13 @@ export const SECTIONS = [
     label: 'Создать',
     icon: 'film',
     title: 'Создать контент',
-    sub: 'Студия, очередь, расписание, сериалы и темы — в одном месте',
+    sub: 'Студия, нарезка из фильма, очередь, расписание, сериалы и темы',
     badge: 'active',
     tabs: [
       { id: 'studio', label: 'Студия', icon: 'rocket' },
+      // Нарезка стоит сразу после студии: это второй способ получить контент —
+      // не придумать с нуля, а взять готовое видео и вырезать лучшее.
+      { id: 'clips', label: 'Нарезка', icon: 'scissors' },
       { id: 'queue', label: 'Очередь', icon: 'film' },
       { id: 'calendar', label: 'Расписание', icon: 'calendar' },
       { id: 'series', label: 'Сериалы', icon: 'sparkles' },
@@ -81,6 +84,8 @@ export const SECTIONS = [
 export const LEGACY = {
   dashboard: ['today', 'today'],
   studio: ['create', 'studio'],
+  clips: ['create', 'clips'],
+  cuts: ['create', 'clips'],
   queue: ['create', 'queue'],
   calendar: ['create', 'calendar'],
   series: ['create', 'series'],

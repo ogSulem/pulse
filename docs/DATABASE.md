@@ -625,6 +625,53 @@ JSON вида `{ "weights": { "hook": 0.31, … }, "lift": { "hook": 1.4, … },
 `publish_at <= now`, непустой `video_path` и пустой `external_id`. Ошибка загрузки возвращает
 серию в `review` и пишет причину в `error` — планировщик не зацикливается.
 
+## v20: нарезка из фильма
+
+Две таблицы. Файл исходника лежит в `PULSE_DATA_DIR/sources` и в базе только путём:
+гигабайты видео не должны попадать ни в копию базы, ни в `/media`.
+
+### `movie_sources` — исходник
+
+| Поле | Смысл |
+|------|-------|
+| `file_path`, `file_name`, `bytes` | где лежит файл и сколько занимает |
+| `duration_sec`, `width`, `height`, `fps`, `has_audio` | параметры из ffprobe; без ffprobe — из вывода ffmpeg (`probeFallback`) |
+| `lang`, `subtitle_path`, `subtitle_kind` | язык дорожки и откуда взялся текст: `srt` / `uploaded` / `embedded` / `asr` / `none` |
+| `subtitle_streams` | сколько субтитровых дорожек внутри файла (нужно, чтобы не запускать распознавание зря) |
+| `status`, `stage`, `error` | `new → analyzing → analyzed` (или `failed`); `stage` — шаг разбора (`probe`, `text`, `scenes`, `asr`, `rank`) |
+| `project_id` | бренд, к которому привязан исходник (аккаунты, описание, ссылки) |
+| `rights` | подтверждение прав на материал — ставится при загрузке |
+| `analysis` | TEXT (JSON): реплики (до 6000), число сцен и пауз, время разбора |
+| `candidates`, `created_at`, `updated_at` | счётчик разобранных фрагментов и время |
+
+Индексы: `(status, updated_at)` и `(created_at DESC)` — оба под фактические запросы списка.
+
+### `movie_clips` — клип
+
+| Поле | Смысл |
+|------|-------|
+| `source_id`, `idx` | уникальная пара: номер клипа внутри исходника |
+| `start_sec`, `end_sec`, `seconds` | точные границы фрагмента (используются как `-ss`/`-t` в ffmpeg) |
+| `title`, `hook`, `caption`, `hashtags`, `transcript`, `reason`, `score` | тексты от ИИ или эвристики; `reason` — почему момент выбран, `score` 0–100 |
+| `status` | `candidate → rendering → ready → queued` (или `failed`) |
+| `video_path`, `video_bytes`, `width`, `height`, `render_ms`, `cover_paths` | артефакты вертикали 1080×1920 и обложки A/B |
+| `episode_id` | эпизод конвейера после `queueClips` — дальше клип живёт обычной жизнью ролика |
+| `error` | причина падения сборки |
+
+Индексы: `(source_id, idx)` (уникальный), `(status, updated_at)`, `(source_id, idx)` для ленты.
+`ON DELETE CASCADE` от `movie_sources`: удаление исходника убирает его клипы (файлы при этом
+удаляет `deleteSource`, а не SQL).
+
+**Связь с конвейером.** Клип **не** проходит `episode.prepare`/`episode.render`:
+`createEpisode({ prepared: true })` не ставит задачу сценария, а поля `video_path`,
+`cover_paths`, `description`, `hashtags`, `creative = {"source":"movie",…}` пишутся сразу.
+Поэтому `episode.publish` берёт готовый файл, а `sweepDueEpisodes()` отправляет его
+в публикацию по расписанию — как любой другой ролик.
+
+**Кто не даёт уборке съесть файл.** `pruneMedia()` пропускает basename'ы всех роликов
+в статусах `queued/generating/review/scheduled`, готовых клипов и серий — иначе ролик,
+поставленный на три недели вперёд, терял файл по 14-дневному сроку.
+
 ## v9: OAuth, тема канала, свои продукты и автопилот (миграция без ручных шагов)
 
 ### Новые поля `accounts`

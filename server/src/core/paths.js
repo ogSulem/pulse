@@ -25,10 +25,18 @@ export const MEDIA_DIR = process.env.PULSE_MEDIA_DIR
   ? path.resolve(process.env.PULSE_MEDIA_DIR)
   : path.join(DATA_DIR, 'media');
 
+// Исходники для нарезки (фильмы, длинные видео) лежат ОТДЕЛЬНО от готовых
+// роликов: они не раздаются по /media (это чужие фильмы на гигабайты) и не
+// попадают в копию базы. Каталог внутри DATA_DIR, поэтому живёт на том же томе
+// и переживает перезапуск контейнера так же, как база.
+export const SOURCE_DIR = process.env.PULSE_SOURCE_DIR
+  ? path.resolve(process.env.PULSE_SOURCE_DIR)
+  : path.join(DATA_DIR, 'sources');
+
 /** Создаёт каталоги, без которых приложение не стартует. Возвращает фактические пути. */
 export function ensureDirs() {
-  for (const dir of [DATA_DIR, path.dirname(DB_PATH), MEDIA_DIR]) fs.mkdirSync(dir, { recursive: true });
-  return { DATA_DIR, DB_PATH, MEDIA_DIR };
+  for (const dir of [DATA_DIR, path.dirname(DB_PATH), MEDIA_DIR, SOURCE_DIR]) fs.mkdirSync(dir, { recursive: true });
+  return { DATA_DIR, DB_PATH, MEDIA_DIR, SOURCE_DIR };
 }
 
-export default { DATA_DIR, DB_PATH, MEDIA_DIR };
+export default { DATA_DIR, DB_PATH, MEDIA_DIR, SOURCE_DIR };

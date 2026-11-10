@@ -378,6 +378,70 @@ CREATE TABLE IF NOT EXISTS series_episodes (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ix_series_ep_no ON series_episodes(series_id, episode_no);
 CREATE INDEX IF NOT EXISTS ix_series_ep_stage ON series_episodes(stage);
+
+-- ── Нарезка из фильмов ─────────────────────────────────────────────────────
+-- Исходник (полнометражка, интервью, лекция) и клипы из него. Файл исходника
+-- лежит в DATA_DIR/sources и НЕ раздаётся по /media: это гигабайты, и они не
+-- должны ни кэшироваться браузером, ни попадать в бэкап базы. Готовые клипы —
+-- обычные mp4 в /media, то есть их сразу видит конвейер и плеер.
+CREATE TABLE IF NOT EXISTS movie_sources (
+  id              TEXT PRIMARY KEY,
+  title           TEXT DEFAULT '',
+  file_name       TEXT DEFAULT '',
+  file_path       TEXT NOT NULL DEFAULT '',
+  bytes           INTEGER DEFAULT 0,
+  duration_sec    REAL DEFAULT 0,
+  width           INTEGER DEFAULT 0,
+  height          INTEGER DEFAULT 0,
+  fps             REAL DEFAULT 0,
+  has_audio       INTEGER DEFAULT 0,
+  lang            TEXT DEFAULT '',
+  subtitle_path   TEXT,
+  subtitle_kind   TEXT,
+  subtitle_streams INTEGER DEFAULT 0,
+  rights          INTEGER DEFAULT 0,
+  status          TEXT DEFAULT 'new',
+  stage           TEXT DEFAULT '',
+  error           TEXT,
+  project_id      TEXT,
+  analysis        TEXT DEFAULT '{}',
+  candidates      INTEGER DEFAULT 0,
+  clips           INTEGER DEFAULT 0,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_movie_sources_status ON movie_sources(status, updated_at);
+CREATE INDEX IF NOT EXISTS ix_movie_sources_created ON movie_sources(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS movie_clips (
+  id              TEXT PRIMARY KEY,
+  source_id       TEXT NOT NULL REFERENCES movie_sources(id) ON DELETE CASCADE,
+  idx             INTEGER DEFAULT 1,
+  start_sec       REAL DEFAULT 0,
+  end_sec         REAL DEFAULT 0,
+  seconds         REAL DEFAULT 0,
+  title           TEXT DEFAULT '',
+  hook            TEXT DEFAULT '',
+  caption         TEXT DEFAULT '',
+  hashtags        TEXT DEFAULT '[]',
+  transcript      TEXT DEFAULT '',
+  reason          TEXT DEFAULT '',
+  score           REAL DEFAULT 0,
+  status          TEXT DEFAULT 'candidate',
+  video_path      TEXT,
+  video_bytes     INTEGER DEFAULT 0,
+  width           INTEGER DEFAULT 0,
+  height          INTEGER DEFAULT 0,
+  render_ms       INTEGER DEFAULT 0,
+  cover_paths     TEXT DEFAULT '{}',
+  episode_id      TEXT,
+  error           TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_movie_clips_no ON movie_clips(source_id, idx);
+CREATE INDEX IF NOT EXISTS ix_movie_clips_status ON movie_clips(status, updated_at);
+CREATE INDEX IF NOT EXISTS ix_movie_clips_source ON movie_clips(source_id, idx);
 `;
 
 // SQLite не умеет ADD COLUMN IF NOT EXISTS — добавляем колонки точечно.
@@ -514,6 +578,10 @@ export function migrate() {
   db.exec(SCHEMA);
   ensureColumns();
   migrateV2Settings();
+  // Новые настройки появляются на уже работающей базе: без этого ключи,
+  // добавленные в следующих версиях, существовали бы только после seed и
+  // «Настройки» на VPS оставались бы без половины переключателей.
+  ensureSettings();
 }
 
 export const nowIso = () => new Date().toISOString();
@@ -555,6 +623,13 @@ export const settingsDefaults = {
   series_auto_compose: '1',       // серии сочиняются заранее по арке сезона
   series_auto_render: '0',        // ...и собираются в видео автоматически (тяжело по CPU)
   series_lookahead: '3',          // сколько серий держим готовыми впереди
+
+  // ── нарезка из фильма: сколько кусков и какой длины ──────────────────────
+  clip_default_count: '5',        // сколько клипов готовим из одного фильма
+  clip_min_sec: '18',             // короче — не успеть зацепить, длиннее 45 — уже не шортс
+  clip_max_sec: '45',
+  clip_style: 'blur',             // blur — полный кадр + размытые поля, fill — обрезка по центру
+  clip_hook_sec: '4',             // сколько секунд держим крупный заголовок в начале
   cost_tts_1000: '20',            // озвучка длинной серии, ₽ за 1000 знаков (ElevenLabs ~$0.22/1000)
   cost_render_min: '6',           // рендер 16:9, ₽ за минуту готового видео
   conv_rate: '1.6',               // % кликов, которые становятся покупкой

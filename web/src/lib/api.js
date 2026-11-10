@@ -187,6 +187,56 @@ export const api = {
   aiTest: () => request('/ai/test', { method: 'POST', body: {} }),
   composeSeriesEpisodeAi: (id) => request(`/series/episodes/${id}/ai`, { method: 'POST', body: {} }),
 
+  // Нарезка из фильмов: исходник → разбор → клипы → очередь
+  movies: () => request('/movies'),
+  movieInfo: () => request('/movies/info'),
+  movie: (id) => request(`/movies/${id}`),
+  updateMovie: (id, payload) => request(`/movies/${id}`, { method: 'PATCH', body: payload }),
+  scanMovies: () => request('/movies/scan', { method: 'POST', body: {} }),
+  analyzeMovie: (id, count) => request(`/movies/${id}/analyze`, { method: 'POST', body: { count: count || null } }),
+  renderMovie: (id) => request(`/movies/${id}/render`, { method: 'POST', body: {} }),
+  renderClip: (id) => request(`/clips/${id}/render`, { method: 'POST', body: {} }),
+  queueMovie: (id, payload = {}) => request(`/movies/${id}/queue`, { method: 'POST', body: payload }),
+  deleteMovie: (id) => request(`/movies/${id}`, { method: 'DELETE' }),
+  deleteClip: (id) => request(`/clips/${id}`, { method: 'DELETE' }),
+  uploadSubtitles: async (id, text, name = 'subtitles.srt') => {
+    const token = getToken();
+    const res = await fetch(`/api/movies/${id}/subtitles?name=${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      credentials: 'same-origin',
+      body: text,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new HttpError(data.message || 'Не удалось приложить субтитры', res.status, data);
+    return data;
+  },
+  // Загрузка фильма: fetch не умеет прогресс отправки, поэтому XHR.
+  // Токен — заголовком, файл — телом; сервер пишет его сразу на диск.
+  uploadMovie: (file, { onProgress = null } = {}) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const token = getToken();
+    xhr.open('POST', `/api/movies/upload?name=${encodeURIComponent(file.name)}`);
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100), e.loaded, e.total);
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || '{}'); } catch { /* не JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
+      if (xhr.status === 401) {
+        setToken(null);
+        window.dispatchEvent(new CustomEvent('pulse:unauthorized'));
+      }
+      reject(new HttpError(data.message || `Ошибка загрузки (${xhr.status})`, xhr.status, data));
+    };
+    xhr.onerror = () => reject(new HttpError('Соединение прервалось: файл не загружен', 0));
+    xhr.onabort = () => reject(new HttpError('Загрузка отменена', 0));
+    xhr.send(file);
+  }),
+
   // Сериалы: библия → сезон → серия → озвучка → сборка → публикация
   seriesOverview: () => request('/series'),
   seriesGenres: () => request('/series/genres'),
