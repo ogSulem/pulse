@@ -105,7 +105,11 @@ const LOG_SEED = [
 function truncateAll() {
   // Порядок важен: сначала зависимые таблицы. Сериалы и их серии забывались —
   // каждый `npm run seed` оставлял ещё одну «Мёртвую станцию» в базе.
-  const tables = ['series_episodes', 'series', 'campaign_posts', 'campaigns', 'brands', 'metrics_daily', 'conversions', 'clicks', 'publications', 'episodes', 'scripts', 'ideas', 'products', 'accounts', 'projects', 'jobs', 'logs', 'accounts_daily'];
+  // Клипы нарезки — тоже демо-состояние: их эпизоды удаляются вместе с
+  // остальными, а строки без исходников оставлять нельзя (в панели появился бы
+  // фильм, файла которого уже нет). Сами файлы в data/sources не трогаем:
+  // «Найти на сервере» зарегистрирует их снова.
+  const tables = ['movie_clips', 'movie_sources', 'series_episodes', 'series', 'campaign_posts', 'campaigns', 'brands', 'metrics_daily', 'conversions', 'clicks', 'publications', 'episodes', 'scripts', 'ideas', 'products', 'accounts', 'projects', 'jobs', 'logs', 'accounts_daily'];
   for (const t of tables) db.prepare(`DELETE FROM ${t}`).run();
 }
 

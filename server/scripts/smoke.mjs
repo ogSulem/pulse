@@ -1870,6 +1870,210 @@ try {
   ok('трафик: 304 и пауза опроса', 'GET-ответы переспрашиваются, в скрытой вкладке запросов нет');
 } catch (err) { fail('трафик: 304 и пауза опроса', err); }
 
+// ── нарезка из фильма (v20) ─────────────────────────────────────────────────
+try {
+  const { db } = await import('../src/core/db.js');
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('movie_sources','movie_clips')").all();
+  if (tables.length !== 2) throw new Error(`таблиц нарезки: ${tables.length}`);
+  const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'ix_movie_%'").all().length;
+  if (indexes < 3) throw new Error(`индексов: ${indexes}`);
+  ok('нарезка: таблицы и индексы', `${tables.length} таблицы, ${indexes} индекса`);
+} catch (err) { fail('нарезка: таблицы и индексы', err); }
+
+try {
+  const { parseSubtitles, buildCandidates } = await import('../src/engine/movie.js');
+  const srt = `1
+00:00:12,500 --> 00:00:15,000
+<i>Привет!</i> Ты кто такой?
+
+2
+00:00:15,200 --> 00:00:18,900
+Я тот, кто тебя искал.
+
+3
+00:00:19,000 --> 00:00:19,400
+{\an8}—`;
+
+  const vtt = `WEBVTT
+
+00:00:05.000 --> 00:00:07.500
+- Реплика первая
+- Реплика вторая
+
+00:00:08.000 --> 00:00:10.000
+Вторая строка`;
+  const cues = parseSubtitles(srt);
+  const vttCues = parseSubtitles(vtt);
+  if (cues.length !== 3) throw new Error(`SRT: реплик ${cues.length}, ожидалось 3`);
+  if (cues[0].text !== 'Привет! Ты кто такой?') throw new Error(`теги не убраны: «${cues[0].text}»`);
+  if (Math.abs(cues[0].start - 12.5) > 0.001) throw new Error(`время SRT: ${cues[0].start}`);
+  if (vttCues.length !== 2) throw new Error(`VTT: реплик ${vttCues.length}`);
+  ok('нарезка: субтитры SRT и VTT', `${cues.length}+${vttCues.length} реплики, теги и точки с запятой разобраны`);
+
+  const cands = buildCandidates({
+    duration: 5400, cues,
+    scenes: [40, 90, 140, 300, 620, 900, 1500, 2100, 3300, 4100],
+    silences: [{ start: 30, end: 31 }, { start: 88, end: 90 }, { start: 1499, end: 1501 }],
+    minSec: 18, maxSec: 45, limit: 5,
+  });
+  if (!cands.length) throw new Error('кандидатов нет');
+  if (cands.some((c) => c.end_sec > 5400 || c.start_sec < 0)) throw new Error('окно выходит за фильм');
+  if (cands.some((c) => c.seconds < 12 || c.seconds > 50)) throw new Error('длина окна вне диапазона');
+  if (cands.some((c) => !c.reason)) throw new Error('нет объяснения выбора');
+  const starts = cands.map((c) => c.start_sec).sort((a, b) => a - b);
+  const gaps = starts.slice(1).map((t, i) => t - starts[i]);
+  if (gaps.some((g) => g < 20)) throw new Error(`окна идут вплотную: ${gaps.join(', ')}`);
+  ok('нарезка: выбор моментов', `${cands.length} фрагментов, разнос ${Math.min(...gaps)}–${Math.max(...gaps)} с, у каждого причина`);
+} catch (err) { fail('нарезка: выбор моментов', err); }
+
+try {
+  // Очередь больше не блокируется: тяжёлые задачи разных типов идут параллельно,
+  // а drain без wait отдаёт управление сразу (планировщик не ждёт рендер).
+  const { db } = await import('../src/core/db.js');
+  const { registerHandler, enqueue, drain } = await import('../src/core/queue.js');
+  db.prepare("UPDATE jobs SET status = 'done' WHERE status IN ('pending','running')").run();
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  registerHandler('smoke.analyze', async () => { await sleep(350); });
+  registerHandler('smoke.render', async () => { await sleep(350); });
+  const a = enqueue('smoke.analyze', {});
+  const b = enqueue('smoke.render', {});
+  const started = Date.now();
+  await drain(8, { wait: false });
+  const took = Date.now() - started;
+  if (took > 250) throw new Error(`drain без wait ждал ${took} мс`);
+  let done = 0;
+  for (let i = 0; i < 24; i++) {
+    await sleep(150);
+    const row = db.prepare("SELECT COUNT(*) n FROM jobs WHERE id IN (?, ?) AND status = 'done'").get(a, b);
+    done = row.n;
+    if (done === 2) break;
+  }
+  if (done !== 2) throw new Error(`параллельно выполнилось ${done} из 2 задач`);
+  ok('очередь: параллельные задачи', `drain вернулся за ${took} мс, оба тяжёлых типа выполнились`);
+} catch (err) { fail('очередь: параллельные задачи', err); }
+
+try {
+  // Уборка не должна забирать файл у ролика, который ещё не опубликован.
+  const { db, nowIso } = await import('../src/core/db.js');
+  const { pruneMedia } = await import('../src/engine/housekeeping.js');
+  const media = process.env.PULSE_MEDIA_DIR;
+  const old = new Date(Date.now() - 5 * 86400000);
+  const scheduled = path.join(media, 'smoke-scheduled.mp4');
+  const junk = path.join(media, 'smoke-junk.mp4');
+  fs.writeFileSync(scheduled, Buffer.alloc(2048));
+  fs.writeFileSync(junk, Buffer.alloc(2048));
+  fs.utimesSync(scheduled, old, old);
+  fs.utimesSync(junk, old, old);
+  const ts = nowIso();
+  const pid = 'pr_smoke_prune';
+  db.prepare(`INSERT INTO projects (id, name, niche, autopilot, posts_per_day, created_at, updated_at)
+    VALUES (?, 'SmokePrune', 'тест', 1, 1, ?, ?)`).run(pid, ts, ts);
+  const epId = 'ep_smoke_prune';
+  db.prepare(`INSERT INTO episodes (id, project_id, title, status, stage, video_path, progress, risk, attempts, autopilot, ab_test, created_at, updated_at)
+    VALUES (?, ?, 'Запланированный', 'scheduled', 'ready', '/media/smoke-scheduled.mp4', 100, 0, 0, 1, 0, ?, ?)`).run(epId, pid, ts, ts);
+  pruneMedia({ days: 1 });
+  if (!fs.existsSync(scheduled)) throw new Error('уборка удалила файл запланированного ролика');
+  if (fs.existsSync(junk)) throw new Error('уборка не удалила никому не нужный файл');
+  db.prepare('DELETE FROM episodes WHERE id = ?').run(epId);
+  db.prepare('DELETE FROM projects WHERE id = ?').run(pid);
+  fs.rmSync(scheduled, { force: true });
+  ok('уборка: запланированное защищено', 'файл ролика из расписания остался, мусор удалён');
+} catch (err) { fail('уборка: запланированное защищено', err); }
+
+try {
+  // Полный путь на реальном файле: разбор → вертикальный клип → очередь.
+  const { spawnSync } = await import('node:child_process');
+  const { resolveFfmpeg } = await import('../src/core/ffmpeg.js');
+  const { clipRenderInfo } = await import('../src/engine/movierender.js');
+  const ffmpeg = resolveFfmpeg();
+  const render = clipRenderInfo();
+  if (!ffmpeg || !render.available) {
+    ok('нарезка: разбор и клип', 'пропущено: нет ffmpeg или sharp на этой машине');
+  } else {
+    const { db, setSettings, nowIso } = await import('../src/core/db.js');
+    const movie = await import('../src/engine/movie.js');
+    const { drain } = await import('../src/core/queue.js');
+    const { SOURCE_DIR } = await import('../src/core/paths.js');
+    setSettings({ clip_default_count: '2', clip_min_sec: '10', clip_max_sec: '14' });
+    fs.mkdirSync(SOURCE_DIR, { recursive: true });
+    const srcFile = path.join(SOURCE_DIR, 'smoke-movie.mp4');
+    const gen = spawnSync(ffmpeg, [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=15:duration=40',
+      '-f', 'lavfi', '-i', 'sine=frequency=420:duration=40',
+      '-af', "volume=enable='between(t,12,18)':volume=0",
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-shortest', srcFile,
+    ], { encoding: 'utf8', timeout: 120000 });
+    if (gen.status !== 0) throw new Error(`не удалось создать тестовое видео: ${(gen.stderr || '').slice(-200)}`);
+
+    const added = movie.scanSourceFolder();
+    if (!added.length) throw new Error('исходник не зарегистрирован');
+    const sourceId = added[0].id;
+    // чужие долгие задачи (рендеры демо-роликов) не должны растягивать тест:
+    // их место в очереди занимает наш разбор
+    db.prepare("UPDATE jobs SET status = 'done' WHERE status = 'pending'").run();
+    movie.startAnalyze(sourceId, { count: 2 });
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let view = null;
+    for (let i = 0; i < 60; i++) {
+      await drain(8, { wait: false });
+      view = movie.getSourceView(sourceId);
+      if (view.status !== 'analyzing') break;
+      await sleep(500);
+    }
+    if (!view || view.status !== 'analyzed') throw new Error(`разбор: ${view?.status} ${view?.error || ''}`);
+    if (Math.abs(view.duration - 40) > 2) throw new Error(`длительность определена как ${view.duration}`);
+    if (!view.hasAudio) throw new Error('звуковая дорожка не найдена');
+    if (!view.clips.length) throw new Error('клипы не созданы');
+    if (view.clips.some((c) => c.end > view.duration + 0.5)) throw new Error('клип выходит за конец файла');
+
+    const clip = view.clips[0];
+    movie.startRenderClip(clip.id);
+    let rendered = null;
+    for (let i = 0; i < 120; i++) {
+      await drain(8, { wait: false });
+      rendered = movie.getSourceView(sourceId).clips.find((c) => c.id === clip.id);
+      if (rendered.status === 'ready' || rendered.status === 'failed') break;
+      await sleep(500);
+    }
+    if (rendered.status !== 'ready') throw new Error(`сборка клипа: ${rendered.status} ${rendered.error || ''}`);
+    const abs = path.join(process.env.PULSE_MEDIA_DIR, path.basename(rendered.videoPath));
+    if (!fs.existsSync(abs)) throw new Error('файл клипа не создан');
+    const stat = fs.statSync(abs);
+    if (stat.size < 40_000) throw new Error(`клип слишком мал: ${stat.size} байт`);
+    if (rendered.width !== 1080 || rendered.height !== 1920) throw new Error(`кадр ${rendered.width}×${rendered.height}`);
+    if (!rendered.coverPaths.A || !fs.existsSync(path.join(process.env.PULSE_MEDIA_DIR, path.basename(rendered.coverPaths.A)))) {
+      throw new Error('обложка A не создана');
+    }
+    ok('нарезка: вертикальный клип', `${Math.round(rendered.seconds)} с, ${(stat.size / 1048576).toFixed(1)} МБ, 1080×1920, обложки A/B`);
+
+    // клип → очередь: эпизод создаётся готовым, без сценария и повторного рендера
+    const suite = db.prepare('SELECT id FROM projects ORDER BY created_at LIMIT 1').get();
+    db.prepare('UPDATE movie_sources SET project_id = ? WHERE id = ?').run(suite.id, sourceId);
+    const created = movie.queueClips(sourceId, {
+      count: 1, startAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    if (created.length !== 1) throw new Error(`в очередь попало ${created.length} клипов`);
+    const ep = db.prepare('SELECT * FROM episodes WHERE id = ?').get(created[0].episodeId);
+    if (ep.status !== 'scheduled' || ep.stage !== 'ready') throw new Error(`эпизод: ${ep.status}/${ep.stage}`);
+    if (ep.video_path !== rendered.videoPath) throw new Error('в эпизод не попал файл клипа');
+    if (!String(ep.creative).includes('"source":"movie"')) throw new Error('источник клипа не записан в креатив');
+    if (!fs.existsSync(path.join(process.env.PULSE_MEDIA_DIR, path.basename(ep.video_path)))) throw new Error('файл клипа для публикации недоступен');
+    if (!ep.description || !ep.hashtags) throw new Error('нет описания или хэштегов');
+    const prepareJobs = db.prepare("SELECT COUNT(*) n FROM jobs WHERE type = 'episode.prepare' AND payload LIKE ?").get(`%${ep.id}%`).n;
+    if (prepareJobs) throw new Error('клип заново ушёл в генерацию сценария');
+    const { sweepDueEpisodes } = await import('../src/engine/pipeline.js');
+    sweepDueEpisodes();
+    const publish = db.prepare("SELECT status FROM jobs WHERE type = 'episode.publish' AND payload LIKE ?").get(`%${ep.id}%`);
+    if (!publish) throw new Error('публикация клипа не поставлена в очередь');
+    ok('нарезка: клип в очереди', `эпизод «${ep.title.slice(0, 30)}…» ждёт публикации, сценарий не пересоздавался`);
+    db.prepare('DELETE FROM movie_clips WHERE source_id = ?').run(sourceId);
+    db.prepare('DELETE FROM movie_sources WHERE id = ?').run(sourceId);
+    fs.rmSync(srcFile, { force: true });
+  }
+} catch (err) { fail('нарезка: вертикальный клип', err); }
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ── отчёт ───────────────────────────────────────────────────────────────────

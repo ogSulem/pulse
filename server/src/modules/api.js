@@ -32,6 +32,10 @@ import {
   refreshSeriesMetrics, pushCutsToQueue, scheduleEpisode,
 } from '../engine/series.js';
 import { buildEpisode } from '../engine/serial.js';
+import {
+  listSources, getSourceView, movieInfo, saveUpload, scanSourceFolder, startAnalyze,
+  attachSubtitle, startRenderClip, renderSourceClips, queueClips, deleteClip, deleteSource,
+} from '../engine/movie.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkPassword, issueToken, verifyToken, tokenFromRequest, sessionCookie, clearCookie, SESSION_COOKIE } from './auth.js';
@@ -2269,6 +2273,131 @@ api.get('/series/:id/economics', (req, res) => {
     res.json(seriesEconomicsView(req.params.id, { targetRub: num(req.query.targetRub, 50000) }));
   } catch (err) {
     res.status(400).json({ error: 'economics_failed', message: String(err.message || err) });
+  }
+});
+
+// ─── Нарезка из фильмов ────────────────────────────────────────────────────
+// Исходник кладётся в DATA_DIR/sources и не раздаётся по /media: это чужие
+// гигабайты, им нечего делать в кэше браузера. Готовые клипы — обычные mp4
+// в /media, поэтому их сразу видят плеер, очередь и публикация.
+
+api.get('/movies', (_req, res) => {
+  res.json(listSources());
+});
+
+api.get('/movies/info', (_req, res) => {
+  res.json(movieInfo());
+});
+
+// Загрузка потоком: тело запроса не парсится в память (2 ГБ фильма не влезут
+// ни в один JSON-лимит), а сразу пишется на диск с подсчётом байтов.
+api.post('/movies/upload', async (req, res) => {
+  try {
+    const name = String(req.query.name || req.headers['x-file-name'] || 'video.mp4');
+    const source = await saveUpload(req, {
+      name,
+      title: req.query.title ? String(req.query.title) : '',
+      projectId: req.query.projectId ? String(req.query.projectId) : null,
+      rights: req.query.rights !== '0',
+    });
+    res.status(201).json(getSourceView(source.id));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: 'upload_failed', message: String(err.message || err) });
+  }
+});
+
+// Файлы, скопированные на сервер напрямую (scp/rsync/docker cp) — тот же путь,
+// что и загрузка, но без браузера: на VPS это быстрее в разы.
+api.post('/movies/scan', (_req, res) => {
+  try {
+    const added = scanSourceFolder();
+    res.json({ added: added.length, addedIds: added.map((s) => s.id), ...listSources() });
+  } catch (err) {
+    res.status(400).json({ error: 'scan_failed', message: String(err.message || err) });
+  }
+});
+
+api.get('/movies/:id', (req, res) => {
+  const view = getSourceView(req.params.id);
+  if (!view) return res.status(404).json({ error: 'not_found', message: 'Исходник не найден' });
+  res.json(view);
+});
+
+api.patch('/movies/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM movie_sources WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not_found', message: 'Исходник не найден' });
+  const title = req.body?.title != null ? String(req.body.title).slice(0, 160) : row.title;
+  const projectId = req.body?.projectId !== undefined ? (req.body.projectId || null) : row.project_id;
+  db.prepare('UPDATE movie_sources SET title = ?, project_id = ?, updated_at = ? WHERE id = ?')
+    .run(title, projectId, nowIso(), row.id);
+  res.json(getSourceView(row.id));
+});
+
+api.post('/movies/:id/analyze', (req, res) => {
+  try {
+    const row = startAnalyze(req.params.id, { count: req.body?.count ? num(req.body.count, 5) : null });
+    res.json({ ok: true, source: getSourceView(row.id) });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: 'analyze_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/movies/:id/subtitles', express.text({ type: () => true, limit: '8mb' }), (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : '';
+    if (!text.trim()) return res.status(400).json({ error: 'empty', message: 'Пустой файл субтитров' });
+    const out = attachSubtitle(req.params.id, text, { fileName: String(req.query.name || 'subtitles.srt') });
+    res.json({ ok: true, ...out, source: getSourceView(req.params.id) });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: 'subtitles_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/movies/:id/render', (req, res) => {
+  try {
+    const out = req.body?.clipId ? { queued: 1, clips: [startRenderClip(req.body.clipId).id] } : renderSourceClips(req.params.id);
+    res.json({ ok: true, ...out });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: 'render_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/movies/:id/queue', (req, res) => {
+  try {
+    const created = queueClips(req.params.id, {
+      count: req.body?.count ? num(req.body.count, 5) : null,
+      clipIds: Array.isArray(req.body?.clipIds) ? req.body.clipIds : null,
+      platform: req.body?.platform || null,
+      startAt: req.body?.startAt || null,
+    });
+    res.status(201).json({ ok: true, queued: created.length, episodes: created, source: getSourceView(req.params.id) });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: 'queue_failed', message: String(err.message || err) });
+  }
+});
+
+api.delete('/movies/:id', (req, res) => {
+  try {
+    deleteSource(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: 'delete_failed', message: String(err.message || err) });
+  }
+});
+
+api.post('/clips/:id/render', (req, res) => {
+  try {
+    res.json({ ok: true, clip: startRenderClip(req.params.id).id });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: 'render_failed', message: String(err.message || err) });
+  }
+});
+
+api.delete('/clips/:id', (req, res) => {
+  try {
+    res.json(deleteClip(req.params.id));
+  } catch (err) {
+    res.status(err.status || 400).json({ error: 'delete_failed', message: String(err.message || err) });
   }
 });
 

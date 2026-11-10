@@ -10,7 +10,9 @@ import { drain, jobStats, recoverStale, recoverOrphans, cleanupJobs } from './co
 import { log } from './core/logger.js';
 import { seedIfEmpty } from './seed/seed.js';
 import './engine/pipeline.js'; // регистрирует обработчики конвейера
+import './engine/movie.js'; // нарезка из фильмов: обработчики movie.analyze / movie.render
 import { collectAnalytics, sweepDueEpisodes, recoverEpisodeStates } from './engine/pipeline.js';
+import { recoverSourceStates } from './engine/movie.js';
 import { refreshSeriesMetrics, sweepDueSeriesEpisodes, seriesAutopilot } from './engine/series.js';
 import { enqueue } from './core/queue.js';
 import { recordClick, simulateTraffic } from './engine/money.js';
@@ -178,7 +180,7 @@ async function work() {
   if (working) return;
   working = true;
   try {
-    await drain(4);
+    await drain(4, { wait: false });
   } catch (err) {
     log({ level: 'warn', actor: 'worker', action: 'worker.error', message: String(err?.message || err) });
   } finally {
@@ -218,6 +220,7 @@ async function tick() {
       globalThis.__lastRecover = Date.now();
       recoverStale();
       recoverEpisodeStates();
+      recoverSourceStates();
     }
   } catch (err) {
     log({ level: 'error', actor: 'scheduler', action: 'scheduler.error', message: String(err.message || err) });

@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { db, nowIso } from '../core/db.js';
-import { DATA_DIR, MEDIA_DIR } from '../core/paths.js';
+import { DATA_DIR, MEDIA_DIR, SOURCE_DIR } from '../core/paths.js';
 import { log } from '../core/logger.js';
 import { cleanupJobs } from '../core/queue.js';
 
@@ -148,8 +148,12 @@ export function storageUsage() {
     ...by('tmp').filter((f) => f.mtime < Date.now() - TMP_MAX_AGE_MS),
   ];
   const cache = dirStats(CACHE_DIR);
+  // исходники для нарезки не удаляются автоматически (это собственные фильмы
+  // владельца), поэтому их размер важно видеть: он не «уйдёт сам»
+  const sources = dirStats(path.join(SOURCE_DIR));
   return {
     dir: MEDIA_DIR,
+    sources,
     files: files.length,
     bytes: sumBytes(files),
     videos: by('video').length,
@@ -203,6 +207,41 @@ function markPrunedEpisodes() {
 }
 
 /**
+ * Файлы, которые нельзя удалять по возрасту.
+ *
+ * Раньше уборка смотрела только на mtime: ролик, поставленный в расписание на
+ * три недели вперёд, терял файл за неделю до публикации и уходил в «review» с
+ * ошибкой «нет файла». Теперь всё, что ещё не опубликовано (очередь, расписание,
+ * проверка), а также готовые клипы нарезки защищены от уборки.
+ */
+function protectedFiles() {
+  const names = new Set();
+  const add = (filePath) => {
+    if (!filePath) return;
+    names.add(path.basename(String(filePath)));
+  };
+  try {
+    const rows = db.prepare(
+      "SELECT video_path, cover_paths FROM episodes WHERE status IN ('queued','generating','review','scheduled')"
+    ).all();
+    for (const row of rows) {
+      add(row.video_path);
+      for (const cover of Object.values(JSON.parse(row.cover_paths || '{}') || {})) add(cover);
+    }
+  } catch { /* старая база — работаем без защиты */ }
+  try {
+    for (const row of db.prepare("SELECT video_path, cover_paths FROM movie_clips WHERE status IN ('candidate','rendering','ready','queued')").all()) {
+      add(row.video_path);
+      for (const cover of Object.values(JSON.parse(row.cover_paths || '{}') || {})) add(cover);
+    }
+  } catch { /* таблицы нарезки ещё нет */ }
+  try {
+    for (const row of db.prepare("SELECT video_path FROM series_episodes WHERE stage IN ('voice','render','review','scheduled')").all()) add(row.video_path);
+  } catch { /* нет таблицы */ }
+  return names;
+}
+
+/**
  * Уборка медиа. `days` перекрывает порог для роликов и обложек, кадры и кэш
  * живут по своим срокам. `dryRun` только считает.
  */
@@ -211,11 +250,13 @@ export function pruneMedia({ days = null, dryRun = false, includeAll = false } =
   const files = walk(MEDIA_DIR);
   const olderThan = (list, d) => list.filter((f) => f.mtime < Date.now() - d * 86400000);
 
+  const keep = protectedFiles();
+  const guarded = (list) => list.filter((f) => !keep.has(path.basename(f.path)));
   const targets = includeAll
-    ? files.filter((f) => f.kind !== 'tmp')
+    ? guarded(files.filter((f) => f.kind !== 'tmp'))
     : [
-        ...olderThan(files.filter((f) => f.kind === 'video' || f.kind === 'image'), keepDays),
-        ...olderThan(files.filter((f) => f.kind === 'frame'), frameRetentionDays()),
+        ...guarded(olderThan(files.filter((f) => f.kind === 'video' || f.kind === 'image'), keepDays)),
+        ...guarded(olderThan(files.filter((f) => f.kind === 'frame'), frameRetentionDays())),
         ...olderThan(files.filter((f) => f.kind === 'tmp'), TMP_MAX_AGE_MS / 86400000),
       ];
 
@@ -228,7 +269,12 @@ export function pruneMedia({ days = null, dryRun = false, includeAll = false } =
 
 /** Брошенные рабочие каталоги после падений: иначе они лежат годами. */
 export function cleanupTemp({ dryRun = false } = {}) {
-  const files = walk(TMP_DIR).filter((f) => f.mtime < Date.now() - TMP_MAX_AGE_MS);
+  // рабочие каталоги нарезки лежат отдельно от media/tmp: там mp3-окна для
+  // распознавания речи, они не нужны после разбора
+  const files = [
+    ...walk(TMP_DIR),
+    ...walk(path.join(SOURCE_DIR, 'tmp')),
+  ].filter((f) => f.mtime < Date.now() - TMP_MAX_AGE_MS);
   const acc = { removed: 0, freedBytes: 0 };
   removeFiles(files, dryRun, acc);
   // пустые каталоги от прерванных рендеров

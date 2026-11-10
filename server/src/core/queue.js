@@ -120,28 +120,89 @@ function withTimeout(promise, ms, type) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-export async function drain(limit = 8) {
+// ── Параллельность ──────────────────────────────────────────────────────────
+// Раньше drain обрабатывал задачи строго по одной. Из-за этого разбор
+// двухчасового фильма (десятки минут декодирования) блокировал вообще всё:
+// аналитика, автопилот и публикации ждали, пока освободится ffmpeg. Со стороны
+// это выглядело как «платформа зависла».
+//
+// Теперь: лёгкие задачи (подготовка, публикация, аналитика) идут параллельно
+// друг с другом, тяжёлые (рендер, разбор, озвучка) — не больше
+// PULSE_HEAVY_CONCURRENCY одновременно (по умолчанию 2: на одном vCPU они
+// поделят ядро, но оба будут двигаться, а на двух и более — ускорятся).
+const HEAVY = Math.max(1, Math.min(4, Number(process.env.PULSE_HEAVY_CONCURRENCY) || 2));
+const isHeavy = (type) => /(^|\.)(render|analyze|voice|footage|cuts)$/.test(String(type || ''));
+
+const active = new Map();
+const background = new Set();
+let heavyActive = 0;
+
+// Одна задача одного типа за раз (два рендера одного вида на одном ядре только
+// мешают друг другу) и не больше HEAVY тяжёлых суммарно. Так разбор фильма
+// может идти одновременно с рендером ролика, но оба не вытесняют аналитику.
+const hasSlot = (type) => {
+  if ((active.get(`type:${type}`) || 0) > 0) return false;
+  return !isHeavy(type) || heavyActive < HEAVY;
+};
+const takeSlot = (type) => {
+  active.set(`type:${type}`, 1);
+  if (isHeavy(type)) heavyActive += 1;
+};
+const freeSlot = (type) => {
+  active.delete(`type:${type}`);
+  if (isHeavy(type)) heavyActive = Math.max(0, heavyActive - 1);
+};
+
+/**
+ * Вернуть захваченную, но не запущенную задачу в очередь без потери попытки.
+ * Пауза в 2 секунды: иначе задача «захват → нет слота → вернуть» крутится
+ * каждые 2.5 секунды и зря пишет в базу.
+ */
+function release(job) {
+  const at = new Date(Date.now() + 2000).toISOString();
+  db.prepare("UPDATE jobs SET status = 'pending', attempts = MAX(0, attempts - 1), lease_until = NULL, run_after = ?, updated_at = ? WHERE id = ? AND status = 'running'")
+    .run(at, nowIso(), job.id);
+}
+
+export async function drain(limit = 8, { wait = true } = {}) {
   // Перед работой возвращаем в очередь задачи, у которых истёк lease: иначе
   // ролик навсегда застревает в «генерации», а очередь выглядит пустой.
   recoverStale();
   const jobs = claimDue(limit);
+  const started = [];
   for (const job of jobs) {
     const handler = HANDLERS.get(job.type);
     if (!handler) {
       fail(job, new Error(`Нет обработчика для ${job.type}`));
       continue;
     }
-    try {
-      // Зависший обработчик не должен держать очередь вечно: по истечении
-      // лимита задача падает в повтор, а lease освобождается.
-      const limitMs = num(process.env.PULSE_JOB_TIMEOUT_SEC, 420) * 1000;
-      await withTimeout(handler(parseJson(job.payload, {}), job), limitMs, job.type);
-      ack(job);
-    } catch (err) {
-      fail(job, err);
+    // занятый тип не запускаем повторно: задача вернётся в очередь и её
+    // подхватит следующий проход, а не будет ждать в памяти
+    if (!hasSlot(job.type)) {
+      release(job);
+      continue;
     }
+    takeSlot(job.type);
+    // Зависший обработчик не должен держать очередь вечно: по истечении
+    // лимита задача падает в повтор, а lease освобождается.
+    const limitMs = num(process.env.PULSE_JOB_TIMEOUT_SEC, 420) * 1000;
+    const task = Promise.resolve()
+      .then(() => withTimeout(handler(parseJson(job.payload, {}), job), limitMs, job.type))
+      .then(() => ack(job), (err) => fail(job, err))
+      .finally(() => freeSlot(job.type));
+    started.push(task);
   }
-  return jobs.length;
+  if (!wait) {
+    // планировщику ждать нечего: он вернётся через пару секунд и заберёт новые
+    // задачи, а запущенные продолжат работу в фоне
+    for (const task of started) {
+      background.add(task);
+      task.finally(() => background.delete(task));
+    }
+    return started.length;
+  }
+  await Promise.all(started);
+  return started.length;
 }
 
 // Держим таблицу задач компактной. Выполненные и упавшие старше 3 дней не нужны

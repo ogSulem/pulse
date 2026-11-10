@@ -10,6 +10,7 @@ import Studio from './pages/Studio.jsx';
 import Queue from './pages/Queue.jsx';
 import Calendar from './pages/Calendar.jsx';
 import Series from './pages/Series.jsx';
+import Clips from './pages/Clips.jsx';
 import Projects from './pages/Projects.jsx';
 import Analytics from './pages/Analytics.jsx';
 import Money from './pages/Money.jsx';
@@ -32,6 +33,7 @@ const ROUTE_TITLES = {
   'create/studio': ['Студия', 'Запуск: каналы, темы, продукты, ИИ и автопилот'],
   'create/queue': ['Очередь роликов', 'Каждый этап, статус и ручные правки'],
   'create/calendar': ['Расписание', 'Слоты по аккаунтам и площадкам'],
+  'create/clips': ['Нарезка из фильма', 'ИИ находит моменты, вертикальные клипы и график'],
   'create/series': ['Сериалы', 'Длинные истории: библия, сезон, фото-ряд, мид-роллы'],
   'create/themes': ['Темы и идеи', 'Ниша, продукт и генерация идей'],
   'channels/growth': ['Рост и охваты', 'Алгоритмы площадок, хуки, удержание, монетизация'],
@@ -109,6 +111,7 @@ function Shell({ data, refresh, refreshLight, loading }) {
     'create/studio': <Studio />,
     'create/queue': <Queue onLaunch={() => setLaunch(true)} />,
     'create/calendar': <Calendar />,
+    'create/clips': <Clips />,
     'create/series': <Series />,
     'create/themes': <Projects />,
     'channels/growth': <Growth />,

@@ -1260,3 +1260,53 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .mobile-bar { position: static; }
   .main { padding-bottom: 24px; }
 }
+
+/* ── Нарезка из фильма ───────────────────────────────────────────────────────
+   Карточка клипа — вертикальный постер 9:16: так сразу видно, что получится
+   на телефоне, без открытия плеера. Всё остальное — обычные карточки панели. */
+.clip-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+.clip-step { display: flex; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
+.clip-step-n { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; flex: none;
+  font-size: 12px; font-weight: 750; color: #fff; background: linear-gradient(135deg, var(--violet), var(--violet-deep)); }
+.clip-step-title { font-size: 12.5px; font-weight: 650; }
+.clip-step-hint { font-size: 11px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+
+.drop-zone { display: flex; gap: 14px; align-items: flex-start; padding: 18px; border-style: dashed; border-color: rgba(167, 139, 250, .32); }
+.drop-zone:hover { border-color: rgba(167, 139, 250, .5); }
+.drop-icon { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; flex: none;
+  background: rgba(124, 58, 237, .18); color: var(--violet-2); border: 1px solid rgba(167, 139, 250, .22); }
+
+.source-row { display: flex; align-items: center; gap: 12px; text-align: left; width: 100%;
+  padding: 11px 13px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-2);
+  color: var(--text); cursor: pointer; transition: border-color .15s, background .15s; }
+.source-row:hover { border-color: var(--line-strong); }
+.source-row.is-active { border-color: rgba(167, 139, 250, .55); background: rgba(139, 92, 246, .1); }
+.source-main { min-width: 0; flex: 1; }
+.source-title { font-size: 12.5px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted);
+  margin-top: 4px; font-variant-numeric: tabular-nums; }
+.source-meta span { display: inline-flex; align-items: center; gap: 4px; }
+
+.clip-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+/* на телефоне — сетка как в Reels: два вертикальных клипа в ряд, а не один
+   на весь экран (иначе один постер занимает почти всю высоту) */
+@media (max-width: 700px) { .clip-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } .clip-body { padding: 9px 10px 10px; } }
+.clip-card { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--surface-2); overflow: hidden; }
+.clip-card.is-queued { border-color: rgba(52, 211, 153, .35); }
+.clip-poster { position: relative; aspect-ratio: 9 / 16; background: #08060d; display: grid; place-items: center; overflow: hidden; }
+.clip-poster video, .clip-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.clip-poster-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.clip-poster-top { position: absolute; top: 8px; left: 8px; right: 8px; display: flex; align-items: center;
+  justify-content: space-between; gap: 6px; }
+.clip-time { font-size: 10.5px; font-weight: 700; padding: 3px 7px; border-radius: 7px;
+  background: rgba(0, 0, 0, .58); color: #fff; font-variant-numeric: tabular-nums; }
+.clip-poster-progress { position: absolute; left: 10px; right: 10px; bottom: 10px; }
+.clip-body { display: flex; flex-direction: column; gap: 6px; padding: 11px 12px 12px; }
+.clip-title { font-size: 12.5px; font-weight: 650; line-height: 1.4; }
+.clip-hook { font-size: 11px; color: var(--violet-3); line-height: 1.45; }
+.clip-text { font-size: 11px; color: var(--muted); line-height: 1.5; }
+.clip-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+.clip-reason { font-size: 10px; color: var(--muted); line-height: 1.45; border-top: 1px dashed var(--line); padding-top: 6px; }
+.clip-error { font-size: 10.5px; color: #fda4af; line-height: 1.45; }
+.clip-actions { display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }

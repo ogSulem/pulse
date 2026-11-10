@@ -12,4 +12,6 @@ data/first-login.txt
 .DS_Store
 web/.vite/
 data/media/
+# исходники для нарезки: гигабайты видео, не место в git
+data/sources/
 .pr-body.md
